@@ -15,6 +15,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -42,9 +45,10 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.extractor.metadata.id3.ChapterFrame
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
-data class AudioTrack(val name: String, val uri: Uri)
+data class AudioTrack(val name: String, val author: String, val title: String, val uri: Uri)
 data class Chapter(val title: String, val startMs: Long)
 data class Bookmark(val id: Long, val trackName: String, val timestampMs: Long, val label: String)
 
@@ -67,7 +71,7 @@ class MainActivity : ComponentActivity() {
                     onPrimary = Color.Black,
                     secondary = Color(0xFF4DB6AC),
                     secondaryContainer = Color(0xFF2C2C30),
-                    tertiary = Color(0xFFEF5350)
+                    tertiary = Color(0xFFE53935)
                 )
             ) {
                 Surface(
@@ -87,17 +91,32 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
     val context = LocalContext.current
-    var selectedTab by remember { mutableIntStateOf(0) }
+    val coroutineScope = rememberCoroutineScope()
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+
     var tracks by remember { mutableStateOf<List<AudioTrack>>(emptyList()) }
     var currentTrackIndex by remember { mutableIntStateOf(-1) }
     var isPlaying by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
     var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
+
     var selectedFolderUriString by remember { mutableStateOf(prefs.getString("selected_folder", "") ?: "") }
+    var autoScanOnStartup by remember { mutableStateOf(prefs.getBoolean("auto_scan_startup", true)) }
+    var viewMode by remember { mutableStateOf(prefs.getString("view_mode", "GRID") ?: "GRID") }
+    var sortBy by remember { mutableStateOf(prefs.getString("sort_by", "AUTHOR") ?: "AUTHOR") }
+    var filterStatus by remember { mutableStateOf("ALL") }
+
+    var searchQuery by remember { mutableStateOf("") }
+    var isSearching by remember { mutableStateOf(false) }
+
+    var showViewDialog by remember { mutableStateOf(false) }
+    var showSortDialog by remember { mutableStateOf(false) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
 
     var currentCoverArt by remember { mutableStateOf<ImageBitmap?>(null) }
     var chaptersList by remember { mutableStateOf<List<Chapter>>(emptyList()) }
@@ -137,6 +156,18 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
         }
     }
 
+    fun rescanCurrentFolder() {
+        if (selectedFolderUriString.isNotEmpty()) {
+            try {
+                val folderUri = Uri.parse(selectedFolderUriString)
+                val scannedTracks = scanFolderForAudio(context, folderUri)
+                if (scannedTracks.isNotEmpty()) {
+                    tracks = scannedTracks
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
     LaunchedEffect(Unit) {
         if (selectedFolderUriString.isNotEmpty()) {
             try {
@@ -155,9 +186,10 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                     playTrack(player, scannedTracks[savedIndex], savedPos)
                     player.pause()
                 }
-            } catch (e: Exception) {
-                // Ignore folder loading error
-            }
+                if (autoScanOnStartup) {
+                    rescanCurrentFolder()
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -221,258 +253,375 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
         }
     }
 
-    Scaffold(
-        bottomBar = {
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                NavigationBarItem(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
-                    icon = { Icon(Icons.Default.LibraryBooks, contentDescription = "Library") },
-                    label = { Text("Library") }
+    val organizedTracks = remember(tracks, currentTrackIndex, sortBy, searchQuery) {
+        if (tracks.isEmpty()) emptyList()
+        else {
+            val filtered = if (searchQuery.isNotBlank()) {
+                tracks.filter { it.name.contains(searchQuery, ignoreCase = true) || it.author.contains(searchQuery, ignoreCase = true) }
+            } else tracks
+
+            val pinnedTrack = if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex] else null
+            val remaining = filtered.filter { it != pinnedTrack }
+
+            val sortedRemaining = if (sortBy == "AUTHOR") {
+                remaining.sortedBy { it.author }
+            } else {
+                remaining.sortedBy { it.title }
+            }
+
+            if (pinnedTrack != null && filtered.contains(pinnedTrack)) {
+                listOf(pinnedTrack) + sortedRemaining
+            } else {
+                sortedRemaining
+            }
+        }
+    }
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet(drawerContainerColor = Color(0xFF161618)) {
+                Spacer(Modifier.height(24.dp))
+                Row(
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Headphones, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Text("Audiobooks", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
+                }
+                Divider(modifier = Modifier.padding(vertical = 12.dp), color = Color(0xFF2C2C30))
+
+                NavigationDrawerItem(
+                    label = { Text("Scan folder", color = Color.White) },
+                    icon = { Icon(Icons.Default.Sync, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        rescanCurrentFolder()
+                    }
                 )
-                NavigationBarItem(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
-                    icon = { Icon(Icons.Default.PlayCircle, contentDescription = "Now Playing") },
-                    label = { Text("Playing") }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 2,
-                    onClick = { selectedTab = 2 },
-                    icon = { Icon(Icons.Default.Bookmark, contentDescription = "Bookmarks") },
-                    label = { Text("Saved") }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 3,
-                    onClick = { selectedTab = 3 },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
-                    label = { Text("Settings") }
+
+                NavigationDrawerItem(
+                    label = { Text("Settings", color = Color.White) },
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        showSettingsDialog = true
+                    }
                 )
             }
         }
-    ) { padding ->
-        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
-            when (selectedTab) {
-                0 -> LibraryScreen(
-                    tracks = tracks,
-                    currentTrackIndex = currentTrackIndex,
-                    currentPosition = currentPosition,
-                    duration = duration,
-                    onPickFolder = { folderPicker.launch(null) },
-                    onSelectTrack = { index ->
-                        currentTrackIndex = index
-                        chaptersList = emptyList()
-                        currentCoverArt = loadEmbeddedCoverArt(context, tracks[index].uri)
-                        playTrack(player, tracks[index], 0L)
-                        selectedTab = 1
-                    }
-                )
-                1 -> PlayerScreen(
-                    currentTrack = tracks.getOrNull(currentTrackIndex),
-                    coverArt = currentCoverArt,
-                    chapters = chaptersList,
-                    isPlaying = isPlaying,
-                    currentPosition = currentPosition,
-                    duration = duration,
-                    playbackSpeed = playbackSpeed,
-                    sleepTimerActive = sleepTimerActive,
-                    sleepTimeRemaining = sleepTimeRemaining,
-                    showSleepMenu = showSleepMenu,
-                    showChapterSheet = showChapterSheet,
-                    onPlayPause = { if (isPlaying) player.pause() else player.play() },
-                    onSeek = { pos -> player.seekTo(pos); currentPosition = pos },
-                    onSkip15 = { forward ->
-                        val delta = if (forward) 15000L else -15000L
-                        val newPos = (player.currentPosition + delta).coerceIn(0L, duration)
-                        player.seekTo(newPos)
-                        currentPosition = newPos
-                    },
-                    onSpeedChange = { speed ->
-                        playbackSpeed = speed
-                        player.playbackParameters = PlaybackParameters(speed)
-                    },
-                    onOpenSleepMenu = { showSleepMenu = true },
-                    onCloseSleepMenu = { showSleepMenu = false },
-                    onOpenChapters = { showChapterSheet = true },
-                    onCloseChapters = { showChapterSheet = false },
-                    onSelectChapter = { chapter ->
-                        player.seekTo(chapter.startMs)
-                        currentPosition = chapter.startMs
-                        showChapterSheet = false
-                    },
-                    onStartTimer = { min ->
-                        if (min == 0) {
-                            sleepTimerActive = false
-                            sleepTimeRemaining = 0L
-                        } else {
-                            sleepTimeRemaining = min * 60 * 1000L
-                            sleepTimerActive = true
+    ) {
+        Scaffold(
+            topBar = {
+                Column(modifier = Modifier.background(MaterialTheme.colorScheme.background)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
+                            Icon(Icons.Default.Menu, contentDescription = "Menu", tint = Color.White)
                         }
-                        showSleepMenu = false
-                    },
-                    onAddBookmarkRequest = {
-                        if (currentTrackIndex != -1) {
-                            newBookmarkLabel = "Timestamp at " + formatTime(currentPosition)
-                            showBookmarkDialog = true
-                        }
-                    }
-                )
-                2 -> BookmarksScreen(
-                    bookmarks = bookmarksList,
-                    onGoToBookmark = { bookmark ->
-                        val matchedIndex = tracks.indexOfFirst { it.name == bookmark.trackName }
-                        if (matchedIndex != -1) {
-                            currentTrackIndex = matchedIndex
-                            currentCoverArt = loadEmbeddedCoverArt(context, tracks[matchedIndex].uri)
-                            playTrack(player, tracks[matchedIndex], bookmark.timestampMs)
-                            selectedTab = 1
-                        }
-                    },
-                    onDelete = { bookmark ->
-                        bookmarksList = bookmarksList.filterNot { it.id == bookmark.id }
-                    }
-                )
-                3 -> SettingsScreen(
-                    selectedFolder = selectedFolderUriString,
-                    onPickFolder = { folderPicker.launch(null) },
-                    onClearCache = {
-                        prefs.edit().clear().apply()
-                        tracks = emptyList()
-                        currentTrackIndex = -1
-                        selectedFolderUriString = ""
-                        currentCoverArt = null
-                        chaptersList = emptyList()
-                    }
-                )
-            }
 
-            if (showBookmarkDialog) {
-                AlertDialog(
-                    onDismissRequest = { showBookmarkDialog = false },
-                    title = { Text("Save Bookmark") },
-                    text = {
-                        Column {
-                            Text("Name this location to remember exactly what is happening here:")
-                            Spacer(Modifier.height(8.dp))
+                        if (isSearching) {
                             TextField(
-                                value = newBookmarkLabel,
-                                onValueChange = { newBookmarkLabel = it },
+                                value = searchQuery,
+                                onValueChange = { searchQuery = it },
+                                placeholder = { Text("Search title or author...", color = Color.Gray) },
                                 singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                                colors = TextFieldDefaults.colors(
+                                    focusedContainerColor = Color(0xFF212124),
+                                    unfocusedContainerColor = Color(0xFF161618),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                )
                             )
+                            IconButton(onClick = { isSearching = false; searchQuery = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "Close Search", tint = Color.White)
+                            }
+                        } else {
+                            Text("SIRIN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
+
+                            Row {
+                                IconButton(onClick = { isSearching = true }) {
+                                    Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White)
+                                }
+                                IconButton(onClick = { showSortDialog = true }) {
+                                    Icon(Icons.Default.Sort, contentDescription = "Sort", tint = Color.White)
+                                }
+                                IconButton(onClick = { showViewDialog = true }) {
+                                    Icon(
+                                        imageVector = if (viewMode == "GRID") Icons.Default.GridView else Icons.Default.ViewList,
+                                        contentDescription = "View Switcher",
+                                        tint = Color.White
+                                    )
+                                }
+                            }
                         }
-                    },
-                    confirmButton = {
-                        Button(onClick = {
-                            if (currentTrackIndex != -1 && tracks.isNotEmpty()) {
-                                bookmarksList = bookmarksList + Bookmark(
-                                    id = System.currentTimeMillis(),
-                                    trackName = tracks[currentTrackIndex].name,
-                                    timestampMs = currentPosition,
-                                    label = newBookmarkLabel
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = filterStatus == "ALL",
+                            onClick = { filterStatus = "ALL" },
+                            label = { Text("All (${tracks.size})", color = if (filterStatus == "ALL") Color.Black else Color.White) },
+                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = MaterialTheme.colorScheme.primary)
+                        )
+                        FilterChip(
+                            selected = filterStatus == "NOT_STARTED",
+                            onClick = { filterStatus = "NOT_STARTED" },
+                            label = { Text("Not started", color = if (filterStatus == "NOT_STARTED") Color.Black else Color.White) },
+                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = MaterialTheme.colorScheme.primary)
+                        )
+                        FilterChip(
+                            selected = filterStatus == "IN_PROGRESS",
+                            onClick = { filterStatus = "IN_PROGRESS" },
+                            label = { Text("In progress", color = if (filterStatus == "IN_PROGRESS") Color.Black else Color.White) },
+                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = MaterialTheme.colorScheme.primary)
+                        )
+                    }
+                }
+            },
+            bottomBar = {
+                if (currentTrackIndex in tracks.indices) {
+                    val activeTrack = tracks[currentTrackIndex]
+                    Surface(
+                        color = Color(0xFF161618),
+                        modifier = Modifier.fillMaxWidth().clickable { showChapterSheet = false }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.primary),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (currentCoverArt != null) {
+                                        Image(bitmap = currentCoverArt!!, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                                    } else {
+                                        Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
+                                    }
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column {
+                                    Text(activeTrack.title, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(activeTrack.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+
+                            IconButton(onClick = { if (isPlaying) player.pause() else player.play() }) {
+                                Icon(
+                                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                    contentDescription = "Play/Pause",
+                                    tint = MaterialTheme.colorScheme.tertiary,
+                                    modifier = Modifier.size(32.dp)
                                 )
                             }
-                            showBookmarkDialog = false
-                        }) {
-                            Text("Save")
                         }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showBookmarkDialog = false }) {
-                            Text("Cancel")
-                        }
-                    }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun LibraryScreen(
-    tracks: List<AudioTrack>,
-    currentTrackIndex: Int,
-    currentPosition: Long,
-    duration: Long,
-    onPickFolder: () -> Unit,
-    onSelectTrack: (Int) -> Unit
-) {
-    val context = LocalContext.current
-
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Your Bookshelf", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = Color.White)
-            IconButton(onClick = onPickFolder) {
-                Icon(Icons.Default.CreateNewFolder, contentDescription = "Add Folder", tint = MaterialTheme.colorScheme.primary)
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        if (tracks.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(64.dp), tint = Color.DarkGray)
-                    Spacer(Modifier.height(16.dp))
-                    Text("No audiobooks found.", style = MaterialTheme.typography.bodyLarge, color = Color.Gray)
-                    Spacer(Modifier.height(16.dp))
-                    Button(onClick = onPickFolder) {
-                        Text("Add Audiobook Folder")
                     }
                 }
             }
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                itemsIndexed(tracks) { index, track ->
-                    val isSelected = index == currentTrackIndex
-                    val cardArt = remember(track.uri) { loadEmbeddedCoverArt(context, track.uri) }
+        ) { padding ->
+            Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+                if (organizedTracks.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(64.dp), tint = Color.DarkGray)
+                            Spacer(Modifier.height(16.dp))
+                            Text("No audiobooks found.", style = MaterialTheme.typography.bodyLarge, color = Color.Gray)
+                            Spacer(Modifier.height(16.dp))
+                            Button(onClick = { folderPicker.launch(null) }) {
+                                Text("Select Audiobook Folder")
+                            }
+                        }
+                    }
+                } else {
+                    if (viewMode == "GRID") {
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 150.dp),
+                            contentPadding = PaddingValues(16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            itemsIndexed(organizedTracks) { _, track ->
+                                val indexInOriginal = tracks.indexOf(track)
+                                val isSelected = indexInOriginal == currentTrackIndex
+                                val cardArt = remember(track.uri) { loadEmbeddedCoverArt(context, track.uri) }
+                                val cardProgress = if (isSelected && duration > 0L) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f
 
-                    Card(
-                        modifier = Modifier.fillMaxWidth().clickable { onSelectTrack(index) },
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
-                        ),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier.size(60.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                if (cardArt != null) {
-                                    Image(
-                                        bitmap = cardArt,
-                                        contentDescription = null,
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                } else {
-                                    Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
+                                GridBookCard(
+                                    track = track,
+                                    coverArt = cardArt,
+                                    progress = cardProgress,
+                                    isSelected = isSelected,
+                                    onClick = {
+                                        currentTrackIndex = indexInOriginal
+                                        chaptersList = emptyList()
+                                        currentCoverArt = loadEmbeddedCoverArt(context, track.uri)
+                                        playTrack(player, track, if (isSelected) currentPosition else 0L)
+                                    }
+                                )
+                            }
+                        }
+                    } else {
+                        LazyColumn(
+                            contentPadding = PaddingValues(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            itemsIndexed(organizedTracks) { _, track ->
+                                val indexInOriginal = tracks.indexOf(track)
+                                val isSelected = indexInOriginal == currentTrackIndex
+                                val cardArt = remember(track.uri) { loadEmbeddedCoverArt(context, track.uri) }
+                                val cardProgress = if (isSelected && duration > 0L) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f
+
+                                ListBookCard(
+                                    track = track,
+                                    coverArt = cardArt,
+                                    progress = cardProgress,
+                                    durationText = if (isSelected && duration > 0L) formatTime(duration) else "",
+                                    isSelected = isSelected,
+                                    onClick = {
+                                        currentTrackIndex = indexInOriginal
+                                        chaptersList = emptyList()
+                                        currentCoverArt = loadEmbeddedCoverArt(context, track.uri)
+                                        playTrack(player, track, if (isSelected) currentPosition else 0L)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // View Switcher Dialog
+                if (showViewDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showViewDialog = false },
+                        title = { Text("View Mode") },
+                        text = {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable {
+                                        viewMode = "GRID"
+                                        prefs.edit().putString("view_mode", "GRID").apply()
+                                        showViewDialog = false
+                                    }.padding(vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(selected = viewMode == "GRID", onClick = null)
+                                    Spacer(Modifier.width(12.dp))
+                                    Text("Grid View", color = Color.White)
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable {
+                                        viewMode = "LIST"
+                                        prefs.edit().putString("view_mode", "LIST").apply()
+                                        showViewDialog = false
+                                    }.padding(vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(selected = viewMode == "LIST", onClick = null)
+                                    Spacer(Modifier.width(12.dp))
+                                    Text("List View", color = Color.White)
                                 }
                             }
-                            Spacer(Modifier.width(16.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(track.name, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        },
+                        confirmButton = { TextButton(onClick = { showViewDialog = false }) { Text("Cancel") } }
+                    )
+                }
+
+                // Sort Dialog
+                if (showSortDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showSortDialog = false },
+                        title = { Text("Sort Audiobooks") },
+                        text = {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable {
+                                        sortBy = "AUTHOR"
+                                        prefs.edit().putString("sort_by", "AUTHOR").apply()
+                                        showSortDialog = false
+                                    }.padding(vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(selected = sortBy == "AUTHOR", onClick = null)
+                                    Spacer(Modifier.width(12.dp))
+                                    Text("By Author Name", color = Color.White)
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable {
+                                        sortBy = "TITLE"
+                                        prefs.edit().putString("sort_by", "TITLE").apply()
+                                        showSortDialog = false
+                                    }.padding(vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(selected = sortBy == "TITLE", onClick = null)
+                                    Spacer(Modifier.width(12.dp))
+                                    Text("By Book Title", color = Color.White)
+                                }
+                            }
+                        },
+                        confirmButton = { TextButton(onClick = { showSortDialog = false }) { Text("Cancel") } }
+                    )
+                }
+
+                // Settings Dialog
+                if (showSettingsDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showSettingsDialog = false },
+                        title = { Text("App Settings") },
+                        text = {
+                            Column {
+                                Text("Storage Folder", style = MaterialTheme.typography.titleSmall, color = Color.Gray)
                                 Spacer(Modifier.height(4.dp))
-                                Text("Select to listen", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                Button(
+                                    onClick = {
+                                        showSettingsDialog = false
+                                        folderPicker.launch(null)
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.Folder, contentDescription = null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Select Audiobook Folder")
+                                }
 
-                                if (isSelected && duration > 0L) {
-                                    Spacer(Modifier.height(8.dp))
-                                    val progress = (currentPosition.toFloat() / duration).coerceIn(0f, 1f)
-                                    LinearProgressIndicator(
-                                        progress = { progress },
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp))
+                                Spacer(Modifier.height(16.dp))
+                                Divider(color = Color(0xFF2C2C30))
+                                Spacer(Modifier.height(16.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Auto-scan on startup", fontWeight = FontWeight.Bold, color = Color.White)
+                                        Text("Check for new audiobooks whenever the app opens", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                    }
+                                    Switch(
+                                        checked = autoScanOnStartup,
+                                        onCheckedChange = {
+                                            autoScanOnStartup = it
+                                            prefs.edit().putBoolean("auto_scan_startup", it).apply()
+                                        }
                                     )
                                 }
                             }
-                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color.DarkGray)
-                        }
-                    }
+                        },
+                        confirmButton = { TextButton(onClick = { showSettingsDialog = false }) { Text("Done") } }
+                    )
                 }
             }
         }
@@ -480,341 +629,108 @@ fun LibraryScreen(
 }
 
 @Composable
-fun PlayerScreen(
-    currentTrack: AudioTrack?,
+fun GridBookCard(
+    track: AudioTrack,
     coverArt: ImageBitmap?,
-    chapters: List<Chapter>,
-    isPlaying: Boolean,
-    currentPosition: Long,
-    duration: Long,
-    playbackSpeed: Float,
-    sleepTimerActive: Boolean,
-    sleepTimeRemaining: Long,
-    showSleepMenu: Boolean,
-    showChapterSheet: Boolean,
-    onPlayPause: () -> Unit,
-    onSeek: (Long) -> Unit,
-    onSkip15: (Boolean) -> Unit,
-    onSpeedChange: (Float) -> Unit,
-    onOpenSleepMenu: () -> Unit,
-    onCloseSleepMenu: () -> Unit,
-    onOpenChapters: () -> Unit,
-    onCloseChapters: () -> Unit,
-    onSelectChapter: (Chapter) -> Unit,
-    onStartTimer: (Int) -> Unit,
-    onAddBookmarkRequest: () -> Unit
+    progress: Float,
+    isSelected: Boolean,
+    onClick: () -> Unit
 ) {
-    Box(modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
+    Column(modifier = Modifier.fillMaxWidth().clickable { onClick() }) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onOpenSleepMenu) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Default.Bedtime,
-                            contentDescription = "Sleep Timer",
-                            tint = if (sleepTimerActive) MaterialTheme.colorScheme.secondary else Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
-                        if (sleepTimerActive) {
-                            Badge(modifier = Modifier.offset(x = 12.dp, y = (-12).dp)) {
-                                Text("${TimeUnit.MILLISECONDS.toMinutes(sleepTimeRemaining)}m")
-                            }
-                        }
-                    }
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Sirin Audio Player", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
-                    if (chapters.isNotEmpty()) {
-                        Spacer(Modifier.width(8.dp))
-                        IconButton(onClick = onOpenChapters) {
-                            Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
-                        }
-                    }
-                }
-
-                IconButton(onClick = onAddBookmarkRequest) {
-                    Icon(Icons.Default.BookmarkBorder, contentDescription = "Add Bookmark", tint = Color.White, modifier = Modifier.size(28.dp))
-                }
+            if (coverArt != null) {
+                Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(48.dp), tint = Color.Gray)
             }
 
             Box(
                 modifier = Modifier
-                    .size(260.dp)
-                    .clip(RoundedCornerShape(32.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(4.dp)
+            ) {
+                Icon(Icons.Default.Headphones, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+
+            if (progress > 0f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth(progress)
+                        .height(4.dp)
+                        .background(MaterialTheme.colorScheme.tertiary)
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Text(track.title, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(track.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+fun ListBookCard(
+    track: AudioTrack,
+    coverArt: ImageBitmap?,
+    progress: Float,
+    durationText: String,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable { onClick() },
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.primary),
                 contentAlignment = Alignment.Center
             ) {
                 if (coverArt != null) {
-                    Image(
-                        bitmap = coverArt,
-                        contentDescription = "Book Cover Art",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                 } else {
-                    Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(96.dp), tint = MaterialTheme.colorScheme.primary)
-                }
-            }
-
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = currentTrack?.name ?: "No audio file loaded",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-                Spacer(Modifier.height(16.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    listOf(1.0f, 1.25f, 1.5f, 2.0f, 2.5f).forEach { speed ->
-                        FilterChip(
-                            selected = playbackSpeed == speed,
-                            onClick = { onSpeedChange(speed) },
-                            label = { Text("${speed}x", color = if (playbackSpeed == speed) Color.Black else Color.White) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                containerColor = Color(0xFF2C2C30)
-                            ),
-                            modifier = Modifier.padding(horizontal = 4.dp)
-                        )
-                    }
-                }
-            }
-
-            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-                Slider(
-                    value = currentPosition.toFloat(),
-                    onValueChange = { onSeek(it.toLong()) },
-                    valueRange = 0f..(duration.coerceAtLeast(1L).toFloat()),
-                    colors = SliderDefaults.colors(
-                        thumbColor = MaterialTheme.colorScheme.primary,
-                        activeTrackColor = MaterialTheme.colorScheme.primary,
-                        inactiveTrackColor = Color.DarkGray
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(formatTime(currentPosition), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                    Text(formatTime(duration), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { onSkip15(false) }) {
-                    Icon(Icons.Default.Replay10, contentDescription = "Rewind 15s", tint = Color.White, modifier = Modifier.size(36.dp))
+                    Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
                 }
 
-                FloatingActionButton(
-                    onClick = onPlayPause,
-                    shape = CircleShape,
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(72.dp)
-                ) {
-                    Icon(
-                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = "Playback Action Toggle",
-                        tint = Color.Black,
-                        modifier = Modifier.size(36.dp)
-                    )
-                }
-
-                IconButton(onClick = { onSkip15(true) }) {
-                    Icon(Icons.Default.Forward10, contentDescription = "Fast Forward 15s", tint = Color.White, modifier = Modifier.size(36.dp))
-                }
-            }
-        }
-
-        if (showChapterSheet) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .clickable { onCloseChapters() },
-                contentAlignment = Alignment.BottomCenter
-            ) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .fillMaxHeight(0.6f)
-                        .clickable(enabled = false) {},
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-                ) {
-                    Column(modifier = Modifier.padding(24.dp)) {
-                        Text("Chapters", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
-                        Spacer(Modifier.height(16.dp))
-                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            itemsIndexed(chapters) { _, chapter ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onSelectChapter(chapter) }
-                                        .padding(vertical = 12.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(chapter.title, color = Color.White, modifier = Modifier.weight(1f))
-                                    Text(formatTime(chapter.startMs), color = Color.Gray)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (showSleepMenu) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .clickable { onCloseSleepMenu() },
-                contentAlignment = Alignment.BottomCenter
-            ) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(enabled = false) {},
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-                ) {
-                    Column(modifier = Modifier.padding(24.dp)) {
-                        Text("Sleep Timer Preset", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
-                        Spacer(Modifier.height(16.dp))
-                        listOf(
-                            "Off" to 0,
-                            "15 Minutes" to 15,
-                            "30 Minutes" to 30,
-                            "45 Minutes" to 45,
-                            "60 Minutes" to 60
-                        ).forEach { (label, min) ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onStartTimer(min) }
-                                    .padding(vertical = 12.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(label, color = Color.White)
-                                if (min == 0 && !sleepTimerActive) {
-                                    Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                } else if (sleepTimerActive && sleepTimeRemaining / 60000L == min.toLong()) {
-                                    Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun BookmarksScreen(
-    bookmarks: List<Bookmark>,
-    onGoToBookmark: (Bookmark) -> Unit,
-    onDelete: (Bookmark) -> Unit
-) {
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Your Saved Locations", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = Color.White)
-        Spacer(Modifier.height(16.dp))
-
-        if (bookmarks.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("You haven't saved any bookmarks yet.", style = MaterialTheme.typography.bodyLarge, color = Color.Gray)
-            }
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(bookmarks.size) { index ->
-                    val bookmark = bookmarks[index]
-                    Card(
-                        modifier = Modifier.fillMaxWidth().clickable { onGoToBookmark(bookmark) },
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Bookmark, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.width(16.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(bookmark.label, fontWeight = FontWeight.Bold, color = Color.White)
-                                Text(bookmark.trackName, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                            }
-                            IconButton(onClick = { onDelete(bookmark) }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Remove Bookmark", tint = MaterialTheme.colorScheme.tertiary)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun SettingsScreen(
-    selectedFolder: String,
-    onPickFolder: () -> Unit,
-    onClearCache: () -> Unit
-) {
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("App Settings", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = Color.White)
-        Spacer(Modifier.height(24.dp))
-
-        Card(
-            modifier = Modifier.fillMaxWidth().clickable { onPickFolder() },
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-        ) {
-            Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(16.dp))
-                Column {
-                    Text("Root storage folder path", fontWeight = FontWeight.Bold, color = Color.White)
-                    Text(
-                        text = if (selectedFolder.isNotEmpty()) selectedFolder else "Tap to choose storage folder location",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.Gray,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                if (progress > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth(progress)
+                            .height(4.dp)
+                            .background(MaterialTheme.colorScheme.tertiary)
                     )
                 }
             }
-        }
 
-        Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.width(16.dp))
 
-        Card(
-            modifier = Modifier.fillMaxWidth().clickable { onClearCache() },
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-        ) {
-            Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.DeleteForever, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
-                Spacer(Modifier.width(16.dp))
-                Column {
-                    Text("Clear saved application state", fontWeight = FontWeight.Bold, color = Color.White)
-                    Text("Resets storage links, speed, and positioning history", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(track.title, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(track.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (durationText.isNotEmpty()) {
+                    Text(durationText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                 }
             }
+
+            Icon(Icons.Default.Headphones, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.DarkGray)
         }
     }
 }
@@ -838,7 +754,7 @@ private fun scanFolderForAudio(context: Context, folderUri: Uri): List<AudioTrac
     val trackList = mutableListOf<AudioTrack>()
     val rootDocument = DocumentFile.fromTreeUri(context, folderUri) ?: return emptyList()
     traverseDirectory(rootDocument, rootDocument, trackList)
-    return trackList.sortedBy { it.name }
+    return trackList
 }
 
 private fun traverseDirectory(currentDir: DocumentFile, rootDir: DocumentFile, trackList: MutableList<AudioTrack>) {
@@ -852,12 +768,9 @@ private fun traverseDirectory(currentDir: DocumentFile, rootDir: DocumentFile, t
                 fileName.endsWith(".m4a", ignoreCase = true) ||
                 fileName.endsWith(".m4b", ignoreCase = true)
             ) {
-                val displayName = if (currentDir != rootDir && currentDir.name != null) {
-                    "${currentDir.name} - $fileName"
-                } else {
-                    fileName
-                }
-                trackList.add(AudioTrack(name = displayName, uri = file.uri))
+                val authorName = if (currentDir != rootDir && currentDir.name != null) currentDir.name!! else "Unknown Author"
+                val cleanTitle = fileName.substringBeforeLast(".")
+                trackList.add(AudioTrack(name = fileName, author = authorName, title = cleanTitle, uri = file.uri))
             }
         }
     }
