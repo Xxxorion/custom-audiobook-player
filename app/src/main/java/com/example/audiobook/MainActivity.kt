@@ -2,12 +2,15 @@ package com.example.audiobook
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -23,6 +26,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -30,13 +36,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Metadata
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.extractor.metadata.id3.ChapterFrame
 import kotlinx.coroutines.delay
 import java.util.concurrent.TimeUnit
 
 data class AudioTrack(val name: String, val uri: Uri)
+data class Chapter(val title: String, val startMs: Long)
 data class Bookmark(val id: Long, val trackName: String, val timestampMs: Long, val label: String)
 
 class MainActivity : ComponentActivity() {
@@ -90,6 +99,10 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
     var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
     var selectedFolderUriString by remember { mutableStateOf(prefs.getString("selected_folder", "") ?: "") }
 
+    var currentCoverArt by remember { mutableStateOf<ImageBitmap?>(null) }
+    var chaptersList by remember { mutableStateOf<List<Chapter>>(emptyList()) }
+    var showChapterSheet by remember { mutableStateOf(false) }
+
     var sleepTimerActive by remember { mutableStateOf(false) }
     var sleepTimeRemaining by remember { mutableLongStateOf(0L) }
     var showSleepMenu by remember { mutableStateOf(false) }
@@ -113,9 +126,11 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                 if (savedIndex != -1) {
                     currentTrackIndex = savedIndex
                     val savedPos = prefs.getLong("last_track_pos", 0L)
+                    currentCoverArt = loadEmbeddedCoverArt(context, scannedTracks[savedIndex].uri)
                     playTrack(player, scannedTracks[savedIndex], savedPos)
                 } else {
                     currentTrackIndex = 0
+                    currentCoverArt = loadEmbeddedCoverArt(context, scannedTracks[0].uri)
                     playTrack(player, scannedTracks[0], 0L)
                 }
             }
@@ -135,12 +150,13 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                     val savedPos = prefs.getLong("last_track_pos", 0L)
                     currentPosition = savedPos
                     playbackSpeed = prefs.getFloat("last_speed", 1.0f)
+                    currentCoverArt = loadEmbeddedCoverArt(context, scannedTracks[savedIndex].uri)
                     player.playbackParameters = PlaybackParameters(playbackSpeed)
                     playTrack(player, scannedTracks[savedIndex], savedPos)
                     player.pause()
                 }
             } catch (e: Exception) {
-                // Permission or path issue
+                // Ignore folder loading error
             }
         }
     }
@@ -178,6 +194,19 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY) {
                     duration = player.duration.coerceAtLeast(0L)
+                }
+            }
+            override fun onMetadata(metadata: Metadata) {
+                val parsedChapters = mutableListOf<Chapter>()
+                for (i in 0 until metadata.length()) {
+                    val entry = metadata.get(i)
+                    if (entry is ChapterFrame) {
+                        val title = entry.id ?: "Chapter ${parsedChapters.size + 1}"
+                        parsedChapters.add(Chapter(title = title, startMs = entry.startTimeMs.toLong()))
+                    }
+                }
+                if (parsedChapters.isNotEmpty()) {
+                    chaptersList = parsedChapters
                 }
             }
         }
@@ -232,12 +261,16 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                     onPickFolder = { folderPicker.launch(null) },
                     onSelectTrack = { index ->
                         currentTrackIndex = index
+                        chaptersList = emptyList()
+                        currentCoverArt = loadEmbeddedCoverArt(context, tracks[index].uri)
                         playTrack(player, tracks[index], 0L)
                         selectedTab = 1
                     }
                 )
                 1 -> PlayerScreen(
                     currentTrack = tracks.getOrNull(currentTrackIndex),
+                    coverArt = currentCoverArt,
+                    chapters = chaptersList,
                     isPlaying = isPlaying,
                     currentPosition = currentPosition,
                     duration = duration,
@@ -245,6 +278,7 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                     sleepTimerActive = sleepTimerActive,
                     sleepTimeRemaining = sleepTimeRemaining,
                     showSleepMenu = showSleepMenu,
+                    showChapterSheet = showChapterSheet,
                     onPlayPause = { if (isPlaying) player.pause() else player.play() },
                     onSeek = { pos -> player.seekTo(pos); currentPosition = pos },
                     onSkip15 = { forward ->
@@ -259,6 +293,13 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                     },
                     onOpenSleepMenu = { showSleepMenu = true },
                     onCloseSleepMenu = { showSleepMenu = false },
+                    onOpenChapters = { showChapterSheet = true },
+                    onCloseChapters = { showChapterSheet = false },
+                    onSelectChapter = { chapter ->
+                        player.seekTo(chapter.startMs)
+                        currentPosition = chapter.startMs
+                        showChapterSheet = false
+                    },
                     onStartTimer = { min ->
                         if (min == 0) {
                             sleepTimerActive = false
@@ -282,6 +323,7 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                         val matchedIndex = tracks.indexOfFirst { it.name == bookmark.trackName }
                         if (matchedIndex != -1) {
                             currentTrackIndex = matchedIndex
+                            currentCoverArt = loadEmbeddedCoverArt(context, tracks[matchedIndex].uri)
                             playTrack(player, tracks[matchedIndex], bookmark.timestampMs)
                             selectedTab = 1
                         }
@@ -298,6 +340,8 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                         tracks = emptyList()
                         currentTrackIndex = -1
                         selectedFolderUriString = ""
+                        currentCoverArt = null
+                        chaptersList = emptyList()
                     }
                 )
             }
@@ -353,6 +397,8 @@ fun LibraryScreen(
     onPickFolder: () -> Unit,
     onSelectTrack: (Int) -> Unit
 ) {
+    val context = LocalContext.current
+
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -383,6 +429,8 @@ fun LibraryScreen(
             LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 itemsIndexed(tracks) { index, track ->
                     val isSelected = index == currentTrackIndex
+                    val cardArt = remember(track.uri) { loadEmbeddedCoverArt(context, track.uri) }
+
                     Card(
                         modifier = Modifier.fillMaxWidth().clickable { onSelectTrack(index) },
                         colors = CardDefaults.cardColors(
@@ -395,7 +443,16 @@ fun LibraryScreen(
                                 modifier = Modifier.size(60.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
+                                if (cardArt != null) {
+                                    Image(
+                                        bitmap = cardArt,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
+                                }
                             }
                             Spacer(Modifier.width(16.dp))
                             Column(modifier = Modifier.weight(1f)) {
@@ -425,6 +482,8 @@ fun LibraryScreen(
 @Composable
 fun PlayerScreen(
     currentTrack: AudioTrack?,
+    coverArt: ImageBitmap?,
+    chapters: List<Chapter>,
     isPlaying: Boolean,
     currentPosition: Long,
     duration: Long,
@@ -432,12 +491,16 @@ fun PlayerScreen(
     sleepTimerActive: Boolean,
     sleepTimeRemaining: Long,
     showSleepMenu: Boolean,
+    showChapterSheet: Boolean,
     onPlayPause: () -> Unit,
     onSeek: (Long) -> Unit,
     onSkip15: (Boolean) -> Unit,
     onSpeedChange: (Float) -> Unit,
     onOpenSleepMenu: () -> Unit,
     onCloseSleepMenu: () -> Unit,
+    onOpenChapters: () -> Unit,
+    onCloseChapters: () -> Unit,
+    onSelectChapter: (Chapter) -> Unit,
     onStartTimer: (Int) -> Unit,
     onAddBookmarkRequest: () -> Unit
 ) {
@@ -468,13 +531,22 @@ fun PlayerScreen(
                     }
                 }
 
-                Text("Sirin Audio Player", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Sirin Audio Player", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                    if (chapters.isNotEmpty()) {
+                        Spacer(Modifier.width(8.dp))
+                        IconButton(onClick = onOpenChapters) {
+                            Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+                        }
+                    }
+                }
 
                 IconButton(onClick = onAddBookmarkRequest) {
                     Icon(Icons.Default.BookmarkBorder, contentDescription = "Add Bookmark", tint = Color.White, modifier = Modifier.size(28.dp))
                 }
             }
 
+            // Cover Art Box
             Box(
                 modifier = Modifier
                     .size(260.dp)
@@ -482,7 +554,16 @@ fun PlayerScreen(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(96.dp), tint = MaterialTheme.colorScheme.primary)
+                if (coverArt != null) {
+                    Image(
+                        bitmap = coverArt,
+                        contentDescription = "Book Cover Art",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(96.dp), tint = MaterialTheme.colorScheme.primary)
+                }
             }
 
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
@@ -565,6 +646,46 @@ fun PlayerScreen(
             }
         }
 
+        // Chapters Sheet Menu
+        if (showChapterSheet) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .clickable { onCloseChapters() },
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.6f)
+                        .clickable(enabled = false) {},
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+                ) {
+                    Column(modifier = Modifier.padding(24.dp)) {
+                        Text("Chapters", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                        Spacer(Modifier.height(16.dp))
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            itemsIndexed(chapters) { _, chapter ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onSelectChapter(chapter) }
+                                        .padding(vertical = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(chapter.title, color = Color.White, modifier = Modifier.weight(1f))
+                                    Text(formatTime(chapter.startMs), color = Color.Gray)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sleep Timer Sheet Menu
         if (showSleepMenu) {
             Box(
                 modifier = Modifier
@@ -698,6 +819,21 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+}
+
+private fun loadEmbeddedCoverArt(context: Context, uri: Uri): ImageBitmap? {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(context, uri)
+        val artBytes = retriever.embeddedPicture
+        retriever.release()
+        if (artBytes != null) {
+            BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size)?.asImageBitmap()
+        } else null
+    } catch (e: Exception) {
+        try { retriever.release() } catch (_: Exception) {}
+        null
     }
 }
 
