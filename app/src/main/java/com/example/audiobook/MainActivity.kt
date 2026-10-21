@@ -48,9 +48,15 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
-data class AudioTrack(val name: String, val author: String, val title: String, val uri: Uri)
-data class Chapter(val title: String, val startMs: Long)
-data class Bookmark(val id: Long, val trackName: String, val timestampMs: Long, val label: String)
+data class AudioTrack(val name: String, val uri: Uri)
+data class Audiobook(
+    val id: String,
+    val title: String,
+    val author: String,
+    val tracks: List<AudioTrack>
+)
+data class Chapter(val title: String, val startMs: Long, val trackIndex: Int = 0)
+data class Bookmark(val id: Long, val bookId: String, val timestampMs: Long, val label: String)
 
 class MainActivity : ComponentActivity() {
     private var exoPlayer: ExoPlayer? = null
@@ -98,8 +104,8 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
     val coroutineScope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
-    var tracks by remember { mutableStateOf<List<AudioTrack>>(emptyList()) }
-    var currentTrackIndex by remember { mutableIntStateOf(-1) }
+    var books by remember { mutableStateOf<List<Audiobook>>(emptyList()) }
+    var currentBookIndex by remember { mutableIntStateOf(-1) }
     var isPlaying by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
@@ -137,20 +143,20 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
             val stringUri = it.toString()
             selectedFolderUriString = stringUri
             prefs.edit().putString("selected_folder", stringUri).apply()
-            val scannedTracks = scanFolderForAudio(context, it)
-            if (scannedTracks.isNotEmpty()) {
-                tracks = scannedTracks
-                val lastTrackUri = prefs.getString("last_track_uri", "")
-                val savedIndex = scannedTracks.indexOfFirst { t -> t.uri.toString() == lastTrackUri }
+            val scannedBooks = scanFolderForAudiobooks(context, it)
+            if (scannedBooks.isNotEmpty()) {
+                books = scannedBooks
+                val lastBookId = prefs.getString("last_book_id", "")
+                val savedIndex = scannedBooks.indexOfFirst { b -> b.id == lastBookId }
                 if (savedIndex != -1) {
-                    currentTrackIndex = savedIndex
+                    currentBookIndex = savedIndex
                     val savedPos = prefs.getLong("last_track_pos", 0L)
-                    currentCoverArt = loadEmbeddedCoverArt(context, scannedTracks[savedIndex].uri)
-                    playTrack(player, scannedTracks[savedIndex], savedPos)
+                    currentCoverArt = loadEmbeddedCoverArt(context, scannedBooks[savedIndex].tracks.first().uri)
+                    playBook(player, scannedBooks[savedIndex], savedPos)
                 } else {
-                    currentTrackIndex = 0
-                    currentCoverArt = loadEmbeddedCoverArt(context, scannedTracks[0].uri)
-                    playTrack(player, scannedTracks[0], 0L)
+                    currentBookIndex = 0
+                    currentCoverArt = loadEmbeddedCoverArt(context, scannedBooks[0].tracks.first().uri)
+                    playBook(player, scannedBooks[0], 0L)
                 }
             }
         }
@@ -160,9 +166,9 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
         if (selectedFolderUriString.isNotEmpty()) {
             try {
                 val folderUri = Uri.parse(selectedFolderUriString)
-                val scannedTracks = scanFolderForAudio(context, folderUri)
-                if (scannedTracks.isNotEmpty()) {
-                    tracks = scannedTracks
+                val scannedBooks = scanFolderForAudiobooks(context, folderUri)
+                if (scannedBooks.isNotEmpty()) {
+                    books = scannedBooks
                 }
             } catch (_: Exception) {}
         }
@@ -172,18 +178,18 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
         if (selectedFolderUriString.isNotEmpty()) {
             try {
                 val folderUri = Uri.parse(selectedFolderUriString)
-                val scannedTracks = scanFolderForAudio(context, folderUri)
-                tracks = scannedTracks
-                val lastTrackUri = prefs.getString("last_track_uri", "")
-                val savedIndex = scannedTracks.indexOfFirst { t -> t.uri.toString() == lastTrackUri }
+                val scannedBooks = scanFolderForAudiobooks(context, folderUri)
+                books = scannedBooks
+                val lastBookId = prefs.getString("last_book_id", "")
+                val savedIndex = scannedBooks.indexOfFirst { b -> b.id == lastBookId }
                 if (savedIndex != -1) {
-                    currentTrackIndex = savedIndex
+                    currentBookIndex = savedIndex
                     val savedPos = prefs.getLong("last_track_pos", 0L)
                     currentPosition = savedPos
                     playbackSpeed = prefs.getFloat("last_speed", 1.0f)
-                    currentCoverArt = loadEmbeddedCoverArt(context, scannedTracks[savedIndex].uri)
+                    currentCoverArt = loadEmbeddedCoverArt(context, scannedBooks[savedIndex].tracks.first().uri)
                     player.playbackParameters = PlaybackParameters(playbackSpeed)
-                    playTrack(player, scannedTracks[savedIndex], savedPos)
+                    playBook(player, scannedBooks[savedIndex], savedPos)
                     player.pause()
                 }
                 if (autoScanOnStartup) {
@@ -194,9 +200,9 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
     }
 
     LaunchedEffect(currentPosition) {
-        if (currentTrackIndex != -1 && tracks.isNotEmpty() && currentPosition > 0L) {
+        if (currentBookIndex in books.indices && currentPosition > 0L) {
             prefs.edit().apply {
-                putString("last_track_uri", tracks[currentTrackIndex].uri.toString())
+                putString("last_book_id", books[currentBookIndex].id)
                 putLong("last_track_pos", currentPosition)
                 putFloat("last_speed", playbackSpeed)
                 apply()
@@ -253,15 +259,15 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
         }
     }
 
-    val organizedTracks = remember(tracks, currentTrackIndex, sortBy, searchQuery) {
-        if (tracks.isEmpty()) emptyList()
+    val organizedBooks = remember(books, currentBookIndex, sortBy, searchQuery) {
+        if (books.isEmpty()) emptyList()
         else {
             val filtered = if (searchQuery.isNotBlank()) {
-                tracks.filter { it.name.contains(searchQuery, ignoreCase = true) || it.author.contains(searchQuery, ignoreCase = true) }
-            } else tracks
+                books.filter { it.title.contains(searchQuery, ignoreCase = true) || it.author.contains(searchQuery, ignoreCase = true) }
+            } else books
 
-            val pinnedTrack = if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex] else null
-            val remaining = filtered.filter { it != pinnedTrack }
+            val pinnedBook = if (currentBookIndex in books.indices) books[currentBookIndex] else null
+            val remaining = filtered.filter { it != pinnedBook }
 
             val sortedRemaining = if (sortBy == "AUTHOR") {
                 remaining.sortedBy { it.author }
@@ -269,8 +275,8 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                 remaining.sortedBy { it.title }
             }
 
-            if (pinnedTrack != null && filtered.contains(pinnedTrack)) {
-                listOf(pinnedTrack) + sortedRemaining
+            if (pinnedBook != null && filtered.contains(pinnedBook)) {
+                listOf(pinnedBook) + sortedRemaining
             } else {
                 sortedRemaining
             }
@@ -371,7 +377,7 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                         FilterChip(
                             selected = filterStatus == "ALL",
                             onClick = { filterStatus = "ALL" },
-                            label = { Text("All (${tracks.size})", color = if (filterStatus == "ALL") Color.Black else Color.White) },
+                            label = { Text("All (${books.size})", color = if (filterStatus == "ALL") Color.Black else Color.White) },
                             colors = FilterChipDefaults.filterChipColors(selectedContainerColor = MaterialTheme.colorScheme.primary)
                         )
                         FilterChip(
@@ -390,11 +396,11 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                 }
             },
             bottomBar = {
-                if (currentTrackIndex in tracks.indices) {
-                    val activeTrack = tracks[currentTrackIndex]
+                if (currentBookIndex in books.indices) {
+                    val activeBook = books[currentBookIndex]
                     Surface(
                         color = Color(0xFF161618),
-                        modifier = Modifier.fillMaxWidth().clickable { showChapterSheet = false }
+                        modifier = Modifier.fillMaxWidth().clickable { showChapterSheet = true }
                     ) {
                         Row(
                             modifier = Modifier.padding(12.dp).fillMaxWidth(),
@@ -414,8 +420,8 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                                 }
                                 Spacer(Modifier.width(12.dp))
                                 Column {
-                                    Text(activeTrack.title, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text(activeTrack.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(activeBook.title, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(activeBook.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
 
@@ -433,7 +439,7 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
             }
         ) { padding ->
             Box(modifier = Modifier.padding(padding).fillMaxSize()) {
-                if (organizedTracks.isEmpty()) {
+                if (organizedBooks.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(64.dp), tint = Color.DarkGray)
@@ -453,22 +459,22 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                             horizontalArrangement = Arrangement.spacedBy(16.dp),
                             verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            itemsIndexed(organizedTracks) { _, track ->
-                                val indexInOriginal = tracks.indexOf(track)
-                                val isSelected = indexInOriginal == currentTrackIndex
-                                val cardArt = remember(track.uri) { loadEmbeddedCoverArt(context, track.uri) }
+                            itemsIndexed(organizedBooks) { _, book ->
+                                val indexInOriginal = books.indexOf(book)
+                                val isSelected = indexInOriginal == currentBookIndex
+                                val cardArt = remember(book.id) { loadEmbeddedCoverArt(context, book.tracks.first().uri) }
                                 val cardProgress = if (isSelected && duration > 0L) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f
 
                                 GridBookCard(
-                                    track = track,
+                                    book = book,
                                     coverArt = cardArt,
                                     progress = cardProgress,
                                     isSelected = isSelected,
                                     onClick = {
-                                        currentTrackIndex = indexInOriginal
+                                        currentBookIndex = indexInOriginal
                                         chaptersList = emptyList()
-                                        currentCoverArt = loadEmbeddedCoverArt(context, track.uri)
-                                        playTrack(player, track, if (isSelected) currentPosition else 0L)
+                                        currentCoverArt = loadEmbeddedCoverArt(context, book.tracks.first().uri)
+                                        playBook(player, book, if (isSelected) currentPosition else 0L)
                                     }
                                 )
                             }
@@ -478,25 +484,89 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                             contentPadding = PaddingValues(16.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            itemsIndexed(organizedTracks) { _, track ->
-                                val indexInOriginal = tracks.indexOf(track)
-                                val isSelected = indexInOriginal == currentTrackIndex
-                                val cardArt = remember(track.uri) { loadEmbeddedCoverArt(context, track.uri) }
+                            itemsIndexed(organizedBooks) { _, book ->
+                                val indexInOriginal = books.indexOf(book)
+                                val isSelected = indexInOriginal == currentBookIndex
+                                val cardArt = remember(book.id) { loadEmbeddedCoverArt(context, book.tracks.first().uri) }
                                 val cardProgress = if (isSelected && duration > 0L) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f
 
                                 ListBookCard(
-                                    track = track,
+                                    book = book,
                                     coverArt = cardArt,
                                     progress = cardProgress,
-                                    durationText = if (isSelected && duration > 0L) formatTime(duration) else "",
+                                    durationText = if (isSelected && duration > 0L) formatTime(duration) else "${book.tracks.size} chapters",
                                     isSelected = isSelected,
                                     onClick = {
-                                        currentTrackIndex = indexInOriginal
+                                        currentBookIndex = indexInOriginal
                                         chaptersList = emptyList()
-                                        currentCoverArt = loadEmbeddedCoverArt(context, track.uri)
-                                        playTrack(player, track, if (isSelected) currentPosition else 0L)
+                                        currentCoverArt = loadEmbeddedCoverArt(context, book.tracks.first().uri)
+                                        playBook(player, book, if (isSelected) currentPosition else 0L)
                                     }
                                 )
+                            }
+                        }
+                    }
+                }
+
+                // Chapters & Multi-file Track Sheet
+                if (showChapterSheet && currentBookIndex in books.indices) {
+                    val activeBook = books[currentBookIndex]
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.6f))
+                            .clickable { showChapterSheet = false },
+                        contentAlignment = Alignment.BottomCenter
+                    ) {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .fillMaxHeight(0.6f)
+                                .clickable(enabled = false) {},
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(24.dp)) {
+                                Text("Chapters / Track List", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                                Spacer(Modifier.height(16.dp))
+                                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    if (activeBook.tracks.size > 1) {
+                                        itemsIndexed(activeBook.tracks) { index, track ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable {
+                                                        player.seekTo(index, 0L)
+                                                        showChapterSheet = false
+                                                    }
+                                                    .padding(vertical = 12.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(track.name, color = Color.White, modifier = Modifier.weight(1f))
+                                                if (player.currentMediaItemIndex == index) {
+                                                    Icon(Icons.Default.VolumeUp, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        itemsIndexed(chaptersList) { _, chapter ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable {
+                                                        player.seekTo(chapter.startMs)
+                                                        currentPosition = chapter.startMs
+                                                        showChapterSheet = false
+                                                    }
+                                                    .padding(vertical = 12.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(chapter.title, color = Color.White, modifier = Modifier.weight(1f))
+                                                Text(formatTime(chapter.startMs), color = Color.Gray)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -630,7 +700,7 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
 
 @Composable
 fun GridBookCard(
-    track: AudioTrack,
+    book: Audiobook,
     coverArt: ImageBitmap?,
     progress: Float,
     isSelected: Boolean,
@@ -674,14 +744,14 @@ fun GridBookCard(
         }
 
         Spacer(Modifier.height(8.dp))
-        Text(track.title, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(track.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(book.title, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(book.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
 @Composable
 fun ListBookCard(
-    track: AudioTrack,
+    book: Audiobook,
     coverArt: ImageBitmap?,
     progress: Float,
     durationText: String,
@@ -723,8 +793,8 @@ fun ListBookCard(
             Spacer(Modifier.width(16.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(track.title, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(track.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(book.title, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(book.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (durationText.isNotEmpty()) {
                     Text(durationText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                 }
@@ -750,35 +820,76 @@ private fun loadEmbeddedCoverArt(context: Context, uri: Uri): ImageBitmap? {
     }
 }
 
-private fun scanFolderForAudio(context: Context, folderUri: Uri): List<AudioTrack> {
-    val trackList = mutableListOf<AudioTrack>()
+private fun scanFolderForAudiobooks(context: Context, folderUri: Uri): List<Audiobook> {
+    val bookList = mutableListOf<Audiobook>()
     val rootDocument = DocumentFile.fromTreeUri(context, folderUri) ?: return emptyList()
-    traverseDirectory(rootDocument, rootDocument, trackList)
-    return trackList
+    traverseDirectoryForBooks(rootDocument, rootDocument, bookList)
+    return bookList
 }
 
-private fun traverseDirectory(currentDir: DocumentFile, rootDir: DocumentFile, trackList: MutableList<AudioTrack>) {
+private fun traverseDirectoryForBooks(currentDir: DocumentFile, rootDir: DocumentFile, bookList: MutableList<Audiobook>) {
     val files = currentDir.listFiles()
+    val audioFiles = mutableListOf<DocumentFile>()
+    val subDirs = mutableListOf<DocumentFile>()
+
     for (file in files) {
         if (file.isDirectory) {
-            traverseDirectory(file, rootDir, trackList)
+            subDirs.add(file)
         } else if (file.isFile) {
-            val fileName = file.name ?: continue
-            if (fileName.endsWith(".mp3", ignoreCase = true) ||
-                fileName.endsWith(".m4a", ignoreCase = true) ||
-                fileName.endsWith(".m4b", ignoreCase = true)
+            val name = file.name ?: continue
+            if (name.endsWith(".mp3", ignoreCase = true) ||
+                name.endsWith(".m4a", ignoreCase = true) ||
+                name.endsWith(".m4b", ignoreCase = true)
             ) {
-                val authorName = if (currentDir != rootDir && currentDir.name != null) currentDir.name!! else "Unknown Author"
-                val cleanTitle = fileName.substringBeforeLast(".")
-                trackList.add(AudioTrack(name = fileName, author = authorName, title = cleanTitle, uri = file.uri))
+                audioFiles.add(file)
             }
         }
     }
+
+    if (audioFiles.isNotEmpty()) {
+        val sortedTracks = audioFiles.map {
+            AudioTrack(name = it.name?.substringBeforeLast(".") ?: "Track", uri = it.uri)
+        }.sortedWith(Comparator { a, b -> a.name.compareTo(b.name, ignoreCase = true) })
+
+        val parentDir = currentDir.parentFile
+        val authorName = if (currentDir != rootDir && parentDir != null && parentDir != rootDir && parentDir.name != null) {
+            parentDir.name!!
+        } else {
+            "Unknown Author"
+        }
+
+        val bookTitle = if (currentDir.name != null && currentDir != rootDir) currentDir.name!! else sortedTracks.first().name
+
+        if (audioFiles.size == 1 && sortedTracks.first().name.endsWith(".m4b", ignoreCase = true)) {
+            bookList.add(
+                Audiobook(
+                    id = sortedTracks.first().uri.toString(),
+                    title = sortedTracks.first().name,
+                    author = if (currentDir.name != null && currentDir != rootDir) currentDir.name!! else authorName,
+                    tracks = sortedTracks
+                )
+            )
+        } else {
+            bookList.add(
+                Audiobook(
+                    id = currentDir.uri.toString(),
+                    title = bookTitle,
+                    author = authorName,
+                    tracks = sortedTracks
+                )
+            )
+        }
+    }
+
+    for (dir in subDirs) {
+        traverseDirectoryForBooks(dir, rootDir, bookList)
+    }
 }
 
-private fun playTrack(player: ExoPlayer, track: AudioTrack, startPositionMs: Long) {
-    player.setMediaItem(MediaItem.fromUri(track.uri))
-    player.seekTo(startPositionMs)
+private fun playBook(player: ExoPlayer, book: Audiobook, startPositionMs: Long) {
+    val mediaItems = book.tracks.map { MediaItem.fromUri(it.uri) }
+    player.setMediaItems(mediaItems)
+    player.seekTo(0, startPositionMs)
     player.prepare()
     player.play()
 }
