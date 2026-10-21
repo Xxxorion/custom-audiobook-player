@@ -21,4 +21,4 @@ jobs:
           cache-disabled: true
 
       - name: Build APK with Gradle
-        run: gradle assembleDebug
+        run: gradle assembleDebug --stacktrace
