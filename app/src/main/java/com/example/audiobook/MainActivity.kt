@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
+import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -38,14 +39,21 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Metadata
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.extractor.metadata.id3.ChapterFrame
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 data class AudioTrack(val name: String, val uri: Uri)
@@ -55,7 +63,7 @@ data class Audiobook(
     val author: String,
     val tracks: List<AudioTrack>
 )
-data class Chapter(val title: String, val startMs: Long, val trackIndex: Int = 0)
+data class Chapter(val title: String, val startMs: Long)
 data class Bookmark(val id: Long, val bookId: String, val timestampMs: Long, val label: String)
 
 class MainActivity : ComponentActivity() {
@@ -109,13 +117,17 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
     var isPlaying by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
-    var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
+
+    // Audio Controls State
+    var playbackSpeed by remember { mutableFloatStateOf(prefs.getFloat("last_speed", 1.0f)) }
+    var playbackPitch by remember { mutableFloatStateOf(prefs.getFloat("last_pitch", 1.0f)) }
+    var volumeBoostEnabled by remember { mutableStateOf(prefs.getBoolean("volume_boost", false)) }
+    var silenceTrimEnabled by remember { mutableStateOf(prefs.getBoolean("silence_trim", false)) }
 
     var selectedFolderUriString by remember { mutableStateOf(prefs.getString("selected_folder", "") ?: "") }
     var autoScanOnStartup by remember { mutableStateOf(prefs.getBoolean("auto_scan_startup", true)) }
     var viewMode by remember { mutableStateOf(prefs.getString("view_mode", "GRID") ?: "GRID") }
     var sortBy by remember { mutableStateOf(prefs.getString("sort_by", "AUTHOR") ?: "AUTHOR") }
-    var filterStatus by remember { mutableStateOf("ALL") }
 
     var searchQuery by remember { mutableStateOf("") }
     var isSearching by remember { mutableStateOf(false) }
@@ -123,6 +135,7 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
     var showViewDialog by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showAudioFXDialog by remember { mutableStateOf(false) }
 
     var currentCoverArt by remember { mutableStateOf<ImageBitmap?>(null) }
     var chaptersList by remember { mutableStateOf<List<Chapter>>(emptyList()) }
@@ -131,10 +144,6 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
     var sleepTimerActive by remember { mutableStateOf(false) }
     var sleepTimeRemaining by remember { mutableLongStateOf(0L) }
     var showSleepMenu by remember { mutableStateOf(false) }
-
-    var bookmarksList by remember { mutableStateOf<List<Bookmark>>(emptyList()) }
-    var showBookmarkDialog by remember { mutableStateOf(false) }
-    var newBookmarkLabel by remember { mutableStateOf("") }
 
     val folderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -146,31 +155,44 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
             val scannedBooks = scanFolderForAudiobooks(context, it)
             if (scannedBooks.isNotEmpty()) {
                 books = scannedBooks
-                val lastBookId = prefs.getString("last_book_id", "")
-                val savedIndex = scannedBooks.indexOfFirst { b -> b.id == lastBookId }
-                if (savedIndex != -1) {
-                    currentBookIndex = savedIndex
-                    val savedPos = prefs.getLong("last_track_pos", 0L)
-                    currentCoverArt = loadEmbeddedCoverArt(context, scannedBooks[savedIndex].tracks.first().uri)
-                    playBook(player, scannedBooks[savedIndex], savedPos)
-                } else {
-                    currentBookIndex = 0
-                    currentCoverArt = loadEmbeddedCoverArt(context, scannedBooks[0].tracks.first().uri)
-                    playBook(player, scannedBooks[0], 0L)
-                }
+                currentBookIndex = 0
+                playBook(player, scannedBooks[0], 0L)
             }
         }
     }
 
-    fun rescanCurrentFolder() {
-        if (selectedFolderUriString.isNotEmpty()) {
+    // Apply Audio Processing Settings
+    LaunchedEffect(playbackSpeed, playbackPitch) {
+        player.playbackParameters = PlaybackParameters(playbackSpeed, playbackPitch)
+    }
+
+    LaunchedEffect(silenceTrimEnabled) {
+        player.skipSilenceEnabled = silenceTrimEnabled
+    }
+
+    LaunchedEffect(volumeBoostEnabled, isPlaying) {
+        if (volumeBoostEnabled && player.audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
             try {
-                val folderUri = Uri.parse(selectedFolderUriString)
-                val scannedBooks = scanFolderForAudiobooks(context, folderUri)
-                if (scannedBooks.isNotEmpty()) {
-                    books = scannedBooks
-                }
+                val enhancer = LoudnessEnhancer(player.audioSessionId)
+                enhancer.setTargetGain(1200) // +12dB Boost
+                enhancer.enabled = true
             } catch (_: Exception) {}
+        }
+    }
+
+    // Cover Art Loader with Online Search Fallback
+    fun updateCoverArtForBook(book: Audiobook) {
+        val localArt = loadEmbeddedCoverArt(context, book.tracks.first().uri)
+        if (localArt != null) {
+            currentCoverArt = localArt
+        } else {
+            currentCoverArt = null
+            coroutineScope.launch {
+                val onlineArt = fetchOnlineCoverArt(book.title, book.author)
+                if (onlineArt != null) {
+                    currentCoverArt = onlineArt
+                }
+            }
         }
     }
 
@@ -185,15 +207,15 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                 if (savedIndex != -1) {
                     currentBookIndex = savedIndex
                     val savedPos = prefs.getLong("last_track_pos", 0L)
-                    currentPosition = savedPos
-                    playbackSpeed = prefs.getFloat("last_speed", 1.0f)
-                    currentCoverArt = loadEmbeddedCoverArt(context, scannedBooks[savedIndex].tracks.first().uri)
-                    player.playbackParameters = PlaybackParameters(playbackSpeed)
-                    playBook(player, scannedBooks[savedIndex], savedPos)
+                    val lastPauseTime = prefs.getLong("last_pause_time", 0L)
+                    
+                    // Smart Auto-Rewind
+                    val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
+                    currentPosition = rewindPos
+
+                    updateCoverArtForBook(scannedBooks[savedIndex])
+                    playBook(player, scannedBooks[savedIndex], rewindPos)
                     player.pause()
-                }
-                if (autoScanOnStartup) {
-                    rescanCurrentFolder()
                 }
             } catch (_: Exception) {}
         }
@@ -204,7 +226,9 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
             prefs.edit().apply {
                 putString("last_book_id", books[currentBookIndex].id)
                 putLong("last_track_pos", currentPosition)
+                putLong("last_pause_time", System.currentTimeMillis())
                 putFloat("last_speed", playbackSpeed)
+                putFloat("last_pitch", playbackPitch)
                 apply()
             }
         }
@@ -228,6 +252,9 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+                if (!playing) {
+                    prefs.edit().putLong("last_pause_time", System.currentTimeMillis()).apply()
+                }
             }
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY) {
@@ -304,7 +331,11 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                     selected = false,
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
-                        rescanCurrentFolder()
+                        if (selectedFolderUriString.isNotEmpty()) {
+                            val folderUri = Uri.parse(selectedFolderUriString)
+                            val scannedBooks = scanFolderForAudiobooks(context, folderUri)
+                            if (scannedBooks.isNotEmpty()) books = scannedBooks
+                        }
                     }
                 )
 
@@ -353,6 +384,9 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                             Text("SIRIN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
 
                             Row {
+                                IconButton(onClick = { showAudioFXDialog = true }) {
+                                    Icon(Icons.Default.GraphicEq, contentDescription = "Audio FX", tint = MaterialTheme.colorScheme.primary)
+                                }
                                 IconButton(onClick = { isSearching = true }) {
                                     Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White)
                                 }
@@ -368,30 +402,6 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                                 }
                             }
                         }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        FilterChip(
-                            selected = filterStatus == "ALL",
-                            onClick = { filterStatus = "ALL" },
-                            label = { Text("All (${books.size})", color = if (filterStatus == "ALL") Color.Black else Color.White) },
-                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = MaterialTheme.colorScheme.primary)
-                        )
-                        FilterChip(
-                            selected = filterStatus == "NOT_STARTED",
-                            onClick = { filterStatus = "NOT_STARTED" },
-                            label = { Text("Not started", color = if (filterStatus == "NOT_STARTED") Color.Black else Color.White) },
-                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = MaterialTheme.colorScheme.primary)
-                        )
-                        FilterChip(
-                            selected = filterStatus == "IN_PROGRESS",
-                            onClick = { filterStatus = "IN_PROGRESS" },
-                            label = { Text("In progress", color = if (filterStatus == "IN_PROGRESS") Color.Black else Color.White) },
-                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = MaterialTheme.colorScheme.primary)
-                        )
                     }
                 }
             },
@@ -473,7 +483,7 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                                     onClick = {
                                         currentBookIndex = indexInOriginal
                                         chaptersList = emptyList()
-                                        currentCoverArt = loadEmbeddedCoverArt(context, book.tracks.first().uri)
+                                        updateCoverArtForBook(book)
                                         playBook(player, book, if (isSelected) currentPosition else 0L)
                                     }
                                 )
@@ -499,7 +509,7 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                                     onClick = {
                                         currentBookIndex = indexInOriginal
                                         chaptersList = emptyList()
-                                        currentCoverArt = loadEmbeddedCoverArt(context, book.tracks.first().uri)
+                                        updateCoverArtForBook(book)
                                         playBook(player, book, if (isSelected) currentPosition else 0L)
                                     }
                                 )
@@ -508,68 +518,67 @@ fun SirinAudiobookApp(player: ExoPlayer, prefs: SharedPreferences) {
                     }
                 }
 
-                // Chapters & Multi-file Track Sheet
-                if (showChapterSheet && currentBookIndex in books.indices) {
-                    val activeBook = books[currentBookIndex]
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.6f))
-                            .clickable { showChapterSheet = false },
-                        contentAlignment = Alignment.BottomCenter
-                    ) {
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .fillMaxHeight(0.6f)
-                                .clickable(enabled = false) {},
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-                        ) {
-                            Column(modifier = Modifier.padding(24.dp)) {
-                                Text("Chapters / Track List", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
-                                Spacer(Modifier.height(16.dp))
-                                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    if (activeBook.tracks.size > 1) {
-                                        itemsIndexed(activeBook.tracks) { index, track ->
-                                            Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clickable {
-                                                        player.seekTo(index, 0L)
-                                                        showChapterSheet = false
-                                                    }
-                                                    .padding(vertical = 12.dp),
-                                                horizontalArrangement = Arrangement.SpaceBetween
-                                            ) {
-                                                Text(track.name, color = Color.White, modifier = Modifier.weight(1f))
-                                                if (player.currentMediaItemIndex == index) {
-                                                    Icon(Icons.Default.VolumeUp, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        itemsIndexed(chaptersList) { _, chapter ->
-                                            Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clickable {
-                                                        player.seekTo(chapter.startMs)
-                                                        currentPosition = chapter.startMs
-                                                        showChapterSheet = false
-                                                    }
-                                                    .padding(vertical = 12.dp),
-                                                horizontalArrangement = Arrangement.SpaceBetween
-                                            ) {
-                                                Text(chapter.title, color = Color.White, modifier = Modifier.weight(1f))
-                                                Text(formatTime(chapter.startMs), color = Color.Gray)
-                                            }
-                                        }
+                // Audio FX Modal Dialog (Volume Boost, Pitch, Silence Trim)
+                if (showAudioFXDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showAudioFXDialog = false },
+                        title = { Text("Audio Enhancements") },
+                        text = {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Volume Boost (+12dB)", fontWeight = FontWeight.Bold, color = Color.White)
+                                        Text("Amplify quiet narrator tracks", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                                     }
+                                    Switch(
+                                        checked = volumeBoostEnabled,
+                                        onCheckedChange = {
+                                            volumeBoostEnabled = it
+                                            prefs.edit().putBoolean("volume_boost", it).apply()
+                                        }
+                                    )
                                 }
+
+                                Spacer(Modifier.height(16.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Trim Silence", fontWeight = FontWeight.Bold, color = Color.White)
+                                        Text("Automatically skip dead-air pauses", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                    }
+                                    Switch(
+                                        checked = silenceTrimEnabled,
+                                        onCheckedChange = {
+                                            silenceTrimEnabled = it
+                                            prefs.edit().putBoolean("silence_trim", it).apply()
+                                        }
+                                    )
+                                }
+
+                                Spacer(Modifier.height(16.dp))
+
+                                Text("Pitch Tuning: ${String.format("%.2f", playbackPitch)}x", fontWeight = FontWeight.Bold, color = Color.White)
+                                Slider(
+                                    value = playbackPitch,
+                                    onValueChange = {
+                                        playbackPitch = it
+                                        prefs.edit().putFloat("last_pitch", it).apply()
+                                    },
+                                    valueRange = 0.8f..1.2f,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
-                        }
-                    }
+                        },
+                        confirmButton = { TextButton(onClick = { showAudioFXDialog = false }) { Text("Done") } }
+                    )
                 }
 
                 // View Switcher Dialog
@@ -801,6 +810,43 @@ fun ListBookCard(
             }
 
             Icon(Icons.Default.Headphones, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.DarkGray)
+        }
+    }
+}
+
+private fun calculateSmartRewindPos(savedPos: Long, lastPauseTime: Long): Long {
+    if (lastPauseTime <= 0L) return savedPos
+    val elapsedMs = System.currentTimeMillis() - lastPauseTime
+    val rewindMs = when {
+        elapsedMs >= 8 * 3600 * 1000L -> 30000L // Rewind 30s if paused for over 8 hours
+        elapsedMs >= 1 * 3600 * 1000L -> 15000L // Rewind 15s if paused for over 1 hour
+        elapsedMs >= 10 * 60 * 1000L -> 5000L   // Rewind 5s if paused for over 10 minutes
+        else -> 0L
+    }
+    return (savedPos - rewindMs).coerceAtLeast(0L)
+}
+
+private suspend fun fetchOnlineCoverArt(title: String, author: String): ImageBitmap? {
+    return withContext(Dispatchers.IO) {
+        try {
+            val query = URLEncoder.encode("$title $author", "UTF-8")
+            val url = URL("https://openlibrary.org/search.json?q=$query&limit=1")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 3000
+            conn.readTimeout = 3000
+            val jsonText = conn.inputStream.bufferedReader().use { it.readText() }
+            val docs = JSONObject(jsonText).optJSONArray("docs")
+            if (docs != null && docs.length() > 0) {
+                val coverI = docs.getJSONObject(0).optInt("cover_i", -1)
+                if (coverI != -1) {
+                    val imgUrl = URL("https://covers.openlibrary.org/b/id/$coverI-M.jpg")
+                    val bitmap = BitmapFactory.decodeStream(imgUrl.openStream())
+                    return@withContext bitmap?.asImageBitmap()
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
         }
     }
 }
