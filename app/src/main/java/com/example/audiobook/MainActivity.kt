@@ -546,7 +546,6 @@ fun PlayerScreen(
                 }
             }
 
-            // Cover Art Box
             Box(
                 modifier = Modifier
                     .size(260.dp)
@@ -646,7 +645,6 @@ fun PlayerScreen(
             }
         }
 
-        // Chapters Sheet Menu
         if (showChapterSheet) {
             Box(
                 modifier = Modifier
@@ -685,7 +683,6 @@ fun PlayerScreen(
             }
         }
 
-        // Sleep Timer Sheet Menu
         if (showSleepMenu) {
             Box(
                 modifier = Modifier
@@ -840,20 +837,30 @@ private fun loadEmbeddedCoverArt(context: Context, uri: Uri): ImageBitmap? {
 private fun scanFolderForAudio(context: Context, folderUri: Uri): List<AudioTrack> {
     val trackList = mutableListOf<AudioTrack>()
     val rootDocument = DocumentFile.fromTreeUri(context, folderUri) ?: return emptyList()
+    traverseDirectory(rootDocument, rootDocument, trackList)
+    return trackList.sortedBy { it.name }
+}
 
-    val files = rootDocument.listFiles()
+private fun traverseDirectory(currentDir: DocumentFile, rootDir: DocumentFile, trackList: MutableList<AudioTrack>) {
+    val files = currentDir.listFiles()
     for (file in files) {
-        if (file.isFile) {
-            val name = file.name ?: continue
-            if (name.endsWith(".mp3", ignoreCase = true) ||
-                name.endsWith(".m4a", ignoreCase = true) ||
-                name.endsWith(".m4b", ignoreCase = true)
+        if (file.isDirectory) {
+            traverseDirectory(file, rootDir, trackList)
+        } else if (file.isFile) {
+            val fileName = file.name ?: continue
+            if (fileName.endsWith(".mp3", ignoreCase = true) ||
+                fileName.endsWith(".m4a", ignoreCase = true) ||
+                fileName.endsWith(".m4b", ignoreCase = true)
             ) {
-                trackList.add(AudioTrack(name = name, uri = file.uri))
+                val displayName = if (currentDir != rootDir && currentDir.name != null) {
+                    "${currentDir.name} - $fileName"
+                } else {
+                    fileName
+                }
+                trackList.add(AudioTrack(name = displayName, uri = file.uri))
             }
         }
     }
-    return trackList.sortedBy { it.name }
 }
 
 private fun playTrack(player: ExoPlayer, track: AudioTrack, startPositionMs: Long) {
