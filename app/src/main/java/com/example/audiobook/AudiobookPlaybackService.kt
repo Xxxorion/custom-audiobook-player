@@ -48,7 +48,7 @@ class AudiobookPlaybackService : MediaSessionService() {
                 customCommand: SessionCommand,
                 args: Bundle
             ): ListenableFuture<SessionResult> {
-                when (customCommand.action) {
+                when (customCommand.customAction) {
                     ACTION_SET_SILENCE_TRIM -> {
                         val enabled = args.getBoolean(KEY_ENABLED, false)
                         exoPlayer?.skipSilenceEnabled = enabled
