@@ -17,6 +17,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -35,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -57,10 +59,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
-import java.io.BufferedReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -160,7 +162,7 @@ fun SirinAudiobookApp(
 
     var isPlayerFullScreen by remember { mutableStateOf(false) }
 
-    // System Back Button Handling
+    // System Back Button Navigation
     BackHandler(enabled = isPlayerFullScreen) {
         isPlayerFullScreen = false
     }
@@ -459,7 +461,6 @@ fun SirinAudiobookApp(
         }
     }
 
-    // Global Drawer Container Wrapping Entire Layout
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -802,7 +803,6 @@ fun SirinAudiobookApp(
         }
     }
 
-    // Dialogs
     if (showAnalyticsDialog) {
         AlertDialog(
             onDismissRequest = { showAnalyticsDialog = false },
@@ -1112,4 +1112,627 @@ fun BookshelfContent(
             ) {
                 itemsIndexed(books) { _, book ->
                     val isSelected = books.indexOf(book) == currentBookIndex
-                    var cardArt by remember(
+                    var cardArt by remember(book.id) { mutableStateOf<ImageBitmap?>(null) }
+                    
+                    LaunchedEffect(book.id) {
+                        cardArt = getOrFetchCoverArt(context, book)
+                    }
+
+                    val cardProgress = if (isSelected && duration > 0L) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f
+
+                    GridBookCard(
+                        book = book,
+                        coverArt = cardArt,
+                        progress = cardProgress,
+                        isSelected = isSelected,
+                        onClick = { onSelectBook(book) },
+                        onLongClick = { onChangeCover(book) }
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                itemsIndexed(books) { _, book ->
+                    val isSelected = books.indexOf(book) == currentBookIndex
+                    var cardArt by remember(book.id) { mutableStateOf<ImageBitmap?>(null) }
+                    
+                    LaunchedEffect(book.id) {
+                        cardArt = getOrFetchCoverArt(context, book)
+                    }
+
+                    val cardProgress = if (isSelected && duration > 0L) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f
+
+                    ListBookCard(
+                        book = book,
+                        coverArt = cardArt,
+                        progress = cardProgress,
+                        durationText = if (isSelected && duration > 0L) formatTime(duration) else "${book.tracks.size} chapters",
+                        isSelected = isSelected,
+                        onClick = { onSelectBook(book) },
+                        onLongClick = { onChangeCover(book) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun NowPlayingScreen(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    chapterTitle: String,
+    isPlaying: Boolean,
+    currentPosition: Long,
+    duration: Long,
+    skipIntervalSeconds: Int,
+    silenceTrimEnabled: Boolean,
+    sleepTimerActive: Boolean,
+    sleepTimeRemaining: Long,
+    sleepEndAtChapter: Boolean,
+    isDarkTheme: Boolean,
+    playerVolume: Float,
+    onOpenDrawer: () -> Unit,
+    onBackToBookshelf: () -> Unit,
+    onPlayPause: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onSkipPrevChapter: () -> Unit,
+    onSkipNextChapter: () -> Unit,
+    onQuickRewind: () -> Unit,
+    onQuickForward: () -> Unit,
+    onToggleSilenceTrim: () -> Unit,
+    onOpenSleepMenu: () -> Unit,
+    onToggleTheme: () -> Unit,
+    onOpenAudioFX: () -> Unit,
+    onVolumeChange: (Float) -> Unit
+) {
+    val percentRead = if (duration > 0L) ((currentPosition.toDouble() / duration.toDouble()) * 100).toInt() else 0
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onOpenDrawer) {
+                Icon(Icons.Default.Menu, contentDescription = "Open Drawer Menu")
+            }
+            Text("NOW PLAYING", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            IconButton(onClick = onBackToBookshelf) {
+                Icon(Icons.Default.Book, contentDescription = "Back to Bookshelf")
+            }
+        }
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            Text(
+                text = book.title,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.Gray,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .size(240.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            if (coverArt != null) {
+                Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(96.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Duration: ${formatTime(duration)}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            Text("Read: ${formatTime(currentPosition)} ( $percentRead% )", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = chapterTitle,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                Slider(
+                    value = currentPosition.toFloat(),
+                    onValueChange = { onSeek(it.toLong()) },
+                    valueRange = 0f..(duration.coerceAtLeast(1L).toFloat()),
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                        inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(formatTime(currentPosition), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Text("-${formatTime((duration - currentPosition).coerceAtLeast(0L))}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onSkipPrevChapter) {
+                        Icon(Icons.Default.SkipPrevious, contentDescription = "Prev Chapter", modifier = Modifier.size(32.dp))
+                    }
+
+                    IconButton(onClick = onQuickRewind) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.Replay, contentDescription = "Rewind", modifier = Modifier.size(38.dp))
+                            Text(
+                                text = "$skipIntervalSeconds",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+                    }
+
+                    FloatingActionButton(
+                        onClick = onPlayPause,
+                        shape = CircleShape,
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(64.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = "Play/Pause",
+                            tint = Color.Black,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+
+                    IconButton(onClick = onQuickForward) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.RotateRight, contentDescription = "Forward", modifier = Modifier.size(38.dp))
+                            Text(
+                                text = "$skipIntervalSeconds",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+                    }
+
+                    IconButton(onClick = onSkipNextChapter) {
+                        Icon(Icons.Default.SkipNext, contentDescription = "Next Chapter", modifier = Modifier.size(32.dp))
+                    }
+                }
+
+                Spacer(Modifier.height(20.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = onToggleSilenceTrim,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(if (silenceTrimEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCut,
+                            contentDescription = "Trim Silence",
+                            tint = if (silenceTrimEnabled) Color.Black else Color.Gray
+                        )
+                    }
+
+                    IconButton(onClick = onOpenSleepMenu) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.Bedtime,
+                                contentDescription = "Sleep Timer",
+                                tint = if (sleepTimerActive) MaterialTheme.colorScheme.primary else Color.Gray
+                            )
+                            if (sleepTimerActive) {
+                                Badge(modifier = Modifier.offset(x = 10.dp, y = (-10).dp)) {
+                                    Text(if (sleepEndAtChapter) "End" else "${TimeUnit.MILLISECONDS.toMinutes(sleepTimeRemaining)}m")
+                                }
+                            }
+                        }
+                    }
+
+                    IconButton(onClick = onToggleTheme) {
+                        Icon(
+                            imageVector = if (isDarkTheme) Icons.Default.DarkMode else Icons.Default.LightMode,
+                            contentDescription = "Toggle Theme",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    IconButton(onClick = onOpenAudioFX) {
+                        Icon(Icons.Default.GraphicEq, contentDescription = "Equalizer", tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.VolumeMute, contentDescription = "Low Volume", tint = Color.Gray, modifier = Modifier.size(20.dp))
+                    Slider(
+                        value = playerVolume,
+                        onValueChange = onVolumeChange,
+                        valueRange = 0f..1f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = MaterialTheme.colorScheme.primary,
+                            activeTrackColor = MaterialTheme.colorScheme.primary,
+                            inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                        modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                    )
+                    Icon(Icons.Default.VolumeUp, contentDescription = "High Volume", tint = Color.Gray, modifier = Modifier.size(20.dp))
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun GridBookCard(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    progress: Float,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            if (coverArt != null) {
+                Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(48.dp), tint = Color.Gray)
+            }
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(4.dp)
+            ) {
+                Icon(Icons.Default.Headphones, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+
+            if (progress > 0f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth(progress)
+                        .height(4.dp)
+                        .background(MaterialTheme.colorScheme.tertiary)
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ListBookCard(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    progress: Float,
+    durationText: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            ),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.primary),
+                contentAlignment = Alignment.Center
+            ) {
+                if (coverArt != null) {
+                    Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else {
+                    Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
+                }
+
+                if (progress > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth(progress)
+                            .height(4.dp)
+                            .background(MaterialTheme.colorScheme.tertiary)
+                    )
+                }
+            }
+
+            Spacer(Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (durationText.isNotEmpty()) {
+                    Text(durationText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+
+            Icon(Icons.Default.Headphones, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.DarkGray)
+        }
+    }
+}
+
+private fun calculateSmartRewindPos(savedPos: Long, lastPauseTime: Long): Long {
+    if (lastPauseTime <= 0L) return savedPos
+    val elapsedMs = System.currentTimeMillis() - lastPauseTime
+    val rewindMs = when {
+        elapsedMs >= 8 * 3600 * 1000L -> 30000L
+        elapsedMs >= 1 * 3600 * 1000L -> 15000L
+        elapsedMs >= 10 * 60 * 1000L -> 5000L
+        else -> 0L
+    }
+    return (savedPos - rewindMs).coerceAtLeast(0L)
+}
+
+private suspend fun getOrFetchCoverArt(context: Context, book: Audiobook): ImageBitmap? {
+    return withContext(Dispatchers.IO) {
+        val cacheFile = File(context.filesDir, "covers/${book.id.hashCode()}.png")
+        
+        if (cacheFile.exists()) {
+            val bmp = BitmapFactory.decodeFile(cacheFile.absolutePath)
+            if (bmp != null) return@withContext bmp.asImageBitmap()
+        }
+
+        val embedded = loadEmbeddedCoverArt(context, book.tracks.first().uri)
+        if (embedded != null) {
+            saveBitmapToCache(context, book.id, embedded)
+            return@withContext embedded
+        }
+
+        val onlineBmp = fetchOnlineCoverArt(book.title, book.author)
+        if (onlineBmp != null) {
+            saveBitmapToCache(context, book.id, onlineBmp)
+            return@withContext onlineBmp
+        }
+
+        null
+    }
+}
+
+private fun saveBitmapToCache(context: Context, bookId: String, imageBitmap: ImageBitmap) {
+    try {
+        val coversDir = File(context.filesDir, "covers")
+        if (!coversDir.exists()) coversDir.mkdirs()
+        val cacheFile = File(coversDir, "${bookId.hashCode()}.png")
+        
+        val androidBmp = imageBitmap.asAndroidBitmap()
+        FileOutputStream(cacheFile).use { out ->
+            androidBmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+        }
+    } catch (_: Exception) {}
+}
+
+private suspend fun saveCustomCoverArt(context: Context, bookId: String, uri: Uri) {
+    withContext(Dispatchers.IO) {
+        try {
+            val stream = context.contentResolver.openInputStream(uri)
+            val bitmap = BitmapFactory.decodeStream(stream)
+            stream?.close()
+            if (bitmap != null) {
+                saveBitmapToCache(context, bookId, bitmap.asImageBitmap())
+            }
+        } catch (_: Exception) {}
+    }
+}
+
+private suspend fun fetchOnlineCoverArt(title: String, author: String): ImageBitmap? {
+    return withContext(Dispatchers.IO) {
+        try {
+            val query = URLEncoder.encode("$title $author", "UTF-8")
+            val url = URL("https://openlibrary.org/search.json?q=$query&limit=1")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 3000
+            conn.readTimeout = 3000
+            val jsonText = conn.inputStream.bufferedReader().use { it.readText() }
+            val docs = JSONObject(jsonText).optJSONArray("docs")
+            if (docs != null && docs.length() > 0) {
+                val coverI = docs.getJSONObject(0).optInt("cover_i", -1)
+                if (coverI != -1) {
+                    val imgUrl = URL("https://covers.openlibrary.org/b/id/$coverI-M.jpg")
+                    val bitmap = BitmapFactory.decodeStream(imgUrl.openStream())
+                    return@withContext bitmap?.asImageBitmap()
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
+
+private fun loadEmbeddedCoverArt(context: Context, uri: Uri): ImageBitmap? {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(context, uri)
+        val artBytes = retriever.embeddedPicture
+        retriever.release()
+        if (artBytes != null) {
+            BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size)?.asImageBitmap()
+        } else null
+    } catch (e: Exception) {
+        try { retriever.release() } catch (_: Exception) {}
+        null
+    }
+}
+
+private fun scanFolderForAudiobooks(context: Context, folderUri: Uri): List<Audiobook> {
+    val bookList = mutableListOf<Audiobook>()
+    val rootDocument = DocumentFile.fromTreeUri(context, folderUri) ?: return emptyList()
+    traverseDirectoryForBooks(rootDocument, rootDocument, bookList)
+    return bookList
+}
+
+private fun traverseDirectoryForBooks(currentDir: DocumentFile, rootDir: DocumentFile, bookList: MutableList<Audiobook>) {
+    val files = currentDir.listFiles()
+    val audioFiles = mutableListOf<DocumentFile>()
+    val subDirs = mutableListOf<DocumentFile>()
+
+    for (file in files) {
+        if (file.isDirectory) {
+            subDirs.add(file)
+        } else if (file.isFile) {
+            val name = file.name ?: continue
+            if (name.endsWith(".mp3", ignoreCase = true) ||
+                name.endsWith(".m4a", ignoreCase = true) ||
+                name.endsWith(".m4b", ignoreCase = true)
+            ) {
+                audioFiles.add(file)
+            }
+        }
+    }
+
+    if (audioFiles.isNotEmpty()) {
+        val sortedTracks = audioFiles.map {
+            AudioTrack(name = it.name?.substringBeforeLast(".") ?: "Track", uri = it.uri)
+        }.sortedWith(Comparator { a, b -> a.name.compareTo(b.name, ignoreCase = true) })
+
+        val parentDir = currentDir.parentFile
+        val grandParentDir = parentDir?.parentFile
+
+        var authorName = "Unknown Author"
+        var seriesName = ""
+
+        if (currentDir != rootDir && parentDir != null && parentDir != rootDir) {
+            if (grandParentDir != null && grandParentDir != rootDir && grandParentDir.name != null) {
+                authorName = grandParentDir.name!!
+                seriesName = parentDir.name!!
+            } else if (parentDir.name != null) {
+                authorName = parentDir.name!!
+            }
+        }
+
+        val bookTitle = if (currentDir.name != null && currentDir != rootDir) currentDir.name!! else sortedTracks.first().name
+
+        if (audioFiles.size == 1 && sortedTracks.first().name.endsWith(".m4b", ignoreCase = true)) {
+            bookList.add(
+                Audiobook(
+                    id = sortedTracks.first().uri.toString(),
+                    title = sortedTracks.first().name,
+                    author = authorName,
+                    series = seriesName,
+                    tracks = sortedTracks
+                )
+            )
+        } else {
+            bookList.add(
+                Audiobook(
+                    id = currentDir.uri.toString(),
+                    title = bookTitle,
+                    author = authorName,
+                    series = seriesName,
+                    tracks = sortedTracks
+                )
+            )
+        }
+    }
+
+    for (dir in subDirs) {
+        traverseDirectoryForBooks(dir, rootDir, bookList)
+    }
+}
+
+private fun playBook(player: ExoPlayer, book: Audiobook, startPositionMs: Long, autoPlay: Boolean = true) {
+    val mediaItems = book.tracks.map { MediaItem.fromUri(it.uri) }
+    player.setMediaItems(mediaItems)
+    player.seekTo(0, startPositionMs)
+    player.prepare()
+    player.playWhenReady = autoPlay
+}
+
+private fun formatTime(ms: Long): String {
+    val totalSeconds = ms / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    val hours = minutes / 60
+    val remainingMinutes = minutes % 60
+
+    return if (hours > 0) {
+        String.format("%d:%02d:%02d", hours, remainingMinutes, seconds)
+    } else {
+        String.format("%02d:%02d", remainingMinutes, seconds)
+    }
+}
