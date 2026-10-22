@@ -14,6 +14,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -34,10 +35,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -142,6 +146,37 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@Composable
+fun ContrastThemeIcon(
+    tint: Color = MaterialTheme.colorScheme.primary,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val strokeWidth = 2.dp.toPx()
+        val radius = (size.minDimension / 2) - strokeWidth
+        val center = Offset(size.width / 2, size.height / 2)
+
+        // Outer circular ring
+        drawCircle(
+            color = tint,
+            radius = radius,
+            center = center,
+            style = Stroke(width = strokeWidth)
+        )
+
+        // Solid filled left half
+        val innerRadius = radius - 1.5dp.toPx()
+        drawArc(
+            color = tint,
+            startAngle = 90f,
+            sweepAngle = 180f,
+            useCenter = true,
+            topLeft = Offset(center.x - innerRadius, center.y - innerRadius),
+            size = Size(innerRadius * 2, innerRadius * 2)
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SirinAudiobookApp(
@@ -162,12 +197,10 @@ fun SirinAudiobookApp(
 
     var isPlayerFullScreen by remember { mutableStateOf(false) }
 
-    // System Back Button Navigation
     BackHandler(enabled = isPlayerFullScreen) {
         isPlayerFullScreen = false
     }
 
-    // Custom Cover Picker State
     var targetBookForCustomCover by remember { mutableStateOf<Audiobook?>(null) }
     val customCoverLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -186,7 +219,6 @@ fun SirinAudiobookApp(
         }
     }
 
-    // Audio Controls State
     var playbackSpeed by remember { mutableFloatStateOf(prefs.getFloat("last_speed", 1.0f)) }
     var playbackPitch by remember { mutableFloatStateOf(prefs.getFloat("last_pitch", 1.0f)) }
     var volumeBoostEnabled by remember { mutableStateOf(prefs.getBoolean("volume_boost", false)) }
@@ -194,13 +226,11 @@ fun SirinAudiobookApp(
     var skipIntervalSeconds by remember { mutableIntStateOf(prefs.getInt("skip_interval", 15)) }
     var playerVolume by remember { mutableFloatStateOf(player.volume) }
 
-    // Sleep Timer States
     var sleepTimerActive by remember { mutableStateOf(false) }
     var sleepTimeRemaining by remember { mutableLongStateOf(0L) }
     var sleepEndAtChapter by remember { mutableStateOf(false) }
     var showSleepMenu by remember { mutableStateOf(false) }
 
-    // Analytics States
     var totalListenMs by remember { mutableLongStateOf(prefs.getLong("total_listen_ms", 0L)) }
     var completedBooksCount by remember { mutableIntStateOf(prefs.getInt("completed_books_count", 0)) }
     var showAnalyticsDialog by remember { mutableStateOf(false) }
@@ -221,7 +251,6 @@ fun SirinAudiobookApp(
     var currentCoverArt by remember { mutableStateOf<ImageBitmap?>(null) }
     var chaptersList by remember { mutableStateOf<List<Chapter>>(emptyList()) }
 
-    // Backup & Restore Exporters
     val backupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
@@ -271,7 +300,6 @@ fun SirinAudiobookApp(
         }
     }
 
-    // Persistable Folder Picker Launcher
     val folderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -1342,6 +1370,7 @@ fun NowPlayingScreen(
 
                 Spacer(Modifier.height(20.dp))
 
+                // Bottom Toggles Row (Updated iOS-style contrast circle for theme toggle)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly,
@@ -1375,11 +1404,11 @@ fun NowPlayingScreen(
                         }
                     }
 
+                    // iOS Style Contrast Split-Circle Theme Toggle
                     IconButton(onClick = onToggleTheme) {
-                        Icon(
-                            imageVector = if (isDarkTheme) Icons.Default.DarkMode else Icons.Default.LightMode,
-                            contentDescription = "Toggle Theme",
-                            tint = MaterialTheme.colorScheme.primary
+                        ContrastThemeIcon(
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
 
