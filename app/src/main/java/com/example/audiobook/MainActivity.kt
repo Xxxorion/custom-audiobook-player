@@ -153,8 +153,8 @@ fun ContrastThemeIcon(
 ) {
     Canvas(modifier = modifier) {
         val strokeWidth = 2.dp.toPx()
-        val radius = (size.minDimension / 2) - strokeWidth
-        val center = Offset(size.width / 2, size.height / 2)
+        val radius = (size.minDimension / 2f) - strokeWidth
+        val center = Offset(size.width / 2f, size.height / 2f)
 
         // Outer circular ring
         drawCircle(
@@ -165,14 +165,14 @@ fun ContrastThemeIcon(
         )
 
         // Solid filled left half
-        val innerRadius = radius - 1.5dp.toPx()
+        val innerRadius = (radius - (strokeWidth / 2f)).coerceAtLeast(0f)
         drawArc(
             color = tint,
             startAngle = 90f,
             sweepAngle = 180f,
             useCenter = true,
             topLeft = Offset(center.x - innerRadius, center.y - innerRadius),
-            size = Size(innerRadius * 2, innerRadius * 2)
+            size = Size(innerRadius * 2f, innerRadius * 2f)
         )
     }
 }
@@ -1370,7 +1370,6 @@ fun NowPlayingScreen(
 
                 Spacer(Modifier.height(20.dp))
 
-                // Bottom Toggles Row (Updated iOS-style contrast circle for theme toggle)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly,
@@ -1404,7 +1403,6 @@ fun NowPlayingScreen(
                         }
                     }
 
-                    // iOS Style Contrast Split-Circle Theme Toggle
                     IconButton(onClick = onToggleTheme) {
                         ContrastThemeIcon(
                             tint = MaterialTheme.colorScheme.primary,
