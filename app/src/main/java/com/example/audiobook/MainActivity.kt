@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -967,7 +966,8 @@ fun SirinAudiobookApp(
             text = {
                 Box(modifier = Modifier.heightIn(max = 350.dp)) {
                     LazyColumn {
-                        itemsIndexed(displayChapters) { idx, chapter ->
+                        items(displayChapters.size) { idx ->
+                            val chapter = displayChapters[idx]
                             val isCurrent = if (chaptersList.isNotEmpty()) {
                                 val nextStart = chaptersList.getOrNull(idx + 1)?.startMs ?: Long.MAX_VALUE
                                 currentPosition >= chapter.startMs && currentPosition < nextStart
@@ -1553,7 +1553,8 @@ fun BookshelfContent(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                itemsIndexed(books) { _, book ->
+                items(books.size) { index ->
+                    val book = books[index]
                     val isSelected = books.indexOf(book) == currentBookIndex
                     var cardArt by remember(book.id) { mutableStateOf<ImageBitmap?>(null) }
                     
@@ -1578,7 +1579,8 @@ fun BookshelfContent(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                itemsIndexed(books) { _, book ->
+                items(books.size) { index ->
+                    val book = books[index]
                     val isSelected = books.indexOf(book) == currentBookIndex
                     var cardArt by remember(book.id) { mutableStateOf<ImageBitmap?>(null) }
                     
