@@ -135,24 +135,25 @@ class MainActivity : ComponentActivity() {
 
             var isDarkTheme by remember { mutableStateOf(prefs.getBoolean("is_dark_theme", true)) }
 
+            // FABLEWOOD THEME COLORS
             val darkColors = darkColorScheme(
-                background = Color(0xFF181A20),
-                surface = Color(0xFF22252D),
-                surfaceVariant = Color(0xFF2A2E39),
-                primary = Color(0xFFFF6D00),
+                background = Color(0xFF0C1A14), // Deep forest green
+                surface = Color(0xFF142B20), // Rich mossy surface
+                surfaceVariant = Color(0xFF1E3F30),
+                primary = Color(0xFFD4AF37), // Warm Gold accent
                 onPrimary = Color.Black,
-                secondary = Color(0xFF4DB6AC),
-                tertiary = Color(0xFFFF3D00)
+                secondary = Color(0xFF2D5A27),
+                tertiary = Color(0xFF8B5A2B) // Wood tone
             )
 
             val lightColors = lightColorScheme(
-                background = Color(0xFFF4F5F8),
+                background = Color(0xFFF0F4F1), // Crisp light green-grey
                 surface = Color(0xFFFFFFFF),
-                surfaceVariant = Color(0xFFE2E4EB),
-                primary = Color(0xFFFF6D00),
+                surfaceVariant = Color(0xFFDCE6E0),
+                primary = Color(0xFFB58500), // Dark Goldenrod
                 onPrimary = Color.White,
-                secondary = Color(0xFF00897B),
-                tertiary = Color(0xFFD32F2F)
+                secondary = Color(0xFF3E7A45),
+                tertiary = Color(0xFF8B5A2B)
             )
 
             MaterialTheme(colorScheme = if (isDarkTheme) darkColors else lightColors) {
@@ -1498,7 +1499,7 @@ fun CarModeScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF101216))
+            .background(Color(0xFF08120E))
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
@@ -1515,7 +1516,7 @@ fun CarModeScreen(
             }
             IconButton(
                 onClick = onExitCarMode,
-                modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xFF2E323D))
+                modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xFF1A3324))
             ) {
                 Icon(Icons.Default.Close, contentDescription = "Exit Car Mode", tint = Color.White, modifier = Modifier.size(28.dp))
             }
@@ -1549,7 +1550,7 @@ fun CarModeScreen(
         ) {
             IconButton(
                 onClick = onQuickRewind,
-                modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF222630))
+                modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF12241C))
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(Icons.Default.Replay30, contentDescription = "Rewind 30s", tint = Color.White, modifier = Modifier.size(40.dp))
@@ -1558,19 +1559,19 @@ fun CarModeScreen(
 
             IconButton(
                 onClick = onPlayPause,
-                modifier = Modifier.size(128.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary)
+                modifier = Modifier.size(128.dp)
             ) {
                 Icon(
                     imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                     contentDescription = "Play/Pause",
-                    tint = Color.Black,
-                    modifier = Modifier.size(72.dp)
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(96.dp)
                 )
             }
 
             IconButton(
                 onClick = onQuickForward,
-                modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF222630))
+                modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF12241C))
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(Icons.Default.Forward30, contentDescription = "Forward 30s", tint = Color.White, modifier = Modifier.size(40.dp))
@@ -1582,7 +1583,7 @@ fun CarModeScreen(
             onClick = onAddBookmark,
             modifier = Modifier.fillMaxWidth().height(60.dp),
             shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A2E39))
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A3324))
         ) {
             Icon(Icons.Default.BookmarkAdd, contentDescription = null, tint = Color.White, modifier = Modifier.size(28.dp))
             Spacer(Modifier.width(12.dp))
@@ -1837,17 +1838,15 @@ fun NowPlayingScreen(
                         }
                     }
 
-                    FloatingActionButton(
+                    IconButton(
                         onClick = onPlayPause,
-                        shape = CircleShape,
-                        containerColor = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(60.dp)
                     ) {
                         Icon(
                             imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                             contentDescription = "Play/Pause",
-                            tint = Color.Black,
-                            modifier = Modifier.size(34.dp)
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(52.dp)
                         )
                     }
 
