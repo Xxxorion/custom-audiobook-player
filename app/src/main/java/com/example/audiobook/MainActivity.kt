@@ -7,7 +7,6 @@ import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
-import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.os.Bundle
 import android.util.LruCache
@@ -52,7 +51,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Metadata
 import androidx.media3.common.PlaybackException
@@ -60,6 +58,7 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.extractor.metadata.id3.ChapterFrame
 import androidx.media3.session.MediaController
+import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -299,6 +298,13 @@ fun SirinAudiobookApp(
         books.find { it.id == currentBookId }
     }
 
+    fun sendCustomCommand(action: String, enabled: Boolean) {
+        (player as? MediaController)?.sendCustomCommand(
+            SessionCommand(action, Bundle.EMPTY),
+            Bundle().apply { putBoolean(AudiobookPlaybackService.KEY_ENABLED, enabled) }
+        )
+    }
+
     fun refreshBookmarksForCurrentBook() {
         activeBook?.let {
             currentBookBookmarks = loadBookBookmarks(prefs, it.id)
@@ -439,25 +445,11 @@ fun SirinAudiobookApp(
     }
 
     LaunchedEffect(silenceTrimEnabled) {
-        player.skipSilenceEnabled = silenceTrimEnabled
+        sendCustomCommand(AudiobookPlaybackService.ACTION_SET_SILENCE_TRIM, silenceTrimEnabled)
     }
 
-    DisposableEffect(volumeBoostEnabled, player.audioSessionId) {
-        var enhancer: LoudnessEnhancer? = null
-        if (volumeBoostEnabled && player.audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
-            try {
-                enhancer = LoudnessEnhancer(player.audioSessionId).apply {
-                    setTargetGain(1200)
-                    enabled = true
-                }
-            } catch (_: Exception) {}
-        }
-        onDispose {
-            try {
-                enhancer?.enabled = false
-                enhancer?.release()
-            } catch (_: Exception) {}
-        }
+    LaunchedEffect(volumeBoostEnabled) {
+        sendCustomCommand(AudiobookPlaybackService.ACTION_SET_VOLUME_BOOST, volumeBoostEnabled)
     }
 
     fun updateCoverArtForBook(book: Audiobook) {
@@ -932,7 +924,7 @@ fun SirinAudiobookApp(
                                             Icon(Icons.Default.Close, contentDescription = "Close Search")
                                         }
                                     } else {
-                                        Text("SIRIN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                                        Text("FABLEWOOD", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
 
                                         Row {
                                             IconButton(onClick = { showAudioFXDialog = true }) {
