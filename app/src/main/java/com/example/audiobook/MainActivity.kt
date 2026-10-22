@@ -9,6 +9,7 @@ import android.media.MediaMetadataRetriever
 import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.os.Bundle
+import android.util.LruCache
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -24,7 +25,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -67,6 +67,7 @@ import java.io.BufferedReader
 import java.io.DataInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
@@ -75,6 +76,17 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
 import kotlin.math.round
+
+// In-memory LRU Cache for Cover Art (1/8th of available app RAM)
+private object CoverMemoryCache {
+    private val maxMemory = (Runtime.getRuntime().maxMemory() / 1024).toInt()
+    private val cacheSize = (maxMemory / 8).coerceAtLeast(1024)
+    val cache = object : LruCache<String, ImageBitmap>(cacheSize) {
+        override fun sizeOf(key: String, bitmap: ImageBitmap): Int {
+            return bitmap.asAndroidBitmap().byteCount / 1024
+        }
+    }
+}
 
 data class AudioTrack(val name: String, val uri: Uri)
 data class Audiobook(
@@ -303,18 +315,20 @@ fun SirinAudiobookApp(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
         uri?.let {
-            val jsonBackup = JSONObject().apply {
-                put("total_listen_ms", totalListenMs)
-                put("completed_books_count", completedBooksCount)
-                put("last_speed", playbackSpeed)
-                put("last_pitch", playbackPitch)
-                put("skip_interval", skipIntervalSeconds)
-                put("selected_folder", selectedFolderUriString)
-                put("backup_date", SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date()))
-            }.toString(4)
+            coroutineScope.launch(Dispatchers.IO) {
+                val jsonBackup = JSONObject().apply {
+                    put("total_listen_ms", totalListenMs)
+                    put("completed_books_count", completedBooksCount)
+                    put("last_speed", playbackSpeed)
+                    put("last_pitch", playbackPitch)
+                    put("skip_interval", skipIntervalSeconds)
+                    put("selected_folder", selectedFolderUriString)
+                    put("backup_date", SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date()))
+                }.toString(4)
 
-            context.contentResolver.openOutputStream(it)?.use { stream ->
-                stream.write(jsonBackup.toByteArray())
+                context.contentResolver.openOutputStream(it)?.use { stream ->
+                    stream.write(jsonBackup.toByteArray())
+                }
             }
         }
     }
@@ -323,28 +337,30 @@ fun SirinAudiobookApp(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let {
-            try {
-                context.contentResolver.openInputStream(it)?.use { stream ->
-                    val reader = BufferedReader(InputStreamReader(stream))
-                    val jsonText = reader.readText()
-                    val json = JSONObject(jsonText)
+            coroutineScope.launch(Dispatchers.IO) {
+                try {
+                    context.contentResolver.openInputStream(it)?.use { stream ->
+                        val reader = BufferedReader(InputStreamReader(stream))
+                        val jsonText = reader.readText()
+                        val json = JSONObject(jsonText)
 
-                    totalListenMs = json.optLong("total_listen_ms", totalListenMs)
-                    completedBooksCount = json.optInt("completed_books_count", completedBooksCount)
-                    playbackSpeed = json.optDouble("last_speed", playbackSpeed.toDouble()).toFloat()
-                    playbackPitch = json.optDouble("last_pitch", playbackPitch.toDouble()).toFloat()
-                    skipIntervalSeconds = json.optInt("skip_interval", skipIntervalSeconds)
+                        totalListenMs = json.optLong("total_listen_ms", totalListenMs)
+                        completedBooksCount = json.optInt("completed_books_count", completedBooksCount)
+                        playbackSpeed = json.optDouble("last_speed", playbackSpeed.toDouble()).toFloat()
+                        playbackPitch = json.optDouble("last_pitch", playbackPitch.toDouble()).toFloat()
+                        skipIntervalSeconds = json.optInt("skip_interval", skipIntervalSeconds)
 
-                    prefs.edit().apply {
-                        putLong("total_listen_ms", totalListenMs)
-                        putInt("completed_books_count", completedBooksCount)
-                        putFloat("last_speed", playbackSpeed)
-                        putFloat("last_pitch", playbackPitch)
-                        putInt("skip_interval", skipIntervalSeconds)
-                        apply()
+                        prefs.edit().apply {
+                            putLong("total_listen_ms", totalListenMs)
+                            putInt("completed_books_count", completedBooksCount)
+                            putFloat("last_speed", playbackSpeed)
+                            putFloat("last_pitch", playbackPitch)
+                            putInt("skip_interval", skipIntervalSeconds)
+                            apply()
+                        }
                     }
-                }
-            } catch (_: Exception) {}
+                } catch (_: Exception) {}
+            }
         }
     }
 
@@ -360,15 +376,17 @@ fun SirinAudiobookApp(
             val stringUri = it.toString()
             selectedFolderUriString = stringUri
             prefs.edit().putString("selected_folder", stringUri).apply()
-            
-            val scannedBooks = scanFolderForAudiobooks(context, it)
-            if (scannedBooks.isNotEmpty()) {
-                books = scannedBooks
-                currentBookIndex = 0
-                applyBookSpecificSpeed(scannedBooks[0].id)
-                refreshBookmarksForCurrentBook()
-                loadChaptersForBook(scannedBooks[0])
-                playBook(player, scannedBooks[0], 0L, autoPlay = false)
+
+            coroutineScope.launch {
+                val scannedBooks = scanFolderForAudiobooks(context, it)
+                if (scannedBooks.isNotEmpty()) {
+                    books = scannedBooks
+                    currentBookIndex = 0
+                    applyBookSpecificSpeed(scannedBooks[0].id)
+                    refreshBookmarksForCurrentBook()
+                    loadChaptersForBook(scannedBooks[0])
+                    playBook(player, scannedBooks[0], 0L, autoPlay = false)
+                }
             }
         }
     }
@@ -376,13 +394,15 @@ fun SirinAudiobookApp(
     fun scanSavedFolder() {
         val savedUriStr = prefs.getString("selected_folder", "") ?: ""
         if (savedUriStr.isNotEmpty()) {
-            try {
-                val folderUri = Uri.parse(savedUriStr)
-                val scannedBooks = scanFolderForAudiobooks(context, folderUri)
-                if (scannedBooks.isNotEmpty()) {
-                    books = scannedBooks
-                }
-            } catch (_: Exception) {}
+            coroutineScope.launch {
+                try {
+                    val folderUri = Uri.parse(savedUriStr)
+                    val scannedBooks = scanFolderForAudiobooks(context, folderUri)
+                    if (scannedBooks.isNotEmpty()) {
+                        books = scannedBooks
+                    }
+                } catch (_: Exception) {}
+            }
         }
     }
 
@@ -394,12 +414,21 @@ fun SirinAudiobookApp(
         player.skipSilenceEnabled = silenceTrimEnabled
     }
 
-    LaunchedEffect(volumeBoostEnabled, isPlaying) {
+    // Leaking audio session native resource fix using DisposableEffect
+    DisposableEffect(volumeBoostEnabled, isPlaying) {
+        var enhancer: LoudnessEnhancer? = null
         if (volumeBoostEnabled && player.audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
             try {
-                val enhancer = LoudnessEnhancer(player.audioSessionId)
-                enhancer.setTargetGain(1200)
-                enhancer.enabled = true
+                enhancer = LoudnessEnhancer(player.audioSessionId).apply {
+                    setTargetGain(1200)
+                    enabled = true
+                }
+            } catch (_: Exception) {}
+        }
+        onDispose {
+            try {
+                enhancer?.enabled = false
+                enhancer?.release()
             } catch (_: Exception) {}
         }
     }
@@ -414,26 +443,28 @@ fun SirinAudiobookApp(
     LaunchedEffect(Unit) {
         val savedUriStr = prefs.getString("selected_folder", "") ?: ""
         if (savedUriStr.isNotEmpty()) {
-            try {
-                val folderUri = Uri.parse(savedUriStr)
-                val scannedBooks = scanFolderForAudiobooks(context, folderUri)
-                books = scannedBooks
-                val lastBookId = prefs.getString("last_book_id", "")
-                val savedIndex = scannedBooks.indexOfFirst { b -> b.id == lastBookId }
-                if (savedIndex != -1) {
-                    currentBookIndex = savedIndex
-                    val savedPos = prefs.getLong("last_track_pos", 0L)
-                    val lastPauseTime = prefs.getLong("last_pause_time", 0L)
-                    val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
-                    currentPosition = rewindPos
+            coroutineScope.launch {
+                try {
+                    val folderUri = Uri.parse(savedUriStr)
+                    val scannedBooks = scanFolderForAudiobooks(context, folderUri)
+                    books = scannedBooks
+                    val lastBookId = prefs.getString("last_book_id", "")
+                    val savedIndex = scannedBooks.indexOfFirst { b -> b.id == lastBookId }
+                    if (savedIndex != -1) {
+                        currentBookIndex = savedIndex
+                        val savedPos = prefs.getLong("last_track_pos", 0L)
+                        val lastPauseTime = prefs.getLong("last_pause_time", 0L)
+                        val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
+                        currentPosition = rewindPos
 
-                    applyBookSpecificSpeed(scannedBooks[savedIndex].id)
-                    refreshBookmarksForCurrentBook()
-                    loadChaptersForBook(scannedBooks[savedIndex])
-                    updateCoverArtForBook(scannedBooks[savedIndex])
-                    playBook(player, scannedBooks[savedIndex], rewindPos, autoPlay = false)
-                }
-            } catch (_: Exception) {}
+                        applyBookSpecificSpeed(scannedBooks[savedIndex].id)
+                        refreshBookmarksForCurrentBook()
+                        loadChaptersForBook(scannedBooks[savedIndex])
+                        updateCoverArtForBook(scannedBooks[savedIndex])
+                        playBook(player, scannedBooks[savedIndex], rewindPos, autoPlay = false)
+                    }
+                } catch (_: Exception) {}
+            }
         }
     }
 
@@ -473,17 +504,27 @@ fun SirinAudiobookApp(
         }
     }
 
+    // Throttled SharedPreferences disk writes to 30s intervals during active listening
     LaunchedEffect(isPlaying) {
+        var elapsedSecs = 0
         while (isPlaying) {
             currentPosition = player.currentPosition.coerceAtLeast(0L)
             delay(1000)
             totalListenMs += 1000L
-            prefs.edit().putLong("total_listen_ms", totalListenMs).apply()
+            elapsedSecs++
+
+            if (elapsedSecs >= 30) {
+                elapsedSecs = 0
+                prefs.edit().putLong("total_listen_ms", totalListenMs).apply()
+            }
 
             if (duration > 0L && currentPosition >= duration - 2000L) {
                 completedBooksCount += 1
                 prefs.edit().putInt("completed_books_count", completedBooksCount).apply()
             }
+        }
+        if (!isPlaying) {
+            prefs.edit().putLong("total_listen_ms", totalListenMs).apply()
         }
     }
 
@@ -966,7 +1007,7 @@ fun SirinAudiobookApp(
             text = {
                 Box(modifier = Modifier.heightIn(max = 350.dp)) {
                     LazyColumn {
-                        items(displayChapters.size) { idx ->
+                        items(count = displayChapters.size, key = { idx -> idx }) { idx ->
                             val chapter = displayChapters[idx]
                             val isCurrent = if (chaptersList.isNotEmpty()) {
                                 val nextStart = chaptersList.getOrNull(idx + 1)?.startMs ?: Long.MAX_VALUE
@@ -1068,7 +1109,8 @@ fun SirinAudiobookApp(
                     } else {
                         Box(modifier = Modifier.heightIn(max = 300.dp)) {
                             LazyColumn {
-                                items(currentBookBookmarks) { bm ->
+                                items(count = currentBookBookmarks.size, key = { idx -> currentBookBookmarks[idx].id }) { idx ->
+                                    val bm = currentBookBookmarks[idx]
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -1553,11 +1595,11 @@ fun BookshelfContent(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                items(books.size) { index ->
+                items(count = books.size, key = { idx -> books[idx].id }) { index ->
                     val book = books[index]
                     val isSelected = books.indexOf(book) == currentBookIndex
                     var cardArt by remember(book.id) { mutableStateOf<ImageBitmap?>(null) }
-                    
+
                     LaunchedEffect(book.id) {
                         cardArt = getOrFetchCoverArt(context, book)
                     }
@@ -1579,11 +1621,11 @@ fun BookshelfContent(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(books.size) { index ->
+                items(count = books.size, key = { idx -> books[idx].id }) { index ->
                     val book = books[index]
                     val isSelected = books.indexOf(book) == currentBookIndex
                     var cardArt by remember(book.id) { mutableStateOf<ImageBitmap?>(null) }
-                    
+
                     LaunchedEffect(book.id) {
                         cardArt = getOrFetchCoverArt(context, book)
                     }
@@ -2080,38 +2122,43 @@ private fun deleteBookBookmark(prefs: SharedPreferences, bookId: String, bookmar
     } catch (_: Exception) {}
 }
 
+// Memory-safe stream reading for M4B headers without loading gigabytes into heap RAM
 private suspend fun extractM4bChapters(context: Context, uri: Uri): List<Chapter> {
     return withContext(Dispatchers.IO) {
         val chapters = mutableListOf<Chapter>()
         try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
-                val bytes = stream.readBytes()
+                // Read up to 8MB header max to locate atom metadata
+                val maxHeaderBytes = 8 * 1024 * 1024
+                val buffer = ByteArray(maxHeaderBytes)
+                val bytesRead = stream.read(buffer, 0, maxHeaderBytes)
+                if (bytesRead <= 0) return@withContext emptyList()
+
                 var i = 0
-                while (i < bytes.size - 8) {
-                    if (bytes[i] == 'c'.code.toByte() &&
-                        bytes[i + 1] == 'h'.code.toByte() &&
-                        bytes[i + 2] == 'p'.code.toByte() &&
-                        bytes[i + 3] == 'l'.code.toByte()
+                while (i < bytesRead - 8) {
+                    if (buffer[i] == 'c'.code.toByte() &&
+                        buffer[i + 1] == 'h'.code.toByte() &&
+                        buffer[i + 2] == 'p'.code.toByte() &&
+                        buffer[i + 3] == 'l'.code.toByte()
                     ) {
-                        var offset = i + 4
-                        offset += 4
-                        if (offset + 4 <= bytes.size) {
-                            val count = ((bytes[offset].toInt() and 0xFF) shl 24) or
-                                        ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
-                                        ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
-                                        (bytes[offset + 3].toInt() and 0xFF)
+                        var offset = i + 8
+                        if (offset + 4 <= bytesRead) {
+                            val count = ((buffer[offset].toInt() and 0xFF) shl 24) or
+                                        ((buffer[offset + 1].toInt() and 0xFF) shl 16) or
+                                        ((buffer[offset + 2].toInt() and 0xFF) shl 8) or
+                                        (buffer[offset + 3].toInt() and 0xFF)
                             offset += 4
 
                             for (c in 0 until count) {
-                                if (offset + 9 > bytes.size) break
-                                val duration100ns = DataInputStream(bytes.inputStream().apply { skip(offset.toLong()) }).readLong()
+                                if (offset + 9 > bytesRead) break
+                                val duration100ns = DataInputStream(buffer.inputStream().apply { skip(offset.toLong()) }).readLong()
                                 offset += 8
 
-                                val titleLen = bytes[offset].toInt() and 0xFF
+                                val titleLen = buffer[offset].toInt() and 0xFF
                                 offset += 1
 
-                                if (offset + titleLen > bytes.size) break
-                                val titleBytes = bytes.copyOfRange(offset, offset + titleLen)
+                                if (offset + titleLen > bytesRead) break
+                                val titleBytes = buffer.copyOfRange(offset, offset + titleLen)
                                 val title = String(titleBytes, Charsets.UTF_8).trim()
                                 offset += titleLen
 
@@ -2131,22 +2178,29 @@ private suspend fun extractM4bChapters(context: Context, uri: Uri): List<Chapter
 
 private suspend fun getOrFetchCoverArt(context: Context, book: Audiobook): ImageBitmap? {
     return withContext(Dispatchers.IO) {
+        CoverMemoryCache.cache.get(book.id)?.let { return@withContext it }
+
         val cacheFile = File(context.filesDir, "covers/${book.id.hashCode()}.png")
-        
         if (cacheFile.exists()) {
-            val bmp = BitmapFactory.decodeFile(cacheFile.absolutePath)
-            if (bmp != null) return@withContext bmp.asImageBitmap()
+            val bmp = decodeSampledBitmapFromFile(cacheFile.absolutePath, 350, 350)
+            if (bmp != null) {
+                val imageBmp = bmp.asImageBitmap()
+                CoverMemoryCache.cache.put(book.id, imageBmp)
+                return@withContext imageBmp
+            }
         }
 
         val embedded = loadEmbeddedCoverArt(context, book.tracks.first().uri)
         if (embedded != null) {
             saveBitmapToCache(context, book.id, embedded)
+            CoverMemoryCache.cache.put(book.id, embedded)
             return@withContext embedded
         }
 
         val onlineBmp = fetchOnlineCoverArt(book.title, book.author)
         if (onlineBmp != null) {
             saveBitmapToCache(context, book.id, onlineBmp)
+            CoverMemoryCache.cache.put(book.id, onlineBmp)
             return@withContext onlineBmp
         }
 
@@ -2154,15 +2208,36 @@ private suspend fun getOrFetchCoverArt(context: Context, book: Audiobook): Image
     }
 }
 
+private fun decodeSampledBitmapFromFile(path: String, reqWidth: Int, reqHeight: Int): Bitmap? {
+    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, options)
+    options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
+    options.inJustDecodeBounds = false
+    return BitmapFactory.decodeFile(path, options)
+}
+
+private fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
+    val (height: Int, width: Int) = options.outHeight to options.outWidth
+    var inSampleSize = 1
+    if (height > reqHeight || width > reqWidth) {
+        val halfHeight = height / 2
+        val halfWidth = width / 2
+        while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
+            inSampleSize *= 2
+        }
+    }
+    return inSampleSize
+}
+
 private fun saveBitmapToCache(context: Context, bookId: String, imageBitmap: ImageBitmap) {
     try {
         val coversDir = File(context.filesDir, "covers")
         if (!coversDir.exists()) coversDir.mkdirs()
         val cacheFile = File(coversDir, "${bookId.hashCode()}.png")
-        
+
         val androidBmp = imageBitmap.asAndroidBitmap()
         FileOutputStream(cacheFile).use { out ->
-            androidBmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+            androidBmp.compress(Bitmap.CompressFormat.PNG, 90, out)
         }
     } catch (_: Exception) {}
 }
@@ -2174,7 +2249,9 @@ private suspend fun saveCustomCoverArt(context: Context, bookId: String, uri: Ur
             val bitmap = BitmapFactory.decodeStream(stream)
             stream?.close()
             if (bitmap != null) {
-                saveBitmapToCache(context, bookId, bitmap.asImageBitmap())
+                val imageBmp = bitmap.asImageBitmap()
+                saveBitmapToCache(context, bookId, imageBmp)
+                CoverMemoryCache.cache.put(bookId, imageBmp)
             }
         } catch (_: Exception) {}
     }
@@ -2194,7 +2271,9 @@ private suspend fun fetchOnlineCoverArt(title: String, author: String): ImageBit
                 val coverI = docs.getJSONObject(0).optInt("cover_i", -1)
                 if (coverI != -1) {
                     val imgUrl = URL("https://covers.openlibrary.org/b/id/$coverI-M.jpg")
-                    val bitmap = BitmapFactory.decodeStream(imgUrl.openStream())
+                    val stream = imgUrl.openStream()
+                    val bitmap = decodeSampledBitmapFromStream(stream, 350, 350)
+                    stream.close()
                     return@withContext bitmap?.asImageBitmap()
                 }
             }
@@ -2205,6 +2284,15 @@ private suspend fun fetchOnlineCoverArt(title: String, author: String): ImageBit
     }
 }
 
+private fun decodeSampledBitmapFromStream(stream: InputStream, reqWidth: Int, reqHeight: Int): Bitmap? {
+    val bytes = stream.readBytes()
+    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+    options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
+    options.inJustDecodeBounds = false
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+}
+
 private fun loadEmbeddedCoverArt(context: Context, uri: Uri): ImageBitmap? {
     val retriever = MediaMetadataRetriever()
     return try {
@@ -2212,7 +2300,11 @@ private fun loadEmbeddedCoverArt(context: Context, uri: Uri): ImageBitmap? {
         val artBytes = retriever.embeddedPicture
         retriever.release()
         if (artBytes != null) {
-            BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size)?.asImageBitmap()
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size, options)
+            options.inSampleSize = calculateInSampleSize(options, 350, 350)
+            options.inJustDecodeBounds = false
+            BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size, options)?.asImageBitmap()
         } else null
     } catch (e: Exception) {
         try { retriever.release() } catch (_: Exception) {}
@@ -2220,11 +2312,13 @@ private fun loadEmbeddedCoverArt(context: Context, uri: Uri): ImageBitmap? {
     }
 }
 
-private fun scanFolderForAudiobooks(context: Context, folderUri: Uri): List<Audiobook> {
-    val bookList = mutableListOf<Audiobook>()
-    val rootDocument = DocumentFile.fromTreeUri(context, folderUri) ?: return emptyList()
-    traverseDirectoryForBooks(rootDocument, rootDocument, bookList)
-    return bookList
+private suspend fun scanFolderForAudiobooks(context: Context, folderUri: Uri): List<Audiobook> {
+    return withContext(Dispatchers.IO) {
+        val bookList = mutableListOf<Audiobook>()
+        val rootDocument = DocumentFile.fromTreeUri(context, folderUri) ?: return@withContext emptyList()
+        traverseDirectoryForBooks(rootDocument, rootDocument, bookList)
+        bookList
+    }
 }
 
 private fun traverseDirectoryForBooks(currentDir: DocumentFile, rootDir: DocumentFile, bookList: MutableList<Audiobook>) {
