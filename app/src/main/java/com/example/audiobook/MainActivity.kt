@@ -64,6 +64,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.DataInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
@@ -156,7 +157,6 @@ fun ContrastThemeIcon(
         val radius = (size.minDimension / 2f) - strokeWidth
         val center = Offset(size.width / 2f, size.height / 2f)
 
-        // Outer circular ring
         drawCircle(
             color = tint,
             radius = radius,
@@ -164,7 +164,6 @@ fun ContrastThemeIcon(
             style = Stroke(width = strokeWidth)
         )
 
-        // Solid filled left half
         val innerRadius = (radius - (strokeWidth / 2f)).coerceAtLeast(0f)
         drawArc(
             color = tint,
@@ -236,7 +235,6 @@ fun SirinAudiobookApp(
     var showAnalyticsDialog by remember { mutableStateOf(false) }
 
     var selectedFolderUriString by remember { mutableStateOf(prefs.getString("selected_folder", "") ?: "") }
-    var autoScanOnStartup by remember { mutableStateOf(prefs.getBoolean("auto_scan_startup", true)) }
     var viewMode by remember { mutableStateOf(prefs.getString("view_mode", "GRID") ?: "GRID") }
     var sortBy by remember { mutableStateOf(prefs.getString("sort_by", "AUTHOR") ?: "AUTHOR") }
 
@@ -250,6 +248,18 @@ fun SirinAudiobookApp(
 
     var currentCoverArt by remember { mutableStateOf<ImageBitmap?>(null) }
     var chaptersList by remember { mutableStateOf<List<Chapter>>(emptyList()) }
+
+    fun loadChaptersForBook(book: Audiobook) {
+        chaptersList = emptyList()
+        coroutineScope.launch {
+            if (book.tracks.size == 1 && book.tracks.first().name.endsWith(".m4b", ignoreCase = true)) {
+                val extracted = extractM4bChapters(context, book.tracks.first().uri)
+                if (extracted.isNotEmpty()) {
+                    chaptersList = extracted
+                }
+            }
+        }
+    }
 
     val backupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -317,6 +327,7 @@ fun SirinAudiobookApp(
             if (scannedBooks.isNotEmpty()) {
                 books = scannedBooks
                 currentBookIndex = 0
+                loadChaptersForBook(scannedBooks[0])
                 playBook(player, scannedBooks[0], 0L, autoPlay = false)
             }
         }
@@ -376,6 +387,7 @@ fun SirinAudiobookApp(
                     val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
                     currentPosition = rewindPos
 
+                    loadChaptersForBook(scannedBooks[savedIndex])
                     updateCoverArtForBook(scannedBooks[savedIndex])
                     playBook(player, scannedBooks[savedIndex], rewindPos, autoPlay = false)
                 }
@@ -454,6 +466,25 @@ fun SirinAudiobookApp(
                     if (entry is ChapterFrame) {
                         val title = entry.id ?: "Chapter ${parsedChapters.size + 1}"
                         parsedChapters.add(Chapter(title = title, startMs = entry.startTimeMs.toLong()))
+                    } else {
+                        try {
+                            val clazz = entry.javaClass
+                            if (clazz.simpleName.contains("Chapter", ignoreCase = true)) {
+                                val titleStr = clazz.methods.find { it.name == "getTitle" || it.name == "getName" }?.invoke(entry)?.toString()
+                                    ?: clazz.fields.find { it.name == "title" || it.name == "id" }?.get(entry)?.toString()
+                                    ?: "Chapter ${parsedChapters.size + 1}"
+
+                                val startMsVal = clazz.methods.find { it.name == "getStartTimeMs" || it.name == "getStartMs" }?.invoke(entry)
+                                    ?: clazz.fields.find { it.name == "startTimeMs" || it.name == "startMs" }?.get(entry)
+
+                                val startMs = when (startMsVal) {
+                                    is Long -> startMsVal
+                                    is Int -> startMsVal.toLong()
+                                    else -> 0L
+                                }
+                                parsedChapters.add(Chapter(title = titleStr, startMs = startMs))
+                            }
+                        } catch (_: Exception) {}
                     }
                 }
                 if (parsedChapters.isNotEmpty()) {
@@ -551,7 +582,7 @@ fun SirinAudiobookApp(
                             onSelectBook = { book ->
                                 val origIndex = books.indexOf(book)
                                 currentBookIndex = origIndex
-                                chaptersList = emptyList()
+                                loadChaptersForBook(book)
                                 updateCoverArtForBook(book)
                                 playBook(player, book, 0L, autoPlay = false)
                             },
@@ -814,7 +845,7 @@ fun SirinAudiobookApp(
                             onSelectBook = { book ->
                                 val origIndex = books.indexOf(book)
                                 currentBookIndex = origIndex
-                                chaptersList = emptyList()
+                                loadChaptersForBook(book)
                                 updateCoverArtForBook(book)
                                 playBook(player, book, 0L, autoPlay = true)
                                 isPlayerFullScreen = true
@@ -1573,6 +1604,55 @@ private fun calculateSmartRewindPos(savedPos: Long, lastPauseTime: Long): Long {
         else -> 0L
     }
     return (savedPos - rewindMs).coerceAtLeast(0L)
+}
+
+private suspend fun extractM4bChapters(context: Context, uri: Uri): List<Chapter> {
+    return withContext(Dispatchers.IO) {
+        val chapters = mutableListOf<Chapter>()
+        try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                val bytes = stream.readBytes()
+                var i = 0
+                while (i < bytes.size - 8) {
+                    if (bytes[i] == 'c'.code.toByte() &&
+                        bytes[i + 1] == 'h'.code.toByte() &&
+                        bytes[i + 2] == 'p'.code.toByte() &&
+                        bytes[i + 3] == 'l'.code.toByte()
+                    ) {
+                        var offset = i + 4
+                        offset += 4 // Skip version and flags
+                        if (offset + 4 <= bytes.size) {
+                            val count = ((bytes[offset].toInt() and 0xFF) shl 24) or
+                                        ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
+                                        ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
+                                        (bytes[offset + 3].toInt() and 0xFF)
+                            offset += 4
+
+                            for (c in 0 until count) {
+                                if (offset + 9 > bytes.size) break
+                                val duration100ns = DataInputStream(bytes.inputStream().apply { skip(offset.toLong()) }).readLong()
+                                offset += 8
+
+                                val titleLen = bytes[offset].toInt() and 0xFF
+                                offset += 1
+
+                                if (offset + titleLen > bytes.size) break
+                                val titleBytes = bytes.copyOfRange(offset, offset + titleLen)
+                                val title = String(titleBytes, Charsets.UTF_8).trim()
+                                offset += titleLen
+
+                                val startMs = duration100ns / 10000L
+                                chapters.add(Chapter(title = if (title.isNotBlank()) title else "Chapter ${c + 1}", startMs = startMs))
+                            }
+                        }
+                        break
+                    }
+                    i++
+                }
+            }
+        } catch (_: Exception) {}
+        chapters
+    }
 }
 
 private suspend fun getOrFetchCoverArt(context: Context, book: Audiobook): ImageBitmap? {
