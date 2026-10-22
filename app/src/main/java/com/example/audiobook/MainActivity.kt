@@ -25,7 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -62,6 +62,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.DataInputStream
@@ -74,6 +75,7 @@ import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
+import kotlin.math.round
 
 data class AudioTrack(val name: String, val uri: Uri)
 data class Audiobook(
@@ -84,6 +86,14 @@ data class Audiobook(
     val tracks: List<AudioTrack>
 )
 data class Chapter(val title: String, val startMs: Long)
+
+data class Bookmark(
+    val id: String = UUID.randomUUID().toString(),
+    val positionMs: Long,
+    val chapterTitle: String,
+    val note: String,
+    val timestampStr: String = SimpleDateFormat("MMM dd, HH:mm", Locale.getDefault()).format(Date())
+)
 
 class MainActivity : ComponentActivity() {
     private var exoPlayer: ExoPlayer? = null
@@ -195,9 +205,14 @@ fun SirinAudiobookApp(
     var duration by remember { mutableLongStateOf(0L) }
 
     var isPlayerFullScreen by remember { mutableStateOf(false) }
+    var isCarModeActive by remember { mutableStateOf(false) }
 
-    BackHandler(enabled = isPlayerFullScreen) {
-        isPlayerFullScreen = false
+    BackHandler(enabled = isCarModeActive || isPlayerFullScreen) {
+        if (isCarModeActive) {
+            isCarModeActive = false
+        } else {
+            isPlayerFullScreen = false
+        }
     }
 
     var targetBookForCustomCover by remember { mutableStateOf<Audiobook?>(null) }
@@ -218,7 +233,7 @@ fun SirinAudiobookApp(
         }
     }
 
-    var playbackSpeed by remember { mutableFloatStateOf(prefs.getFloat("last_speed", 1.0f)) }
+    var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
     var playbackPitch by remember { mutableFloatStateOf(prefs.getFloat("last_pitch", 1.0f)) }
     var volumeBoostEnabled by remember { mutableStateOf(prefs.getBoolean("volume_boost", false)) }
     var silenceTrimEnabled by remember { mutableStateOf(prefs.getBoolean("silence_trim", false)) }
@@ -245,9 +260,33 @@ fun SirinAudiobookApp(
     var showSortDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showAudioFXDialog by remember { mutableStateOf(false) }
+    var showChaptersDialog by remember { mutableStateOf(false) }
+    var showBookmarksDialog by remember { mutableStateOf(false) }
+    var showSpeedDialog by remember { mutableStateOf(false) }
+    var newBookmarkNoteText by remember { mutableStateOf("") }
+    var showAddBookmarkPrompt by remember { mutableStateOf(false) }
 
     var currentCoverArt by remember { mutableStateOf<ImageBitmap?>(null) }
     var chaptersList by remember { mutableStateOf<List<Chapter>>(emptyList()) }
+    var currentBookBookmarks by remember { mutableStateOf<List<Bookmark>>(emptyList()) }
+
+    fun refreshBookmarksForCurrentBook() {
+        if (currentBookIndex in books.indices) {
+            currentBookBookmarks = loadBookBookmarks(prefs, books[currentBookIndex].id)
+        }
+    }
+
+    fun applyBookSpecificSpeed(bookId: String) {
+        val savedSpeed = loadBookSpeeds(prefs)[bookId] ?: 1.0f
+        playbackSpeed = savedSpeed
+    }
+
+    fun updateSpeedForCurrentBook(newSpeed: Float) {
+        playbackSpeed = newSpeed
+        if (currentBookIndex in books.indices) {
+            saveBookSpeed(prefs, books[currentBookIndex].id, newSpeed)
+        }
+    }
 
     fun loadChaptersForBook(book: Audiobook) {
         chaptersList = emptyList()
@@ -327,6 +366,8 @@ fun SirinAudiobookApp(
             if (scannedBooks.isNotEmpty()) {
                 books = scannedBooks
                 currentBookIndex = 0
+                applyBookSpecificSpeed(scannedBooks[0].id)
+                refreshBookmarksForCurrentBook()
                 loadChaptersForBook(scannedBooks[0])
                 playBook(player, scannedBooks[0], 0L, autoPlay = false)
             }
@@ -387,6 +428,8 @@ fun SirinAudiobookApp(
                     val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
                     currentPosition = rewindPos
 
+                    applyBookSpecificSpeed(scannedBooks[savedIndex].id)
+                    refreshBookmarksForCurrentBook()
                     loadChaptersForBook(scannedBooks[savedIndex])
                     updateCoverArtForBook(scannedBooks[savedIndex])
                     playBook(player, scannedBooks[savedIndex], rewindPos, autoPlay = false)
@@ -401,7 +444,6 @@ fun SirinAudiobookApp(
                 putString("last_book_id", books[currentBookIndex].id)
                 putLong("last_track_pos", currentPosition)
                 putLong("last_pause_time", System.currentTimeMillis())
-                putFloat("last_speed", playbackSpeed)
                 putFloat("last_pitch", playbackPitch)
                 apply()
             }
@@ -520,346 +562,589 @@ fun SirinAudiobookApp(
         }
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.surface) {
-                Spacer(Modifier.height(24.dp))
-                Row(
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.Headphones, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp))
-                    Spacer(Modifier.width(12.dp))
-                    Text("Audiobooks", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                }
-                Divider(modifier = Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.surfaceVariant)
-
-                NavigationDrawerItem(
-                    label = { Text("Scan folder") },
-                    icon = { Icon(Icons.Default.Sync, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        scanSavedFolder()
-                    }
-                )
-
-                NavigationDrawerItem(
-                    label = { Text("Listening Stats & Analytics") },
-                    icon = { Icon(Icons.Default.BarChart, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        showAnalyticsDialog = true
-                    }
-                )
-
-                NavigationDrawerItem(
-                    label = { Text("Settings & Backup") },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        showSettingsDialog = true
-                    }
-                )
-            }
+    if (isCarModeActive && currentBookIndex in books.indices) {
+        val activeBook = books[currentBookIndex]
+        val currentTrackName = if (player.mediaItemCount > 1) {
+            activeBook.tracks.getOrNull(player.currentMediaItemIndex)?.name ?: activeBook.title
+        } else {
+            chaptersList.findLast { currentPosition >= it.startMs }?.title ?: "Chapter 1"
         }
-    ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val isUnfolded = maxWidth >= 600.dp
 
-            if (isUnfolded && currentBookIndex in books.indices) {
-                Row(modifier = Modifier.fillMaxSize()) {
-                    Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                        BookshelfContent(
-                            books = organizedBooks,
-                            currentBookIndex = currentBookIndex,
-                            duration = duration,
-                            currentPosition = currentPosition,
-                            viewMode = viewMode,
-                            onSelectBook = { book ->
-                                val origIndex = books.indexOf(book)
-                                currentBookIndex = origIndex
-                                loadChaptersForBook(book)
-                                updateCoverArtForBook(book)
-                                playBook(player, book, 0L, autoPlay = false)
-                            },
-                            onChangeCover = { book ->
-                                targetBookForCustomCover = book
-                                customCoverLauncher.launch("image/*")
-                            },
-                            context = context
-                        )
-                    }
-
-                    Divider(modifier = Modifier.fillMaxHeight().width(1.dp), color = MaterialTheme.colorScheme.surfaceVariant)
-
-                    Box(modifier = Modifier.weight(1.2f).fillMaxHeight()) {
-                        val activeBook = books[currentBookIndex]
-                        val currentTrackName = if (player.mediaItemCount > 1) {
-                            activeBook.tracks.getOrNull(player.currentMediaItemIndex)?.name ?: activeBook.title
-                        } else {
-                            chaptersList.findLast { currentPosition >= it.startMs }?.title ?: "Chapter 1"
-                        }
-
-                        NowPlayingScreen(
-                            book = activeBook,
-                            coverArt = currentCoverArt,
-                            chapterTitle = currentTrackName,
-                            isPlaying = isPlaying,
-                            currentPosition = currentPosition,
-                            duration = duration,
-                            skipIntervalSeconds = skipIntervalSeconds,
-                            silenceTrimEnabled = silenceTrimEnabled,
-                            sleepTimerActive = sleepTimerActive,
-                            sleepTimeRemaining = sleepTimeRemaining,
-                            sleepEndAtChapter = sleepEndAtChapter,
-                            isDarkTheme = isDarkTheme,
-                            playerVolume = playerVolume,
-                            onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
-                            onBackToBookshelf = { isPlayerFullScreen = false },
-                            onPlayPause = { if (isPlaying) player.pause() else player.play() },
-                            onSeek = { pos -> player.seekTo(pos); currentPosition = pos },
-                            onSkipPrevChapter = {
-                                if (player.mediaItemCount > 1) {
-                                    player.seekToPreviousMediaItem()
-                                } else if (chaptersList.isNotEmpty()) {
-                                    val prevChapter = chaptersList.findLast { it.startMs < currentPosition - 2000L } ?: chaptersList.first()
-                                    player.seekTo(prevChapter.startMs)
-                                    currentPosition = prevChapter.startMs
-                                } else {
-                                    player.seekTo(0L)
-                                    currentPosition = 0L
-                                }
-                            },
-                            onSkipNextChapter = {
-                                if (player.mediaItemCount > 1) {
-                                    player.seekToNextMediaItem()
-                                } else if (chaptersList.isNotEmpty()) {
-                                    val nextChapter = chaptersList.find { it.startMs > currentPosition + 1000L }
-                                    if (nextChapter != null) {
-                                        player.seekTo(nextChapter.startMs)
-                                        currentPosition = nextChapter.startMs
-                                    }
-                                }
-                            },
-                            onQuickRewind = {
-                                val newPos = (player.currentPosition - skipIntervalSeconds * 1000L).coerceAtLeast(0L)
-                                player.seekTo(newPos)
-                                currentPosition = newPos
-                            },
-                            onQuickForward = {
-                                val newPos = (player.currentPosition + skipIntervalSeconds * 1000L).coerceAtMost(duration)
-                                player.seekTo(newPos)
-                                currentPosition = newPos
-                            },
-                            onToggleSilenceTrim = {
-                                silenceTrimEnabled = !silenceTrimEnabled
-                                prefs.edit().putBoolean("silence_trim", silenceTrimEnabled).apply()
-                            },
-                            onOpenSleepMenu = { showSleepMenu = true },
-                            onToggleTheme = onToggleTheme,
-                            onOpenAudioFX = { showAudioFXDialog = true },
-                            onVolumeChange = { vol ->
-                                playerVolume = vol
-                                player.volume = vol
-                            }
-                        )
-                    }
-                }
-            } else if (isPlayerFullScreen && currentBookIndex in books.indices) {
-                val activeBook = books[currentBookIndex]
-                val currentTrackName = if (player.mediaItemCount > 1) {
-                    activeBook.tracks.getOrNull(player.currentMediaItemIndex)?.name ?: activeBook.title
-                } else {
-                    chaptersList.findLast { currentPosition >= it.startMs }?.title ?: "Chapter 1"
-                }
-
-                NowPlayingScreen(
-                    book = activeBook,
-                    coverArt = currentCoverArt,
-                    chapterTitle = currentTrackName,
-                    isPlaying = isPlaying,
-                    currentPosition = currentPosition,
-                    duration = duration,
-                    skipIntervalSeconds = skipIntervalSeconds,
-                    silenceTrimEnabled = silenceTrimEnabled,
-                    sleepTimerActive = sleepTimerActive,
-                    sleepTimeRemaining = sleepTimeRemaining,
-                    sleepEndAtChapter = sleepEndAtChapter,
-                    isDarkTheme = isDarkTheme,
-                    playerVolume = playerVolume,
-                    onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
-                    onBackToBookshelf = { isPlayerFullScreen = false },
-                    onPlayPause = { if (isPlaying) player.pause() else player.play() },
-                    onSeek = { pos -> player.seekTo(pos); currentPosition = pos },
-                    onSkipPrevChapter = {
-                        if (player.mediaItemCount > 1) {
-                            player.seekToPreviousMediaItem()
-                        } else if (chaptersList.isNotEmpty()) {
-                            val prevChapter = chaptersList.findLast { it.startMs < currentPosition - 2000L } ?: chaptersList.first()
-                            player.seekTo(prevChapter.startMs)
-                            currentPosition = prevChapter.startMs
-                        } else {
-                            player.seekTo(0L)
-                            currentPosition = 0L
-                        }
-                    },
-                    onSkipNextChapter = {
-                        if (player.mediaItemCount > 1) {
-                            player.seekToNextMediaItem()
-                        } else if (chaptersList.isNotEmpty()) {
-                            val nextChapter = chaptersList.find { it.startMs > currentPosition + 1000L }
-                            if (nextChapter != null) {
-                                player.seekTo(nextChapter.startMs)
-                                currentPosition = nextChapter.startMs
-                            }
-                        }
-                    },
-                    onQuickRewind = {
-                        val newPos = (player.currentPosition - skipIntervalSeconds * 1000L).coerceAtLeast(0L)
-                        player.seekTo(newPos)
-                        currentPosition = newPos
-                    },
-                    onQuickForward = {
-                        val newPos = (player.currentPosition + skipIntervalSeconds * 1000L).coerceAtMost(duration)
-                        player.seekTo(newPos)
-                        currentPosition = newPos
-                    },
-                    onToggleSilenceTrim = {
-                        silenceTrimEnabled = !silenceTrimEnabled
-                        prefs.edit().putBoolean("silence_trim", silenceTrimEnabled).apply()
-                    },
-                    onOpenSleepMenu = { showSleepMenu = true },
-                    onToggleTheme = onToggleTheme,
-                    onOpenAudioFX = { showAudioFXDialog = true },
-                    onVolumeChange = { vol ->
-                        playerVolume = vol
-                        player.volume = vol
-                    }
+        CarModeScreen(
+            book = activeBook,
+            chapterTitle = currentTrackName,
+            isPlaying = isPlaying,
+            onPlayPause = { if (isPlaying) player.pause() else player.play() },
+            onQuickRewind = {
+                val newPos = (player.currentPosition - 30000L).coerceAtLeast(0L)
+                player.seekTo(newPos)
+                currentPosition = newPos
+            },
+            onQuickForward = {
+                val newPos = (player.currentPosition + 30000L).coerceAtMost(duration)
+                player.seekTo(newPos)
+                currentPosition = newPos
+            },
+            onAddBookmark = {
+                saveBookBookmark(
+                    prefs,
+                    activeBook.id,
+                    Bookmark(positionMs = currentPosition, chapterTitle = currentTrackName, note = "Car Bookmark")
                 )
-            } else {
-                Scaffold(
-                    topBar = {
-                        Column(modifier = Modifier.background(MaterialTheme.colorScheme.background)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
-                                    Icon(Icons.Default.Menu, contentDescription = "Menu")
-                                }
+                refreshBookmarksForCurrentBook()
+            },
+            onExitCarMode = { isCarModeActive = false }
+        )
+    } else {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = {
+                ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.surface) {
+                    Spacer(Modifier.height(24.dp))
+                    Row(
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Headphones, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Text("Audiobooks", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    }
+                    Divider(modifier = Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.surfaceVariant)
 
-                                if (isSearching) {
-                                    TextField(
-                                        value = searchQuery,
-                                        onValueChange = { searchQuery = it },
-                                        placeholder = { Text("Search title, author, or series...") },
-                                        singleLine = true,
-                                        modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-                                        colors = TextFieldDefaults.colors(
-                                            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                            unfocusedContainerColor = MaterialTheme.colorScheme.surface
-                                        )
-                                    )
-                                    IconButton(onClick = { isSearching = false; searchQuery = "" }) {
-                                        Icon(Icons.Default.Close, contentDescription = "Close Search")
+                    NavigationDrawerItem(
+                        label = { Text("Scan folder") },
+                        icon = { Icon(Icons.Default.Sync, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                        selected = false,
+                        onClick = {
+                            coroutineScope.launch { drawerState.close() }
+                            scanSavedFolder()
+                        }
+                    )
+
+                    NavigationDrawerItem(
+                        label = { Text("Listening Stats & Analytics") },
+                        icon = { Icon(Icons.Default.BarChart, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                        selected = false,
+                        onClick = {
+                            coroutineScope.launch { drawerState.close() }
+                            showAnalyticsDialog = true
+                        }
+                    )
+
+                    NavigationDrawerItem(
+                        label = { Text("Settings & Backup") },
+                        icon = { Icon(Icons.Default.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                        selected = false,
+                        onClick = {
+                            coroutineScope.launch { drawerState.close() }
+                            showSettingsDialog = true
+                        }
+                    )
+                }
+            }
+        ) {
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val isUnfolded = maxWidth >= 600.dp
+
+                if (isUnfolded && currentBookIndex in books.indices) {
+                    Row(modifier = Modifier.fillMaxSize()) {
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                            BookshelfContent(
+                                books = organizedBooks,
+                                currentBookIndex = currentBookIndex,
+                                duration = duration,
+                                currentPosition = currentPosition,
+                                viewMode = viewMode,
+                                onSelectBook = { book ->
+                                    val origIndex = books.indexOf(book)
+                                    currentBookIndex = origIndex
+                                    applyBookSpecificSpeed(book.id)
+                                    refreshBookmarksForCurrentBook()
+                                    loadChaptersForBook(book)
+                                    updateCoverArtForBook(book)
+                                    playBook(player, book, 0L, autoPlay = false)
+                                },
+                                onChangeCover = { book ->
+                                    targetBookForCustomCover = book
+                                    customCoverLauncher.launch("image/*")
+                                },
+                                context = context
+                            )
+                        }
+
+                        Divider(modifier = Modifier.fillMaxHeight().width(1.dp), color = MaterialTheme.colorScheme.surfaceVariant)
+
+                        Box(modifier = Modifier.weight(1.2f).fillMaxHeight()) {
+                            val activeBook = books[currentBookIndex]
+                            val currentTrackName = if (player.mediaItemCount > 1) {
+                                activeBook.tracks.getOrNull(player.currentMediaItemIndex)?.name ?: activeBook.title
+                            } else {
+                                chaptersList.findLast { currentPosition >= it.startMs }?.title ?: "Chapter 1"
+                            }
+
+                            NowPlayingScreen(
+                                book = activeBook,
+                                coverArt = currentCoverArt,
+                                chapterTitle = currentTrackName,
+                                isPlaying = isPlaying,
+                                currentPosition = currentPosition,
+                                duration = duration,
+                                skipIntervalSeconds = skipIntervalSeconds,
+                                silenceTrimEnabled = silenceTrimEnabled,
+                                sleepTimerActive = sleepTimerActive,
+                                sleepTimeRemaining = sleepTimeRemaining,
+                                sleepEndAtChapter = sleepEndAtChapter,
+                                isDarkTheme = isDarkTheme,
+                                playerVolume = playerVolume,
+                                playbackSpeed = playbackSpeed,
+                                onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                                onBackToBookshelf = { isPlayerFullScreen = false },
+                                onPlayPause = { if (isPlaying) player.pause() else player.play() },
+                                onSeek = { pos -> player.seekTo(pos); currentPosition = pos },
+                                onSkipPrevChapter = {
+                                    if (player.mediaItemCount > 1) {
+                                        player.seekToPreviousMediaItem()
+                                    } else if (chaptersList.isNotEmpty()) {
+                                        val prevChapter = chaptersList.findLast { it.startMs < currentPosition - 2000L } ?: chaptersList.first()
+                                        player.seekTo(prevChapter.startMs)
+                                        currentPosition = prevChapter.startMs
+                                    } else {
+                                        player.seekTo(0L)
+                                        currentPosition = 0L
                                     }
-                                } else {
-                                    Text("SIRIN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                                },
+                                onSkipNextChapter = {
+                                    if (player.mediaItemCount > 1) {
+                                        player.seekToNextMediaItem()
+                                    } else if (chaptersList.isNotEmpty()) {
+                                        val nextChapter = chaptersList.find { it.startMs > currentPosition + 1000L }
+                                        if (nextChapter != null) {
+                                            player.seekTo(nextChapter.startMs)
+                                            currentPosition = nextChapter.startMs
+                                        }
+                                    }
+                                },
+                                onQuickRewind = {
+                                    val newPos = (player.currentPosition - skipIntervalSeconds * 1000L).coerceAtLeast(0L)
+                                    player.seekTo(newPos)
+                                    currentPosition = newPos
+                                },
+                                onQuickForward = {
+                                    val newPos = (player.currentPosition + skipIntervalSeconds * 1000L).coerceAtMost(duration)
+                                    player.seekTo(newPos)
+                                    currentPosition = newPos
+                                },
+                                onToggleSilenceTrim = {
+                                    silenceTrimEnabled = !silenceTrimEnabled
+                                    prefs.edit().putBoolean("silence_trim", silenceTrimEnabled).apply()
+                                },
+                                onOpenSleepMenu = { showSleepMenu = true },
+                                onToggleTheme = onToggleTheme,
+                                onOpenAudioFX = { showAudioFXDialog = true },
+                                onOpenChapters = { showChaptersDialog = true },
+                                onOpenBookmarks = { showBookmarksDialog = true },
+                                onOpenSpeed = { showSpeedDialog = true },
+                                onEnterCarMode = { isCarModeActive = true },
+                                onVolumeChange = { vol ->
+                                    playerVolume = vol
+                                    player.volume = vol
+                                }
+                            )
+                        }
+                    }
+                } else if (isPlayerFullScreen && currentBookIndex in books.indices) {
+                    val activeBook = books[currentBookIndex]
+                    val currentTrackName = if (player.mediaItemCount > 1) {
+                        activeBook.tracks.getOrNull(player.currentMediaItemIndex)?.name ?: activeBook.title
+                    } else {
+                        chaptersList.findLast { currentPosition >= it.startMs }?.title ?: "Chapter 1"
+                    }
 
-                                    Row {
-                                        IconButton(onClick = { showAudioFXDialog = true }) {
-                                            Icon(Icons.Default.GraphicEq, contentDescription = "Audio FX", tint = MaterialTheme.colorScheme.primary)
+                    NowPlayingScreen(
+                        book = activeBook,
+                        coverArt = currentCoverArt,
+                        chapterTitle = currentTrackName,
+                        isPlaying = isPlaying,
+                        currentPosition = currentPosition,
+                        duration = duration,
+                        skipIntervalSeconds = skipIntervalSeconds,
+                        silenceTrimEnabled = silenceTrimEnabled,
+                        sleepTimerActive = sleepTimerActive,
+                        sleepTimeRemaining = sleepTimeRemaining,
+                        sleepEndAtChapter = sleepEndAtChapter,
+                        isDarkTheme = isDarkTheme,
+                        playerVolume = playerVolume,
+                        playbackSpeed = playbackSpeed,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onBackToBookshelf = { isPlayerFullScreen = false },
+                        onPlayPause = { if (isPlaying) player.pause() else player.play() },
+                        onSeek = { pos -> player.seekTo(pos); currentPosition = pos },
+                        onSkipPrevChapter = {
+                            if (player.mediaItemCount > 1) {
+                                player.seekToPreviousMediaItem()
+                            } else if (chaptersList.isNotEmpty()) {
+                                val prevChapter = chaptersList.findLast { it.startMs < currentPosition - 2000L } ?: chaptersList.first()
+                                player.seekTo(prevChapter.startMs)
+                                currentPosition = prevChapter.startMs
+                            } else {
+                                player.seekTo(0L)
+                                currentPosition = 0L
+                            }
+                        },
+                        onSkipNextChapter = {
+                            if (player.mediaItemCount > 1) {
+                                player.seekToNextMediaItem()
+                            } else if (chaptersList.isNotEmpty()) {
+                                val nextChapter = chaptersList.find { it.startMs > currentPosition + 1000L }
+                                if (nextChapter != null) {
+                                    player.seekTo(nextChapter.startMs)
+                                    currentPosition = nextChapter.startMs
+                                }
+                            }
+                        },
+                        onQuickRewind = {
+                            val newPos = (player.currentPosition - skipIntervalSeconds * 1000L).coerceAtLeast(0L)
+                            player.seekTo(newPos)
+                            currentPosition = newPos
+                        },
+                        onQuickForward = {
+                            val newPos = (player.currentPosition + skipIntervalSeconds * 1000L).coerceAtMost(duration)
+                            player.seekTo(newPos)
+                            currentPosition = newPos
+                        },
+                        onToggleSilenceTrim = {
+                            silenceTrimEnabled = !silenceTrimEnabled
+                            prefs.edit().putBoolean("silence_trim", silenceTrimEnabled).apply()
+                        },
+                        onOpenSleepMenu = { showSleepMenu = true },
+                        onToggleTheme = onToggleTheme,
+                        onOpenAudioFX = { showAudioFXDialog = true },
+                        onOpenChapters = { showChaptersDialog = true },
+                        onOpenBookmarks = { showBookmarksDialog = true },
+                        onOpenSpeed = { showSpeedDialog = true },
+                        onEnterCarMode = { isCarModeActive = true },
+                        onVolumeChange = { vol ->
+                            playerVolume = vol
+                            player.volume = vol
+                        }
+                    )
+                } else {
+                    Scaffold(
+                        topBar = {
+                            Column(modifier = Modifier.background(MaterialTheme.colorScheme.background)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
+                                        Icon(Icons.Default.Menu, contentDescription = "Menu")
+                                    }
+
+                                    if (isSearching) {
+                                        TextField(
+                                            value = searchQuery,
+                                            onValueChange = { searchQuery = it },
+                                            placeholder = { Text("Search title, author, or series...") },
+                                            singleLine = true,
+                                            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                                            colors = TextFieldDefaults.colors(
+                                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                                unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                                            )
+                                        )
+                                        IconButton(onClick = { isSearching = false; searchQuery = "" }) {
+                                            Icon(Icons.Default.Close, contentDescription = "Close Search")
                                         }
-                                        IconButton(onClick = { isSearching = true }) {
-                                            Icon(Icons.Default.Search, contentDescription = "Search")
+                                    } else {
+                                        Text("SIRIN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+
+                                        Row {
+                                            IconButton(onClick = { showAudioFXDialog = true }) {
+                                                Icon(Icons.Default.GraphicEq, contentDescription = "Audio FX", tint = MaterialTheme.colorScheme.primary)
+                                            }
+                                            IconButton(onClick = { isSearching = true }) {
+                                                Icon(Icons.Default.Search, contentDescription = "Search")
+                                            }
+                                            IconButton(onClick = { showSortDialog = true }) {
+                                                Icon(Icons.Default.Sort, contentDescription = "Sort")
+                                            }
+                                            IconButton(onClick = { showViewDialog = true }) {
+                                                Icon(
+                                                    imageVector = if (viewMode == "GRID") Icons.Default.GridView else Icons.Default.ViewList,
+                                                    contentDescription = "View Switcher"
+                                                )
+                                            }
                                         }
-                                        IconButton(onClick = { showSortDialog = true }) {
-                                            Icon(Icons.Default.Sort, contentDescription = "Sort")
+                                    }
+                                }
+                            }
+                        },
+                        bottomBar = {
+                            if (currentBookIndex in books.indices) {
+                                val activeBook = books[currentBookIndex]
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surface,
+                                    modifier = Modifier.fillMaxWidth().clickable { isPlayerFullScreen = true }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                                            Box(
+                                                modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.primary),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                if (currentCoverArt != null) {
+                                                    Image(bitmap = currentCoverArt!!, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                                                } else {
+                                                    Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
+                                                }
+                                            }
+                                            Spacer(Modifier.width(12.dp))
+                                            Column {
+                                                Text(activeBook.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                Text(activeBook.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            }
                                         }
-                                        IconButton(onClick = { showViewDialog = true }) {
+
+                                        IconButton(onClick = { if (isPlaying) player.pause() else player.play() }) {
                                             Icon(
-                                                imageVector = if (viewMode == "GRID") Icons.Default.GridView else Icons.Default.ViewList,
-                                                contentDescription = "View Switcher"
+                                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                                contentDescription = "Play/Pause",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(32.dp)
                                             )
                                         }
                                     }
                                 }
                             }
                         }
-                    },
-                    bottomBar = {
-                        if (currentBookIndex in books.indices) {
-                            val activeBook = books[currentBookIndex]
-                            Surface(
-                                color = MaterialTheme.colorScheme.surface,
-                                modifier = Modifier.fillMaxWidth().clickable { isPlayerFullScreen = true }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(12.dp).fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                                        Box(
-                                            modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.primary),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            if (currentCoverArt != null) {
-                                                Image(bitmap = currentCoverArt!!, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                                            } else {
-                                                Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
-                                            }
-                                        }
-                                        Spacer(Modifier.width(12.dp))
-                                        Column {
-                                            Text(activeBook.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            Text(activeBook.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        }
-                                    }
-
-                                    IconButton(onClick = { if (isPlaying) player.pause() else player.play() }) {
-                                        Icon(
-                                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                            contentDescription = "Play/Pause",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(32.dp)
-                                        )
-                                    }
-                                }
-                            }
+                    ) { padding ->
+                        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+                            BookshelfContent(
+                                books = organizedBooks,
+                                currentBookIndex = currentBookIndex,
+                                duration = duration,
+                                currentPosition = currentPosition,
+                                viewMode = viewMode,
+                                onSelectBook = { book ->
+                                    val origIndex = books.indexOf(book)
+                                    currentBookIndex = origIndex
+                                    applyBookSpecificSpeed(book.id)
+                                    refreshBookmarksForCurrentBook()
+                                    loadChaptersForBook(book)
+                                    updateCoverArtForBook(book)
+                                    playBook(player, book, 0L, autoPlay = true)
+                                    isPlayerFullScreen = true
+                                },
+                                onChangeCover = { book ->
+                                    targetBookForCustomCover = book
+                                    customCoverLauncher.launch("image/*")
+                                },
+                                context = context
+                            )
                         }
-                    }
-                ) { padding ->
-                    Box(modifier = Modifier.padding(padding).fillMaxSize()) {
-                        BookshelfContent(
-                            books = organizedBooks,
-                            currentBookIndex = currentBookIndex,
-                            duration = duration,
-                            currentPosition = currentPosition,
-                            viewMode = viewMode,
-                            onSelectBook = { book ->
-                                val origIndex = books.indexOf(book)
-                                currentBookIndex = origIndex
-                                loadChaptersForBook(book)
-                                updateCoverArtForBook(book)
-                                playBook(player, book, 0L, autoPlay = true)
-                                isPlayerFullScreen = true
-                            },
-                            onChangeCover = { book ->
-                                targetBookForCustomCover = book
-                                customCoverLauncher.launch("image/*")
-                            },
-                            context = context
-                        )
                     }
                 }
             }
         }
+    }
+
+    if (showChaptersDialog && currentBookIndex in books.indices) {
+        val activeBook = books[currentBookIndex]
+        val displayChapters = if (chaptersList.isNotEmpty()) {
+            chaptersList
+        } else {
+            activeBook.tracks.mapIndexed { idx, track -> Chapter(track.name, 0L) }
+        }
+
+        AlertDialog(
+            onDismissRequest = { showChaptersDialog = false },
+            title = { Text("Table of Contents (${displayChapters.size})") },
+            text = {
+                Box(modifier = Modifier.heightIn(max = 350.dp)) {
+                    LazyColumn {
+                        itemsIndexed(displayChapters) { idx, chapter ->
+                            val isCurrent = if (chaptersList.isNotEmpty()) {
+                                val nextStart = chaptersList.getOrNull(idx + 1)?.startMs ?: Long.MAX_VALUE
+                                currentPosition >= chapter.startMs && currentPosition < nextStart
+                            } else {
+                                player.currentMediaItemIndex == idx
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        if (player.mediaItemCount > 1) {
+                                            player.seekTo(idx, 0L)
+                                        } else {
+                                            player.seekTo(chapter.startMs)
+                                            currentPosition = chapter.startMs
+                                        }
+                                        showChaptersDialog = false
+                                    }
+                                    .background(if (isCurrent) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
+                                    .padding(vertical = 12.dp, horizontal = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = chapter.title,
+                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (chapter.startMs > 0L) {
+                                    Text(
+                                        text = formatTime(chapter.startMs),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color.Gray
+                                    )
+                                }
+                            }
+                            Divider(color = MaterialTheme.colorScheme.surfaceVariant)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showChaptersDialog = false }) { Text("Close") } }
+        )
+    }
+
+    if (showBookmarksDialog && currentBookIndex in books.indices) {
+        val activeBook = books[currentBookIndex]
+        val currentTrackName = if (player.mediaItemCount > 1) {
+            activeBook.tracks.getOrNull(player.currentMediaItemIndex)?.name ?: activeBook.title
+        } else {
+            chaptersList.findLast { currentPosition >= it.startMs }?.title ?: "Chapter 1"
+        }
+
+        AlertDialog(
+            onDismissRequest = { showBookmarksDialog = false },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Bookmarks & Notes")
+                    IconButton(onClick = { showAddBookmarkPrompt = true }) {
+                        Icon(Icons.Default.Add, contentDescription = "Add Bookmark", tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            },
+            text = {
+                Column {
+                    if (showAddBookmarkPrompt) {
+                        OutlinedTextField(
+                            value = newBookmarkNoteText,
+                            onValueChange = { newBookmarkNoteText = it },
+                            label = { Text("Bookmark Note (Optional)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+                        )
+                        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                            TextButton(onClick = { showAddBookmarkPrompt = false; newBookmarkNoteText = "" }) { Text("Cancel") }
+                            Button(onClick = {
+                                saveBookBookmark(
+                                    prefs,
+                                    activeBook.id,
+                                    Bookmark(positionMs = currentPosition, chapterTitle = currentTrackName, note = newBookmarkNoteText)
+                                )
+                                newBookmarkNoteText = ""
+                                showAddBookmarkPrompt = false
+                                refreshBookmarksForCurrentBook()
+                            }) { Text("Save Pin") }
+                        }
+                        Divider(modifier = Modifier.padding(vertical = 8.dp))
+                    }
+
+                    if (currentBookBookmarks.isEmpty()) {
+                        Text("No bookmarks saved for this book.", color = Color.Gray, modifier = Modifier.padding(vertical = 16.dp))
+                    } else {
+                        Box(modifier = Modifier.heightIn(max = 300.dp)) {
+                            LazyColumn {
+                                items(currentBookBookmarks) { bm ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                player.seekTo(bm.positionMs)
+                                                currentPosition = bm.positionMs
+                                                showBookmarksDialog = false
+                                            }
+                                            .padding(vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(formatTime(bm.positionMs), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(bm.chapterTitle, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                            }
+                                            if (bm.note.isNotBlank()) {
+                                                Text(bm.note, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                                            }
+                                            Text(bm.timestampStr, style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                                        }
+                                        IconButton(onClick = {
+                                            deleteBookBookmark(prefs, activeBook.id, bm.id)
+                                            refreshBookmarksForCurrentBook()
+                                        }) {
+                                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray)
+                                        }
+                                    }
+                                    Divider(color = MaterialTheme.colorScheme.surfaceVariant)
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showBookmarksDialog = false }) { Text("Done") } }
+        )
+    }
+
+    if (showSpeedDialog) {
+        AlertDialog(
+            onDismissRequest = { showSpeedDialog = false },
+            title = { Text("Playback Speed (${String.format("%.2f", playbackSpeed)}x)") },
+            text = {
+                Column {
+                    Slider(
+                        value = playbackSpeed,
+                        onValueChange = {
+                            val rounded = (round(it * 20f) / 20f)
+                            updateSpeedForCurrentBook(rounded)
+                        },
+                        valueRange = 0.5f..3.5f,
+                        steps = 59,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        listOf(0.8f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f).forEach { spd ->
+                            FilterChip(
+                                selected = (playbackSpeed == spd),
+                                onClick = { updateSpeedForCurrentBook(spd) },
+                                label = { Text("${spd}x") }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showSpeedDialog = false }) { Text("Done") } }
+        )
     }
 
     if (showAnalyticsDialog) {
@@ -882,14 +1167,6 @@ fun SirinAudiobookApp(
                     ) {
                         Text("Books Completed:", color = Color.Gray)
                         Text("$completedBooksCount", fontWeight = FontWeight.Bold)
-                    }
-                    Divider(color = MaterialTheme.colorScheme.surfaceVariant)
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Average Playback Speed:", color = Color.Gray)
-                        Text("${String.format("%.2f", playbackSpeed)}x", fontWeight = FontWeight.Bold)
                     }
                 }
             },
@@ -1143,6 +1420,113 @@ fun SirinAudiobookApp(
 }
 
 @Composable
+fun CarModeScreen(
+    book: Audiobook,
+    chapterTitle: String,
+    isPlaying: Boolean,
+    onPlayPause: () -> Unit,
+    onQuickRewind: () -> Unit,
+    onQuickForward: () -> Unit,
+    onAddBookmark: () -> Unit,
+    onExitCarMode: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF101216))
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.DirectionsCar, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(36.dp))
+                Spacer(Modifier.width(12.dp))
+                Text("CAR MODE", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
+            }
+            IconButton(
+                onClick = onExitCarMode,
+                modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xFF2E323D))
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Exit Car Mode", tint = Color.White, modifier = Modifier.size(28.dp))
+            }
+        }
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 16.dp)) {
+            Text(
+                text = book.title,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = chapterTitle,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onQuickRewind,
+                modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF222630))
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.Replay30, contentDescription = "Rewind 30s", tint = Color.White, modifier = Modifier.size(40.dp))
+                }
+            }
+
+            IconButton(
+                onClick = onPlayPause,
+                modifier = Modifier.size(128.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary)
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = "Play/Pause",
+                    tint = Color.Black,
+                    modifier = Modifier.size(72.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onQuickForward,
+                modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF222630))
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.Forward30, contentDescription = "Forward 30s", tint = Color.White, modifier = Modifier.size(40.dp))
+                }
+            }
+        }
+
+        Button(
+            onClick = onAddBookmark,
+            modifier = Modifier.fillMaxWidth().height(60.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A2E39))
+        ) {
+            Icon(Icons.Default.BookmarkAdd, contentDescription = null, tint = Color.White, modifier = Modifier.size(28.dp))
+            Spacer(Modifier.width(12.dp))
+            Text("DROP BOOKMARK PIN", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
+        }
+    }
+}
+
+@Composable
 fun BookshelfContent(
     books: List<Audiobook>,
     currentBookIndex: Int,
@@ -1234,6 +1618,7 @@ fun NowPlayingScreen(
     sleepEndAtChapter: Boolean,
     isDarkTheme: Boolean,
     playerVolume: Float,
+    playbackSpeed: Float,
     onOpenDrawer: () -> Unit,
     onBackToBookshelf: () -> Unit,
     onPlayPause: () -> Unit,
@@ -1246,6 +1631,10 @@ fun NowPlayingScreen(
     onOpenSleepMenu: () -> Unit,
     onToggleTheme: () -> Unit,
     onOpenAudioFX: () -> Unit,
+    onOpenChapters: () -> Unit,
+    onOpenBookmarks: () -> Unit,
+    onOpenSpeed: () -> Unit,
+    onEnterCarMode: () -> Unit,
     onVolumeChange: (Float) -> Unit
 ) {
     val percentRead = if (duration > 0L) ((currentPosition.toDouble() / duration.toDouble()) * 100).toInt() else 0
@@ -1266,7 +1655,19 @@ fun NowPlayingScreen(
             IconButton(onClick = onOpenDrawer) {
                 Icon(Icons.Default.Menu, contentDescription = "Open Drawer Menu")
             }
-            Text("NOW PLAYING", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onEnterCarMode) {
+                    Icon(Icons.Default.DirectionsCar, contentDescription = "Car Mode", tint = MaterialTheme.colorScheme.primary)
+                }
+                IconButton(onClick = onOpenChapters) {
+                    Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters", tint = MaterialTheme.colorScheme.primary)
+                }
+                IconButton(onClick = onOpenBookmarks) {
+                    Icon(Icons.Default.Bookmark, contentDescription = "Bookmarks", tint = MaterialTheme.colorScheme.primary)
+                }
+            }
+
             IconButton(onClick = onBackToBookshelf) {
                 Icon(Icons.Default.Book, contentDescription = "Back to Bookshelf")
             }
@@ -1293,7 +1694,7 @@ fun NowPlayingScreen(
 
         Box(
             modifier = Modifier
-                .size(240.dp)
+                .size(220.dp)
                 .clip(RoundedCornerShape(24.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center
@@ -1316,17 +1717,18 @@ fun NowPlayingScreen(
             shape = RoundedCornerShape(24.dp)
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
                     text = chapterTitle,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.clickable { onOpenChapters() }
                 )
 
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
 
                 Slider(
                     value = currentPosition.toFloat(),
@@ -1345,7 +1747,7 @@ fun NowPlayingScreen(
                     Text("-${formatTime((duration - currentPosition).coerceAtLeast(0L))}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1372,13 +1774,13 @@ fun NowPlayingScreen(
                         onClick = onPlayPause,
                         shape = CircleShape,
                         containerColor = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(64.dp)
+                        modifier = Modifier.size(60.dp)
                     ) {
                         Icon(
                             imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                             contentDescription = "Play/Pause",
                             tint = Color.Black,
-                            modifier = Modifier.size(36.dp)
+                            modifier = Modifier.size(34.dp)
                         )
                     }
 
@@ -1399,13 +1801,22 @@ fun NowPlayingScreen(
                     }
                 }
 
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(14.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    IconButton(onClick = onOpenSpeed) {
+                        Text(
+                            text = "${String.format("%.1f", playbackSpeed)}x",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
                     IconButton(
                         onClick = onToggleSilenceTrim,
                         modifier = Modifier
@@ -1444,27 +1855,6 @@ fun NowPlayingScreen(
                     IconButton(onClick = onOpenAudioFX) {
                         Icon(Icons.Default.GraphicEq, contentDescription = "Equalizer", tint = MaterialTheme.colorScheme.primary)
                     }
-                }
-
-                Spacer(Modifier.height(16.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.VolumeMute, contentDescription = "Low Volume", tint = Color.Gray, modifier = Modifier.size(20.dp))
-                    Slider(
-                        value = playerVolume,
-                        onValueChange = onVolumeChange,
-                        valueRange = 0f..1f,
-                        colors = SliderDefaults.colors(
-                            thumbColor = MaterialTheme.colorScheme.primary,
-                            activeTrackColor = MaterialTheme.colorScheme.primary,
-                            inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
-                        ),
-                        modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
-                    )
-                    Icon(Icons.Default.VolumeUp, contentDescription = "High Volume", tint = Color.Gray, modifier = Modifier.size(20.dp))
                 }
             }
         }
@@ -1606,6 +1996,88 @@ private fun calculateSmartRewindPos(savedPos: Long, lastPauseTime: Long): Long {
     return (savedPos - rewindMs).coerceAtLeast(0L)
 }
 
+private fun loadBookSpeeds(prefs: SharedPreferences): MutableMap<String, Float> {
+    val map = mutableMapOf<String, Float>()
+    try {
+        val jsonStr = prefs.getString("book_speeds_json", "{}") ?: "{}"
+        val jsonObj = JSONObject(jsonStr)
+        val keys = jsonObj.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            map[key] = jsonObj.getDouble(key).toFloat()
+        }
+    } catch (_: Exception) {}
+    return map
+}
+
+private fun saveBookSpeed(prefs: SharedPreferences, bookId: String, speed: Float) {
+    try {
+        val map = loadBookSpeeds(prefs)
+        map[bookId] = speed
+        val jsonObj = JSONObject()
+        map.forEach { (k, v) -> jsonObj.put(k, v.toDouble()) }
+        prefs.edit().putString("book_speeds_json", jsonObj.toString()).apply()
+    } catch (_: Exception) {}
+}
+
+private fun loadBookBookmarks(prefs: SharedPreferences, bookId: String): List<Bookmark> {
+    val list = mutableListOf<Bookmark>()
+    try {
+        val jsonStr = prefs.getString("book_bookmarks_json", "{}") ?: "{}"
+        val jsonObj = JSONObject(jsonStr)
+        val array = jsonObj.optJSONArray(bookId) ?: JSONArray()
+        for (i in 0 until array.length()) {
+            val item = array.getJSONObject(i)
+            list.add(
+                Bookmark(
+                    id = item.optString("id", UUID.randomUUID().toString()),
+                    positionMs = item.optLong("positionMs", 0L),
+                    chapterTitle = item.optString("chapterTitle", "Chapter"),
+                    note = item.optString("note", ""),
+                    timestampStr = item.optString("timestampStr", "")
+                )
+            )
+        }
+    } catch (_: Exception) {}
+    return list.sortedBy { it.positionMs }
+}
+
+private fun saveBookBookmark(prefs: SharedPreferences, bookId: String, bookmark: Bookmark) {
+    try {
+        val jsonStr = prefs.getString("book_bookmarks_json", "{}") ?: "{}"
+        val jsonObj = JSONObject(jsonStr)
+        val array = jsonObj.optJSONArray(bookId) ?: JSONArray()
+
+        val newObj = JSONObject().apply {
+            put("id", bookmark.id)
+            put("positionMs", bookmark.positionMs)
+            put("chapterTitle", bookmark.chapterTitle)
+            put("note", bookmark.note)
+            put("timestampStr", bookmark.timestampStr)
+        }
+        array.put(newObj)
+        jsonObj.put(bookId, array)
+        prefs.edit().putString("book_bookmarks_json", jsonObj.toString()).apply()
+    } catch (_: Exception) {}
+}
+
+private fun deleteBookBookmark(prefs: SharedPreferences, bookId: String, bookmarkId: String) {
+    try {
+        val jsonStr = prefs.getString("book_bookmarks_json", "{}") ?: "{}"
+        val jsonObj = JSONObject(jsonStr)
+        val array = jsonObj.optJSONArray(bookId) ?: return
+        val newArray = JSONArray()
+        for (i in 0 until array.length()) {
+            val item = array.getJSONObject(i)
+            if (item.optString("id") != bookmarkId) {
+                newArray.put(item)
+            }
+        }
+        jsonObj.put(bookId, newArray)
+        prefs.edit().putString("book_bookmarks_json", jsonObj.toString()).apply()
+    } catch (_: Exception) {}
+}
+
 private suspend fun extractM4bChapters(context: Context, uri: Uri): List<Chapter> {
     return withContext(Dispatchers.IO) {
         val chapters = mutableListOf<Chapter>()
@@ -1620,7 +2092,7 @@ private suspend fun extractM4bChapters(context: Context, uri: Uri): List<Chapter
                         bytes[i + 3] == 'l'.code.toByte()
                     ) {
                         var offset = i + 4
-                        offset += 4 // Skip version and flags
+                        offset += 4
                         if (offset + 4 <= bytes.size) {
                             val count = ((bytes[offset].toInt() and 0xFF) shl 24) or
                                         ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
