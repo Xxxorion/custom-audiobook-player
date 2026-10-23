@@ -1,6 +1,7 @@
 package com.example.audiobook
 
 import android.content.ComponentName
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
@@ -24,34 +25,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Metadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
-import androidx.media3.extractor.metadata.id3.ChapterFrame
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlin.math.round
-import androidx.compose.foundation.Image
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
 
 class LibraryViewModelFactory(private val repository: AudiobookRepository) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -65,15 +53,18 @@ class LibraryViewModelFactory(private val repository: AudiobookRepository) : Vie
 
 class MainActivity : ComponentActivity() {
     private lateinit var repository: AudiobookRepository
+    private lateinit var libraryViewModel: LibraryViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         repository = AudiobookRepository(this)
+        
+        // Initialize the ViewModel natively to avoid needing external Compose ViewModel dependencies
+        libraryViewModel = ViewModelProvider(this, LibraryViewModelFactory(repository))[LibraryViewModel::class.java]
 
         setContent {
             val context = LocalContext.current
             var controller by remember { mutableStateOf<Player?>(null) }
-            val viewModel: LibraryViewModel = viewModel(factory = LibraryViewModelFactory(repository))
 
             DisposableEffect(context) {
                 val sessionToken = SessionToken(context, ComponentName(context, AudiobookPlaybackService::class.java))
@@ -105,7 +96,7 @@ class MainActivity : ComponentActivity() {
                     if (controller != null) {
                         SirinAudiobookApp(
                             player = controller!!,
-                            viewModel = viewModel,
+                            viewModel = libraryViewModel,
                             isDarkTheme = isDarkTheme,
                             onToggleTheme = {
                                 isDarkTheme = !isDarkTheme
@@ -250,389 +241,446 @@ fun SirinAudiobookApp(
                 delay(1000)
                 val newRemaining = viewModel.sleepTimeRemaining - 1000L
                 if (newRemaining <= 0L) {
-                    player
-                    ModalNavigationDrawer(
-            drawerState = drawerState,
-            drawerContent = {
-                ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
-                    Spacer(Modifier.height(24.dp))
-                    Text("Sirin Audiobooks", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(16.dp), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    HorizontalDivider()
-                    NavigationDrawerItem(
-                        icon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
-                        label = { Text("Select Audiobook Folder") },
-                        selected = false,
-                        onClick = {
-                            coroutineScope.launch { drawerState.close() }
-                            folderPicker.launch(null)
-                        }
-                    )
-                    NavigationDrawerItem(
-                        icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                        label = { Text("Settings") },
-                        selected = false,
-                        onClick = {
-                            coroutineScope.launch { drawerState.close() }
-                            showSettingsDialog = true
-                        }
-                    )
-                    NavigationDrawerItem(
-                        icon = { Icon(Icons.Default.Analytics, contentDescription = null) },
-                        label = { Text("Listening Stats") },
-                        selected = false,
-                        onClick = {
-                            coroutineScope.launch { drawerState.close() }
-                            showAnalyticsDialog = true
-                        }
-                    )
+                    player.pause()
+                    viewModel.sleepTimerActive = false
+                    viewModel.sleepTimeRemaining = 0L
+                } else {
+                    viewModel.sleepTimeRemaining = newRemaining
                 }
             }
-        ) {
-            if (viewModel.isCarModeActive && activeBook != null) {
-                CarModeScreen(
-                    book = activeBook,
-                    chapterTitle = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition),
-                    isPlaying = viewModel.isPlaying,
-                    onPlayPause = { if (viewModel.isPlaying) player.pause() else player.play() },
-                    onQuickRewind = { player.seekTo(player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)) },
-                    onQuickForward = { player.seekTo(player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)) },
-                    onAddBookmark = { showAddBookmarkPrompt = true },
-                    onExitCarMode = { viewModel.isCarModeActive = false }
-                )
-            } else if (viewModel.isPlayerFullScreen && activeBook != null) {
-                NowPlayingScreen(
-                    book = activeBook,
-                    coverArt = viewModel.currentCoverArt?.asImageBitmap(),
-                    chapterTitle = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition),
-                    isPlaying = viewModel.isPlaying,
-                    currentPosition = viewModel.currentPosition,
-                    duration = viewModel.duration,
-                    skipIntervalSeconds = viewModel.skipIntervalSeconds,
-                    silenceTrimEnabled = viewModel.silenceTrimEnabled,
-                    sleepTimerActive = viewModel.sleepTimerActive,
-                    sleepTimeRemaining = viewModel.sleepTimeRemaining,
-                    sleepEndAtChapter = viewModel.sleepEndAtChapter,
-                    isDarkTheme = isDarkTheme,
-                    playerVolume = viewModel.playerVolume,
-                    playbackSpeed = viewModel.playbackSpeed,
-                    onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
-                    onBackToBookshelf = { viewModel.isPlayerFullScreen = false },
-                    onPlayPause = { if (viewModel.isPlaying) player.pause() else player.play() },
-                    onSeek = { pos -> player.seekTo(pos) },
-                    onSkipPrevChapter = {
-                        val chap = viewModel.chaptersList.lastOrNull { it.startMs < viewModel.currentPosition - 2000L }
-                        if (chap != null) player.seekTo(chap.startMs) else player.seekToPreviousMediaItem()
-                    },
-                    onSkipNextChapter = {
-                        val chap = viewModel.chaptersList.firstOrNull { it.startMs > viewModel.currentPosition + 2000L }
-                        if (chap != null) player.seekTo(chap.startMs) else player.seekToNextMediaItem()
-                    },
-                    onQuickRewind = { player.seekTo(player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)) },
-                    onQuickForward = { player.seekTo(player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)) },
-                    onToggleSilenceTrim = {
-                        viewModel.silenceTrimEnabled = !viewModel.silenceTrimEnabled
-                        viewModel.repository.getPreferences().edit().putBoolean("silence_trim", viewModel.silenceTrimEnabled).apply()
-                    },
-                    onOpenSleepMenu = { showSleepMenu = true },
-                    onToggleTheme = onToggleTheme,
-                    onOpenAudioFX = { showAudioFXDialog = true },
-                    onOpenChapters = { showChaptersDialog = true },
-                    onOpenBookmarks = { showBookmarksDialog = true },
-                    onOpenSpeed = { showSpeedDialog = true },
-                    onEnterCarMode = { viewModel.isCarModeActive = true },
-                    onVolumeChange = { vol ->
-                        viewModel.playerVolume = vol
-                        player.volume = vol
-                    }
-                )
-            } else {
-                Scaffold(
-                    topBar = {
-                        CenterAlignedTopAppBar(
-                            title = { Text("Sirin Library", fontWeight = FontWeight.Bold) },
-                            navigationIcon = {
-                                IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
-                                    Icon(Icons.Default.Menu, contentDescription = "Menu")
-                                }
-                            },
-                            actions = {
-                                IconButton(onClick = { showViewDialog = true }) {
-                                    Icon(if (viewModel.viewMode == "GRID") Icons.Default.GridView else Icons.Default.ViewList, contentDescription = "View Mode")
-                                }
-                                IconButton(onClick = { showSortDialog = true }) {
-                                    Icon(Icons.Default.Sort, contentDescription = "Sort")
-                                }
-                            }
-                        )
-                    },
-                    floatingActionButton = {
-                        if (activeBook != null) {
-                            FloatingActionButton(
-                                onClick = { viewModel.isPlayerFullScreen = true },
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary
-                            ) {
-                                Icon(if (viewModel.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Now Playing")
-                            }
-                        }
-                    }
-                ) { innerPadding ->
-                    Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
-                        val displayedBooks = viewModel.books.filter {
-                            if (viewModel.searchQuery.isEmpty()) true
-                            else it.title.contains(viewModel.searchQuery, ignoreCase = true) || it.author.contains(viewModel.searchQuery, ignoreCase = true)
-                        }.let { list ->
-                            when (viewModel.sortBy) {
-                                "TITLE" -> list.sortedBy { it.title.lowercase() }
-                                "AUTHOR" -> list.sortedBy { it.author.lowercase() }
-                                "RECENT" -> list
-                                else -> list
-                            }
-                        }
+        }
+    }
 
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            if (viewModel.isSearching || viewModel.searchQuery.isNotEmpty()) {
-                                OutlinedTextField(
-                                    value = viewModel.searchQuery,
-                                    onValueChange = { viewModel.searchQuery = it },
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                                    placeholder = { Text("Search books...") },
-                                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                                    trailingIcon = {
-                                        if (viewModel.searchQuery.isNotEmpty()) {
-                                            IconButton(onClick = { viewModel.searchQuery = "" }) { Icon(Icons.Default.Clear, contentDescription = null) }
-                                        }
-                                    },
-                                    singleLine = true,
-                                    shape = RoundedCornerShape(12.dp)
-                                )
+    LaunchedEffect(viewModel.isPlaying) {
+        var saveCounter = 0
+        while (viewModel.isPlaying) {
+            viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
+            delay(1000)
+            viewModel.totalListenMs += 1000L
+            saveCounter++
+
+            if (saveCounter >= 15) {
+                saveCounter = 0
+                activeBook?.let { b ->
+                    viewModel.repository.savePlaybackState(b.id, player.currentMediaItemIndex, viewModel.currentPosition, viewModel.totalListenMs)
+                }
+            }
+
+            activeBook?.let { b ->
+                val isLastTrack = !player.hasNextMediaItem()
+                if (isLastTrack && viewModel.duration > 0L && viewModel.currentPosition >= viewModel.duration - 2000L) {
+                    if (viewModel.repository.markBookCompleted(b.id)) {
+                        viewModel.completedBooksCount = viewModel.repository.loadCompletedBookIds().size
+                    }
+                }
+            }
+        }
+
+        if (!viewModel.isPlaying) {
+            activeBook?.let { b ->
+                viewModel.repository.savePlaybackState(b.id, player.currentMediaItemIndex, viewModel.currentPosition, viewModel.totalListenMs)
+            }
+        }
+    }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(playing: Boolean) {
+                viewModel.isPlaying = playing
+                if (!playing) viewModel.repository.markPauseTime()
+            }
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_READY) viewModel.duration = player.duration.coerceAtLeast(0L)
+            }
+            override fun onPlayerError(error: PlaybackException) {
+                Toast.makeText(context, "Playback error: ${error.localizedMessage}", Toast.LENGTH_LONG).show()
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
+    }
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
+                Spacer(Modifier.height(24.dp))
+                Text("Sirin Audiobooks", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(16.dp), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                HorizontalDivider()
+                NavigationDrawerItem(
+                    icon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
+                    label = { Text("Select Audiobook Folder") },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        folderPicker.launch(null)
+                    }
+                )
+                NavigationDrawerItem(
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    label = { Text("Settings") },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        showSettingsDialog = true
+                    }
+                )
+                NavigationDrawerItem(
+                    icon = { Icon(Icons.Default.Analytics, contentDescription = null) },
+                    label = { Text("Listening Stats") },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        showAnalyticsDialog = true
+                    }
+                )
+            }
+        }
+    ) {
+        if (viewModel.isCarModeActive && activeBook != null) {
+            CarModeScreen(
+                book = activeBook,
+                chapterTitle = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition),
+                isPlaying = viewModel.isPlaying,
+                onPlayPause = { if (viewModel.isPlaying) player.pause() else player.play() },
+                onQuickRewind = { player.seekTo(player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)) },
+                onQuickForward = { player.seekTo(player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)) },
+                onAddBookmark = { showAddBookmarkPrompt = true },
+                onExitCarMode = { viewModel.isCarModeActive = false }
+            )
+        } else if (viewModel.isPlayerFullScreen && activeBook != null) {
+            NowPlayingScreen(
+                book = activeBook,
+                coverArt = viewModel.currentCoverArt?.asImageBitmap(),
+                chapterTitle = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition),
+                isPlaying = viewModel.isPlaying,
+                currentPosition = viewModel.currentPosition,
+                duration = viewModel.duration,
+                skipIntervalSeconds = viewModel.skipIntervalSeconds,
+                silenceTrimEnabled = viewModel.silenceTrimEnabled,
+                sleepTimerActive = viewModel.sleepTimerActive,
+                sleepTimeRemaining = viewModel.sleepTimeRemaining,
+                sleepEndAtChapter = viewModel.sleepEndAtChapter,
+                isDarkTheme = isDarkTheme,
+                playerVolume = viewModel.playerVolume,
+                playbackSpeed = viewModel.playbackSpeed,
+                onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                onBackToBookshelf = { viewModel.isPlayerFullScreen = false },
+                onPlayPause = { if (viewModel.isPlaying) player.pause() else player.play() },
+                onSeek = { pos -> player.seekTo(pos) },
+                onSkipPrevChapter = {
+                    val chap = viewModel.chaptersList.lastOrNull { it.startMs < viewModel.currentPosition - 2000L }
+                    if (chap != null) player.seekTo(chap.startMs) else player.seekToPreviousMediaItem()
+                },
+                onSkipNextChapter = {
+                    val chap = viewModel.chaptersList.firstOrNull { it.startMs > viewModel.currentPosition + 2000L }
+                    if (chap != null) player.seekTo(chap.startMs) else player.seekToNextMediaItem()
+                },
+                onQuickRewind = { player.seekTo(player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)) },
+                onQuickForward = { player.seekTo(player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)) },
+                onToggleSilenceTrim = {
+                    viewModel.silenceTrimEnabled = !viewModel.silenceTrimEnabled
+                    viewModel.repository.getPreferences().edit().putBoolean("silence_trim", viewModel.silenceTrimEnabled).apply()
+                },
+                onOpenSleepMenu = { showSleepMenu = true },
+                onToggleTheme = onToggleTheme,
+                onOpenAudioFX = { showAudioFXDialog = true },
+                onOpenChapters = { showChaptersDialog = true },
+                onOpenBookmarks = { showBookmarksDialog = true },
+                onOpenSpeed = { showSpeedDialog = true },
+                onEnterCarMode = { viewModel.isCarModeActive = true },
+                onVolumeChange = { vol ->
+                    viewModel.playerVolume = vol
+                    player.volume = vol
+                }
+            )
+        } else {
+            Scaffold(
+                topBar = {
+                    CenterAlignedTopAppBar(
+                        title = { Text("Sirin Library", fontWeight = FontWeight.Bold) },
+                        navigationIcon = {
+                            IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
+                                Icon(Icons.Default.Menu, contentDescription = "Menu")
                             }
-                            
-                            BookshelfContent(
-                                books = displayedBooks,
-                                activeBookId = viewModel.currentBookId,
-                                duration = viewModel.duration,
-                                currentPosition = viewModel.currentPosition,
-                                viewMode = viewModel.viewMode,
-                                viewModel = viewModel,
-                                onSelectBook = { book ->
-                                    viewModel.currentBookId = book.id
-                                    viewModel.applyBookSpecificSpeed(book.id)
-                                    viewModel.refreshBookmarks()
-                                    viewModel.loadChapters(book)
-                                    viewModel.updateCoverArt(book)
-                                    playBook(player, book, 0, 0L, true)
-                                    viewModel.isPlayerFullScreen = true
+                        },
+                        actions = {
+                            IconButton(onClick = { showViewDialog = true }) {
+                                Icon(if (viewModel.viewMode == "GRID") Icons.Default.GridView else Icons.Default.ViewList, contentDescription = "View Mode")
+                            }
+                            IconButton(onClick = { showSortDialog = true }) {
+                                Icon(Icons.Default.Sort, contentDescription = "Sort")
+                            }
+                        }
+                    )
+                },
+                floatingActionButton = {
+                    if (activeBook != null) {
+                        FloatingActionButton(
+                            onClick = { viewModel.isPlayerFullScreen = true },
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ) {
+                            Icon(if (viewModel.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Now Playing")
+                        }
+                    }
+                }
+            ) { innerPadding ->
+                Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
+                    val displayedBooks = viewModel.books.filter {
+                        if (viewModel.searchQuery.isEmpty()) true
+                        else it.title.contains(viewModel.searchQuery, ignoreCase = true) || it.author.contains(viewModel.searchQuery, ignoreCase = true)
+                    }.let { list ->
+                        when (viewModel.sortBy) {
+                            "TITLE" -> list.sortedBy { it.title.lowercase() }
+                            "AUTHOR" -> list.sortedBy { it.author.lowercase() }
+                            "RECENT" -> list
+                            else -> list
+                        }
+                    }
+
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        if (viewModel.isSearching || viewModel.searchQuery.isNotEmpty()) {
+                            OutlinedTextField(
+                                value = viewModel.searchQuery,
+                                onValueChange = { viewModel.searchQuery = it },
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                                placeholder = { Text("Search books...") },
+                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                                trailingIcon = {
+                                    if (viewModel.searchQuery.isNotEmpty()) {
+                                        IconButton(onClick = { viewModel.searchQuery = "" }) { Icon(Icons.Default.Clear, contentDescription = null) }
+                                    }
                                 },
-                                onChangeCover = { book ->
-                                    targetBookForCustomCover = book
-                                    customCoverLauncher.launch("image/*")
-                                }
+                                singleLine = true,
+                                shape = RoundedCornerShape(12.dp)
                             )
                         }
+                        
+                        BookshelfContent(
+                            books = displayedBooks,
+                            activeBookId = viewModel.currentBookId,
+                            duration = viewModel.duration,
+                            currentPosition = viewModel.currentPosition,
+                            viewMode = viewModel.viewMode,
+                            viewModel = viewModel,
+                            onSelectBook = { book ->
+                                viewModel.currentBookId = book.id
+                                viewModel.applyBookSpecificSpeed(book.id)
+                                viewModel.refreshBookmarks()
+                                viewModel.loadChapters(book)
+                                viewModel.updateCoverArt(book)
+                                playBook(player, book, 0, 0L, true)
+                                viewModel.isPlayerFullScreen = true
+                            },
+                            onChangeCover = { book ->
+                                targetBookForCustomCover = book
+                                customCoverLauncher.launch("image/*")
+                            }
+                        )
                     }
                 }
             }
         }
+    }
 
-        // --- DIALOGS ---
-        if (showAddBookmarkPrompt) {
-            AlertDialog(
-                onDismissRequest = { showAddBookmarkPrompt = false },
-                title = { Text("Add Bookmark") },
-                text = {
-                    OutlinedTextField(
-                        value = newBookmarkNoteText,
-                        onValueChange = { newBookmarkNoteText = it },
-                        label = { Text("Note (Optional)") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        val chapterName = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition)
-                        val bm = Bookmark(positionMs = viewModel.currentPosition, chapterTitle = chapterName, note = newBookmarkNoteText)
-                        viewModel.repository.saveBookBookmark(viewModel.currentBookId, bm)
-                        viewModel.refreshBookmarks()
-                        showAddBookmarkPrompt = false
-                        newBookmarkNoteText = ""
-                        Toast.makeText(context, "Bookmark Saved", Toast.LENGTH_SHORT).show()
-                    }) { Text("Save") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showAddBookmarkPrompt = false }) { Text("Cancel") }
+    // --- DIALOGS ---
+    if (showAddBookmarkPrompt) {
+        AlertDialog(
+            onDismissRequest = { showAddBookmarkPrompt = false },
+            title = { Text("Add Bookmark") },
+            text = {
+                OutlinedTextField(
+                    value = newBookmarkNoteText,
+                    onValueChange = { newBookmarkNoteText = it },
+                    label = { Text("Note (Optional)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val chapterName = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition)
+                    val bm = Bookmark(positionMs = viewModel.currentPosition, chapterTitle = chapterName, note = newBookmarkNoteText)
+                    viewModel.repository.saveBookBookmark(viewModel.currentBookId, bm)
+                    viewModel.refreshBookmarks()
+                    showAddBookmarkPrompt = false
+                    newBookmarkNoteText = ""
+                    Toast.makeText(context, "Bookmark Saved", Toast.LENGTH_SHORT).show()
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddBookmarkPrompt = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showViewDialog) {
+        AlertDialog(
+            onDismissRequest = { showViewDialog = false },
+            title = { Text("View Mode") },
+            text = {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
+                        viewModel.viewMode = "GRID"
+                        viewModel.repository.getPreferences().edit().putString("view_mode", "GRID").apply()
+                        showViewDialog = false
+                    }.padding(vertical = 12.dp)) {
+                        RadioButton(selected = viewModel.viewMode == "GRID", onClick = null)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Grid View")
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
+                        viewModel.viewMode = "LIST"
+                        viewModel.repository.getPreferences().edit().putString("view_mode", "LIST").apply()
+                        showViewDialog = false
+                    }.padding(vertical = 12.dp)) {
+                        RadioButton(selected = viewModel.viewMode == "LIST", onClick = null)
+                        Spacer(Modifier.width(12.dp))
+                        Text("List View")
+                    }
                 }
-            )
-        }
-
-        if (showViewDialog) {
-            AlertDialog(
-                onDismissRequest = { showViewDialog = false },
-                title = { Text("View Mode") },
-                text = {
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
-                            viewModel.viewMode = "GRID"
-                            viewModel.repository.getPreferences().edit().putString("view_mode", "GRID").apply()
-                            showViewDialog = false
-                        }.padding(vertical = 12.dp)) {
-                            RadioButton(selected = viewModel.viewMode == "GRID", onClick = null)
-                            Spacer(Modifier.width(12.dp))
-                            Text("Grid View")
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
-                            viewModel.viewMode = "LIST"
-                            viewModel.repository.getPreferences().edit().putString("view_mode", "LIST").apply()
-                            showViewDialog = false
-                        }.padding(vertical = 12.dp)) {
-                            RadioButton(selected = viewModel.viewMode == "LIST", onClick = null)
-                            Spacer(Modifier.width(12.dp))
-                            Text("List View")
-                        }
-                    }
-                },
-                confirmButton = { TextButton(onClick = { showViewDialog = false }) { Text("Close") } }
-            )
-        }
-        
-        if (showSettingsDialog) {
-            AlertDialog(
-                onDismissRequest = { showSettingsDialog = false },
-                title = { Text("Settings") },
-                text = {
-                    Column {
-                        Text("Skip Interval (seconds)", fontWeight = FontWeight.Bold)
-                        Slider(
-                            value = viewModel.skipIntervalSeconds.toFloat(),
-                            onValueChange = { 
-                                val newVal = kotlin.math.round(it).toInt()
-                                viewModel.skipIntervalSeconds = newVal
-                                viewModel.repository.getPreferences().edit().putInt("skip_interval", newVal).apply()
-                            },
-                            valueRange = 5f..60f,
-                            steps = 10
+            },
+            confirmButton = { TextButton(onClick = { showViewDialog = false }) { Text("Close") } }
+        )
+    }
+    
+    if (showSettingsDialog) {
+        AlertDialog(
+            onDismissRequest = { showSettingsDialog = false },
+            title = { Text("Settings") },
+            text = {
+                Column {
+                    Text("Skip Interval (seconds)", fontWeight = FontWeight.Bold)
+                    Slider(
+                        value = viewModel.skipIntervalSeconds.toFloat(),
+                        onValueChange = { 
+                            val newVal = round(it).toInt()
+                            viewModel.skipIntervalSeconds = newVal
+                            viewModel.repository.getPreferences().edit().putInt("skip_interval", newVal).apply()
+                        },
+                        valueRange = 5f..60f,
+                        steps = 10
+                    )
+                    Text("${viewModel.skipIntervalSeconds}s", modifier = Modifier.align(Alignment.End))
+                }
+            },
+            confirmButton = { TextButton(onClick = { showSettingsDialog = false }) { Text("Close") } }
+        )
+    }
+    
+    if (showAnalyticsDialog) {
+        AlertDialog(
+            onDismissRequest = { showAnalyticsDialog = false },
+            title = { Text("Listening Stats") },
+            text = {
+                Column {
+                    Text("Total Listen Time: ${formatTime(viewModel.totalListenMs)}")
+                    Text("Completed Books: ${viewModel.completedBooksCount}")
+                }
+            },
+            confirmButton = { TextButton(onClick = { showAnalyticsDialog = false }) { Text("Close") } }
+        )
+    }
+    
+    if (showSpeedDialog) {
+        AlertDialog(
+            onDismissRequest = { showSpeedDialog = false },
+            title = { Text("Playback Speed") },
+            text = {
+                Column {
+                    Slider(
+                        value = viewModel.playbackSpeed,
+                        onValueChange = { viewModel.updateSpeed(it) },
+                        valueRange = 0.5f..3.0f,
+                        steps = 24
+                    )
+                    Text(String.format("%.1fx", viewModel.playbackSpeed), modifier = Modifier.align(Alignment.CenterHorizontally))
+                }
+            },
+            confirmButton = { TextButton(onClick = { showSpeedDialog = false }) { Text("Close") } }
+        )
+    }
+    
+    if (showChaptersDialog) {
+        AlertDialog(
+            onDismissRequest = { showChaptersDialog = false },
+            title = { Text("Chapters") },
+            text = {
+                LazyColumn {
+                    items(viewModel.chaptersList.size) { idx ->
+                        val chap = viewModel.chaptersList[idx]
+                        Text(
+                            text = chap.title,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                player.seekTo(chap.startMs)
+                                showChaptersDialog = false
+                            }.padding(vertical = 12.dp)
                         )
-                        Text("${viewModel.skipIntervalSeconds}s", modifier = Modifier.align(Alignment.End))
                     }
-                },
-                confirmButton = { TextButton(onClick = { showSettingsDialog = false }) { Text("Close") } }
-            )
-        }
-        
-        if (showAnalyticsDialog) {
-            AlertDialog(
-                onDismissRequest = { showAnalyticsDialog = false },
-                title = { Text("Listening Stats") },
-                text = {
-                    Column {
-                        Text("Total Listen Time: ${formatTime(viewModel.totalListenMs)}")
-                        Text("Completed Books: ${viewModel.completedBooksCount}")
+                    if (viewModel.chaptersList.isEmpty()) {
+                        item { Text("No chapters found.", color = Color.Gray) }
                     }
-                },
-                confirmButton = { TextButton(onClick = { showAnalyticsDialog = false }) { Text("Close") } }
-            )
-        }
-        
-        if (showSpeedDialog) {
-            AlertDialog(
-                onDismissRequest = { showSpeedDialog = false },
-                title = { Text("Playback Speed") },
-                text = {
-                    Column {
-                        Slider(
-                            value = viewModel.playbackSpeed,
-                            onValueChange = { viewModel.updateSpeed(it) },
-                            valueRange = 0.5f..3.0f,
-                            steps = 24
-                        )
-                        Text(String.format("%.1fx", viewModel.playbackSpeed), modifier = Modifier.align(Alignment.CenterHorizontally))
-                    }
-                },
-                confirmButton = { TextButton(onClick = { showSpeedDialog = false }) { Text("Close") } }
-            )
-        }
-        
-        if (showChaptersDialog) {
-            AlertDialog(
-                onDismissRequest = { showChaptersDialog = false },
-                title = { Text("Chapters") },
-                text = {
-                    LazyColumn {
-                        items(viewModel.chaptersList.size) { idx ->
-                            val chap = viewModel.chaptersList[idx]
-                            Text(
-                                text = chap.title,
-                                modifier = Modifier.fillMaxWidth().clickable {
-                                    player.seekTo(chap.startMs)
-                                    showChaptersDialog = false
-                                }.padding(vertical = 12.dp)
-                            )
-                        }
-                        if (viewModel.chaptersList.isEmpty()) {
-                            item { Text("No chapters found.", color = Color.Gray) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showChaptersDialog = false }) { Text("Close") } }
+        )
+    }
+    
+    if (showBookmarksDialog) {
+        AlertDialog(
+            onDismissRequest = { showBookmarksDialog = false },
+            title = { Text("Bookmarks") },
+            text = {
+                LazyColumn {
+                    items(viewModel.currentBookBookmarks.size) { idx ->
+                        val bm = viewModel.currentBookBookmarks[idx]
+                        Column(modifier = Modifier.fillMaxWidth().clickable {
+                            player.seekTo(bm.positionMs)
+                            showBookmarksDialog = false
+                        }.padding(vertical = 8.dp)) {
+                            Text(bm.chapterTitle, fontWeight = FontWeight.Bold)
+                            Text(formatTime(bm.positionMs), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                            if (bm.note.isNotEmpty()) Text(bm.note, style = MaterialTheme.typography.bodySmall)
                         }
                     }
-                },
-                confirmButton = { TextButton(onClick = { showChaptersDialog = false }) { Text("Close") } }
-            )
-        }
-        
-        if (showBookmarksDialog) {
-            AlertDialog(
-                onDismissRequest = { showBookmarksDialog = false },
-                title = { Text("Bookmarks") },
-                text = {
-                    LazyColumn {
-                        items(viewModel.currentBookBookmarks.size) { idx ->
-                            val bm = viewModel.currentBookBookmarks[idx]
-                            Column(modifier = Modifier.fillMaxWidth().clickable {
-                                player.seekTo(bm.positionMs)
-                                showBookmarksDialog = false
-                            }.padding(vertical = 8.dp)) {
-                                Text(bm.chapterTitle, fontWeight = FontWeight.Bold)
-                                Text(formatTime(bm.positionMs), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                                if (bm.note.isNotEmpty()) Text(bm.note, style = MaterialTheme.typography.bodySmall)
-                            }
-                        }
-                        if (viewModel.currentBookBookmarks.isEmpty()) {
-                            item { Text("No bookmarks yet.", color = Color.Gray) }
-                        }
+                    if (viewModel.currentBookBookmarks.isEmpty()) {
+                        item { Text("No bookmarks yet.", color = Color.Gray) }
                     }
-                },
-                confirmButton = { TextButton(onClick = { showBookmarksDialog = false }) { Text("Close") } }
-            )
-        }
-        
-        if (showSleepMenu) {
-            AlertDialog(
-                onDismissRequest = { showSleepMenu = false },
-                title = { Text("Sleep Timer") },
-                text = {
-                    Column {
-                        listOf(15, 30, 45, 60).forEach { mins ->
-                            TextButton(onClick = {
-                                viewModel.sleepTimeRemaining = mins * 60 * 1000L
-                                viewModel.sleepEndAtChapter = false
-                                viewModel.sleepTimerActive = true
-                                showSleepMenu = false
-                            }, modifier = Modifier.fillMaxWidth()) { Text("$mins Minutes") }
-                        }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showBookmarksDialog = false }) { Text("Close") } }
+        )
+    }
+    
+    if (showSleepMenu) {
+        AlertDialog(
+            onDismissRequest = { showSleepMenu = false },
+            title = { Text("Sleep Timer") },
+            text = {
+                Column {
+                    listOf(15, 30, 45, 60).forEach { mins ->
                         TextButton(onClick = {
-                            viewModel.sleepEndAtChapter = true
+                            viewModel.sleepTimeRemaining = mins * 60 * 1000L
+                            viewModel.sleepEndAtChapter = false
                             viewModel.sleepTimerActive = true
                             showSleepMenu = false
-                        }, modifier = Modifier.fillMaxWidth()) { Text("End of Chapter") }
-                        if (viewModel.sleepTimerActive) {
-                            TextButton(onClick = {
-                                viewModel.sleepTimerActive = false
-                                showSleepMenu = false
-                            }, modifier = Modifier.fillMaxWidth()) { Text("Cancel Timer", color = MaterialTheme.colorScheme.error) }
-                        }
+                        }, modifier = Modifier.fillMaxWidth()) { Text("$mins Minutes") }
                     }
-                },
-                confirmButton = { TextButton(onClick = { showSleepMenu = false }) { Text("Close") } }
-            )
-        }
+                    TextButton(onClick = {
+                        viewModel.sleepEndAtChapter = true
+                        viewModel.sleepTimerActive = true
+                        showSleepMenu = false
+                    }, modifier = Modifier.fillMaxWidth()) { Text("End of Chapter") }
+                    if (viewModel.sleepTimerActive) {
+                        TextButton(onClick = {
+                            viewModel.sleepTimerActive = false
+                            showSleepMenu = false
+                        }, modifier = Modifier.fillMaxWidth()) { Text("Cancel Timer", color = MaterialTheme.colorScheme.error) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showSleepMenu = false }) { Text("Close") } }
+        )
     }
 }
 
