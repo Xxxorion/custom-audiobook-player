@@ -30,7 +30,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.media3.common.MediaItem
-import androidx.media3.common.Metadata
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
@@ -59,7 +59,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         repository = AudiobookRepository(this)
         
-        // Initialize the ViewModel natively to avoid needing external Compose ViewModel dependencies
         libraryViewModel = ViewModelProvider(this, LibraryViewModelFactory(repository))[LibraryViewModel::class.java]
 
         setContent {
@@ -692,7 +691,7 @@ fun playBook(player: Player, book: Audiobook, trackIndex: Int, positionMs: Long,
             .setUri(track.uri)
             .setMediaId(track.uri.toString())
             .setMediaMetadata(
-                Metadata.Builder()
+                MediaMetadata.Builder()
                     .setTitle(book.title)
                     .setArtist(book.author)
                     .setAlbumTitle(book.series)
