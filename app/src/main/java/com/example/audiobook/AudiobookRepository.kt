@@ -21,6 +21,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
 data class AudioTrack(val name: String, val uri: Uri)
@@ -260,19 +261,7 @@ class AudiobookRepository(private val context: Context) {
     suspend fun extractM4bChapters(uri: Uri): List<Chapter> = withContext(Dispatchers.IO) {
         val chapters = mutableListOf<Chapter>()
         try {
-            // First try standard MediaMetadataRetriever chapter extraction (Android built-in)
-            val retriever = MediaMetadataRetriever()
-            try {
-                retriever.setDataSource(context, uri)
-                // Some Android versions expose chapter count
-                val countStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_NUM_TRACKS)
-                // Alternatively parse via input stream deep scan
-            } catch (_: Exception) {} finally {
-                try { retriever.release() } catch (_: Exception) {}
-            }
-
             context.contentResolver.openInputStream(uri)?.use { stream ->
-                // Read deeper into the file (up to 32MB) to catch chapter atoms if they aren't right at the header
                 val scanLimit = 32 * 1024 * 1024
                 val buffer = ByteArray(scanLimit)
                 val bytesRead = stream.read(buffer, 0, scanLimit)
@@ -280,18 +269,6 @@ class AudiobookRepository(private val context: Context) {
 
                 var i = 0
                 while (i < bytesRead - 8) {
-                    // Look for 'chpl' (Nero chapter marker atom) or 'ilst' / text chapter markers
-                    if ((buffer[i] == 'c'.code.toByte() && buffer[i+1] == 'h'.code.toByte() && buffer[i+2] == 'p'.code.toByte() && buffer[i+3] == 'l'.code.toByte()) ||
-                        (buffer[i] == 'ntext' && buffer[i+1] == '...')) {
-                        // Parse Nero Chapters format: [4 bytes atom size]['chpl'][1 byte version][3 bytes flags][4 bytes chapter count]
-                        var offset = i + 4
-                        if (buffer.copyOfRange(i, i+4).toString(Charsets.US_ASCII) == "chpl") {
-                            offset = i + 4
-                            // skip size if needed, read past header
-                        }
-                    }
-                    
-                    // Generic robust search for chapter title strings and timestamps inside M4B atom structures
                     if (buffer[i] == 'c'.code.toByte() &&
                         buffer[i + 1] == 'h'.code.toByte() &&
                         buffer[i + 2] == 'p'.code.toByte() &&
@@ -305,7 +282,7 @@ class AudiobookRepository(private val context: Context) {
                                         (buffer[offset + 3].toInt() and 0xFF)
                             offset += 4
 
-                            if (count in 1..1000) { // sanity check on chapter count
+                            if (count in 1..1000) {
                                 for (c in 0 until count) {
                                     if (offset + 9 > bytesRead) break
                                     val duration100ns = DataInputStream(buffer.inputStream().apply { skip(offset.toLong()) }).readLong()
@@ -330,8 +307,6 @@ class AudiobookRepository(private val context: Context) {
                 }
             }
         } catch (_: Exception) {}
-        
-        // Fallback: If no internal M4B chapter atoms were parsed, generate estimated 15-minute interval chapters or return empty
         chapters
     }
 
