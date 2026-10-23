@@ -252,7 +252,6 @@ fun SirinAudiobookApp(
         }
     }
 
-    // --- CONTINUOUS BACKGROUND POSITION SAVING ---
     LaunchedEffect(viewModel.isPlaying) {
         while (viewModel.isPlaying) {
             viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
@@ -271,11 +270,6 @@ fun SirinAudiobookApp(
                 }
             }
         }
-
-        // Save immediately when playback stops
-        activeBook?.let { b ->
-            viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs)
-        }
     }
 
     DisposableEffect(player) {
@@ -284,8 +278,12 @@ fun SirinAudiobookApp(
                 viewModel.isPlaying = playing
                 if (!playing) {
                     viewModel.repository.markPauseTime()
-                    activeBook?.let { b ->
-                        viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs)
+                    // CRITICAL FIX: Only save position if the player actually has media items. 
+                    // This prevents saving a '0' position when the player is cleared during a book swap.
+                    if (player.mediaItemCount > 0) {
+                        activeBook?.let { b ->
+                            viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs)
+                        }
                     }
                 }
             }
@@ -372,7 +370,6 @@ fun SirinAudiobookApp(
                 playbackSpeed = viewModel.playbackSpeed,
                 onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
                 onBackToBookshelf = { 
-                    // Save position instantly when closing full player
                     activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs) }
                     viewModel.isPlayerFullScreen = false 
                 },
@@ -487,10 +484,17 @@ fun SirinAudiobookApp(
                             viewMode = viewModel.viewMode,
                             viewModel = viewModel,
                             onSelectBook = { book ->
-                                // Save current playing book state before switching
+                                // CRITICAL FIX: Snapshot and save the exact position right before doing anything
+                                val snapshotPos = player.currentPosition
+                                val snapshotIdx = player.currentMediaItemIndex
+                                
                                 activeBook?.let { curr ->
-                                    viewModel.repository.saveBookProgress(curr.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs)
+                                    viewModel.repository.saveBookProgress(curr.id, snapshotIdx, snapshotPos, viewModel.totalListenMs)
                                 }
+                                
+                                // Explicitly force the player to pause so it drops the "playing" state for the next book
+                                player.playWhenReady = false
+                                player.pause()
                                 
                                 viewModel.currentBookId = book.id
                                 viewModel.applyBookSpecificSpeed(book.id)
@@ -502,7 +506,7 @@ fun SirinAudiobookApp(
                                 val savedPos = viewModel.repository.getBookPosition(book.id)
                                 viewModel.currentPosition = savedPos
                                 
-                                // Load book into player and PAUSE (autoPlay = false) so user manually presses play
+                                // Load book into player (autoPlay = false)
                                 playBook(player, book, savedTrackIdx, savedPos, false)
                                 viewModel.isPlayerFullScreen = true
                             },
@@ -722,6 +726,9 @@ fun SirinAudiobookApp(
 }
 
 fun playBook(player: Player, book: Audiobook, trackIndex: Int, positionMs: Long, autoPlay: Boolean) {
+    // CRITICAL FIX: Kill the autoplay state immediately so it doesn't carry over from the last book
+    player.playWhenReady = autoPlay
+    
     player.stop()
     player.clearMediaItems()
     val mediaItems = book.tracks.map { track ->
@@ -742,7 +749,6 @@ fun playBook(player: Player, book: Audiobook, trackIndex: Int, positionMs: Long,
     val validIndex = if (trackIndex in mediaItems.indices) trackIndex else 0
     player.seekTo(validIndex, positionMs)
     player.prepare()
-    if (autoPlay) player.play()
 }
 
 fun calculateSmartRewindPos(savedPos: Long, lastPauseTime: Long): Long {
