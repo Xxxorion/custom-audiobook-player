@@ -136,7 +136,6 @@ fun SirinAudiobookApp(
     var showAddBookmarkPrompt by remember { mutableStateOf(false) }
     var showSleepMenu by remember { mutableStateOf(false) }
     var showAnalyticsDialog by remember { mutableStateOf(false) }
-    var currentChapters by remember { mutableStateOf<List<Chapter>>(emptyList()) }
 
     val activeBook = remember(viewModel.books, viewModel.currentBookId) {
         viewModel.books.find { it.id == viewModel.currentBookId }
@@ -165,7 +164,7 @@ fun SirinAudiobookApp(
                     viewModel.currentBookId = selectedBook.id
                     viewModel.applyBookSpecificSpeed(selectedBook.id)
                     viewModel.refreshBookmarks()
-                    currentChapters = viewModel.repository.getBookChapters(selectedBook)
+                    viewModel.loadChapters(selectedBook)
                     
                     val savedTrackIdx = viewModel.repository.getBookTrackIndex(selectedBook.id)
                     val savedPos = viewModel.repository.getBookPosition(selectedBook.id)
@@ -221,7 +220,7 @@ fun SirinAudiobookApp(
                         viewModel.currentPosition = rewindPos
                         viewModel.applyBookSpecificSpeed(savedBook.id)
                         viewModel.refreshBookmarks()
-                        currentChapters = viewModel.repository.getBookChapters(savedBook)
+                        viewModel.loadChapters(savedBook)
                         viewModel.updateCoverArt(savedBook)
                         playBook(player, savedBook, savedTrackIdx, rewindPos, false)
                     }
@@ -337,7 +336,7 @@ fun SirinAudiobookApp(
         if (viewModel.isCarModeActive && activeBook != null) {
             CarModeScreen(
                 book = activeBook,
-                chapterTitle = getChapterTitle(currentChapters, viewModel.currentPosition, player.currentMediaItemIndex),
+                chapterTitle = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, player.currentMediaItemIndex),
                 isPlaying = viewModel.isPlaying,
                 onPlayPause = { if (viewModel.isPlaying) player.pause() else player.play() },
                 onQuickRewind = { 
@@ -355,7 +354,7 @@ fun SirinAudiobookApp(
             NowPlayingScreen(
                 book = activeBook,
                 coverArt = viewModel.currentCoverArt?.asImageBitmap(),
-                chapterTitle = getChapterTitle(currentChapters, viewModel.currentPosition, player.currentMediaItemIndex),
+                chapterTitle = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, player.currentMediaItemIndex),
                 isPlaying = viewModel.isPlaying,
                 currentPosition = viewModel.currentPosition,
                 duration = viewModel.duration,
@@ -379,19 +378,19 @@ fun SirinAudiobookApp(
                     activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, pos, viewModel.totalListenMs) }
                 },
                 onSkipPrevChapter = {
-                    if (currentChapters.any { it.trackIndex > 0 }) {
+                    if (viewModel.chaptersList.any { it.trackIndex > 0 }) {
                         player.seekToPreviousMediaItem()
                     } else {
-                        val chap = currentChapters.lastOrNull { it.startMs < viewModel.currentPosition - 2000L }
+                        val chap = viewModel.chaptersList.lastOrNull { it.startMs < viewModel.currentPosition - 2000L }
                         if (chap != null) player.seekTo(chap.trackIndex, chap.startMs) else player.seekToPreviousMediaItem()
                     }
                     activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs) }
                 },
                 onSkipNextChapter = {
-                    if (currentChapters.any { it.trackIndex > 0 }) {
+                    if (viewModel.chaptersList.any { it.trackIndex > 0 }) {
                         player.seekToNextMediaItem()
                     } else {
-                        val chap = currentChapters.firstOrNull { it.startMs > viewModel.currentPosition + 2000L }
+                        val chap = viewModel.chaptersList.firstOrNull { it.startMs > viewModel.currentPosition + 2000L }
                         if (chap != null) player.seekTo(chap.trackIndex, chap.startMs) else player.seekToNextMediaItem()
                     }
                     activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs) }
@@ -504,11 +503,7 @@ fun SirinAudiobookApp(
                                 viewModel.currentBookId = book.id
                                 viewModel.applyBookSpecificSpeed(book.id)
                                 viewModel.refreshBookmarks()
-                                
-                                coroutineScope.launch {
-                                    currentChapters = viewModel.repository.getBookChapters(book)
-                                }
-                                
+                                viewModel.loadChapters(book)
                                 viewModel.updateCoverArt(book)
                                 
                                 val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
@@ -543,7 +538,7 @@ fun SirinAudiobookApp(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val chapterName = getChapterTitle(currentChapters, viewModel.currentPosition, player.currentMediaItemIndex)
+                    val chapterName = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, player.currentMediaItemIndex)
                     val bm = Bookmark(positionMs = viewModel.currentPosition, chapterTitle = chapterName, note = newBookmarkNoteText)
                     viewModel.repository.saveBookBookmark(viewModel.currentBookId, bm)
                     viewModel.refreshBookmarks()
@@ -616,7 +611,6 @@ fun SirinAudiobookApp(
             title = { Text("Listening Stats") },
             text = {
                 Column {
-                    // Total Listen Time formatting assumes a formatTime top-level function exists in the broader codebase
                     Text("Total Listen Time: ${formatTime(viewModel.totalListenMs)}")
                     Text("Completed Books: ${viewModel.completedBooksCount}")
                 }
@@ -650,14 +644,14 @@ fun SirinAudiobookApp(
             title = { Text("Chapters") },
             text = {
                 LazyColumn {
-                    items(currentChapters.size) { idx ->
-                        val chap = currentChapters[idx]
+                    items(viewModel.chaptersList.size) { idx ->
+                        val chap = viewModel.chaptersList[idx]
                         
                         // Active chapter dot logic handling both M4B and MP3 structure
-                        val isCurrent = if (currentChapters.any { it.trackIndex > 0 }) {
+                        val isCurrent = if (viewModel.chaptersList.any { it.trackIndex > 0 }) {
                             player.currentMediaItemIndex == chap.trackIndex
                         } else {
-                            (viewModel.currentPosition >= chap.startMs && (idx == currentChapters.size - 1 || viewModel.currentPosition < currentChapters[idx+1].startMs))
+                            (viewModel.currentPosition >= chap.startMs && (idx == viewModel.chaptersList.size - 1 || viewModel.currentPosition < viewModel.chaptersList[idx+1].startMs))
                         }
                         
                         Row(
@@ -683,7 +677,7 @@ fun SirinAudiobookApp(
                             }
                         }
                     }
-                    if (currentChapters.isEmpty()) {
+                    if (viewModel.chaptersList.isEmpty()) {
                         item { Text("No chapters found in this file.", color = Color.Gray) }
                     }
                 }
@@ -701,7 +695,6 @@ fun SirinAudiobookApp(
                     items(viewModel.currentBookBookmarks.size) { idx ->
                         val bm = viewModel.currentBookBookmarks[idx]
                         Column(modifier = Modifier.fillMaxWidth().clickable {
-                            // Defaulting bookmarks to track 0 for now as bookmarks logic needs expansion later if spanning multi-track
                             player.seekTo(bm.positionMs)
                             viewModel.currentPosition = bm.positionMs
                             activeBook?.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, bm.positionMs, viewModel.totalListenMs) }
@@ -791,12 +784,12 @@ fun calculateSmartRewindPos(savedPos: Long, lastPauseTime: Long): Long {
 fun getChapterTitle(chapters: List<Chapter>, currentPosMs: Long, trackIndex: Int): String {
     if (chapters.isEmpty()) return "Chapter 1"
     
-    // MP3 (multi-file) logic mapping track index to chapter
+    // MP3 (multi-file) logic
     if (chapters.any { it.trackIndex > 0 }) {
         return chapters.find { it.trackIndex == trackIndex }?.title ?: "Chapter ${trackIndex + 1}"
     }
     
-    // M4B (single-file) logic mapping timeline MS to chapter
+    // M4B (single-file) logic
     var currentChapter = chapters.first()
     for (chapter in chapters) {
         if (currentPosMs >= chapter.startMs) {
@@ -806,4 +799,13 @@ fun getChapterTitle(chapters: List<Chapter>, currentPosMs: Long, trackIndex: Int
         }
     }
     return currentChapter.title
+}
+
+// Added formatting helper to ensure the dialogs and stats display cleanly without compile issues
+fun formatTime(ms: Long): String {
+    val totalSeconds = ms / 1000
+    val h = totalSeconds / 3600
+    val m = (totalSeconds % 3600) / 60
+    val s = totalSeconds % 60
+    return if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
 }

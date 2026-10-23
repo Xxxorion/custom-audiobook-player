@@ -13,13 +13,11 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -204,103 +202,163 @@ class AudiobookRepository(private val context: Context) {
         for (dir in subDirs) traverseDirectoryForBooks(dir, rootDir, bookList)
     }
 
-    // --- PROPER CHAPTER EXTRACTOR ---
+    // --- UNIVERSAL CHAPTER EXTRACTOR ---
     suspend fun getBookChapters(book: Audiobook): List<Chapter> = withContext(Dispatchers.IO) {
         val chapters = mutableListOf<Chapter>()
         
         if (book.tracks.size > 1) {
-            // Multi-file: treat each audio file as a distinct chapter starting at 0:00 of its own track
-            val retriever = MediaMetadataRetriever()
+            // Multi-file MP3 book logic
+            val retriever = android.media.MediaMetadataRetriever()
             for ((index, track) in book.tracks.withIndex()) {
                 var duration = 0L
+                var title = track.name
                 try {
                     retriever.setDataSource(context, track.uri)
-                    duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                    duration = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                    val metaTitle = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE)
+                    if (!metaTitle.isNullOrBlank()) title = metaTitle
                 } catch (e: Exception) {}
-                chapters.add(Chapter(title = track.name, startMs = 0L, durationMs = duration, trackIndex = index))
+                chapters.add(Chapter(title = title, startMs = 0L, durationMs = duration, trackIndex = index))
             }
             try { retriever.release() } catch (e: Exception) {}
         } else if (book.tracks.isNotEmpty()) {
-            // Single-file: Lightning-fast MP4 atom traversal to rip Nero 'chpl' chapters
+            // Single-file M4B book logic
             val uri = book.tracks.first().uri
+            val extractor = android.media.MediaExtractor()
+            
+            // METHOD 1: Try Native QuickTime text tracks (Standard for most M4Bs)
             try {
-                val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-                if (pfd != null) {
-                    FileInputStream(pfd.fileDescriptor).use { fis ->
-                        val channel = fis.channel
-                        val fileSize = channel.size()
-                        var pos = 0L
-
-                        while (pos < fileSize) {
-                            channel.position(pos)
-                            val header = ByteBuffer.allocate(8)
-                            if (channel.read(header) < 8) break
-                            header.flip()
-                            
-                            var size = header.getInt().toLong() and 0xFFFFFFFFL
-                            val typeBytes = ByteArray(4)
-                            header.get(typeBytes)
-                            val type = String(typeBytes, Charsets.US_ASCII)
-                            var headerSize = 8L
-                            
-                            if (size == 1L) {
-                                val ext = ByteBuffer.allocate(8)
-                                channel.read(ext)
-                                ext.flip()
-                                size = ext.getLong()
-                                headerSize = 16L
-                            } else if (size == 0L) {
-                                size = fileSize - pos
-                            }
-                            if (size < headerSize) break 
-
-                            // Step into container atoms
-                            if (type == "moov" || type == "udta") {
-                                pos += headerSize
-                                continue
-                            }
-                            // Parse chapter array
-                            if (type == "chpl") {
-                                val dataSize = (size - headerSize).toInt()
-                                val chplData = ByteBuffer.allocate(dataSize)
-                                channel.read(chplData)
-                                chplData.flip()
-
-                                chplData.position(4) // Skip version/flags
-                                val reserved = chplData.get()
-                                var count = chplData.getInt()
-                                if (count > 10000 || count <= 0) { 
-                                    chplData.position(5)
-                                    count = chplData.get().toInt() and 0xFF 
-                                }
-
-                                for (i in 0 until count) {
-                                    if (chplData.remaining() < 9) break
-                                    val timestamp100ns = chplData.getLong()
-                                    val titleLen = chplData.get().toInt() and 0xFF
-                                    if (chplData.remaining() < titleLen) break
-                                    val titleBytesArr = ByteArray(titleLen)
-                                    chplData.get(titleBytesArr)
-                                    val chapterTitle = String(titleBytesArr, Charsets.UTF_8)
-                                    chapters.add(Chapter(chapterTitle, timestamp100ns / 10000L, 0L, 0))
-                                }
-                                break
-                            }
-                            pos += size // Skip over massive data atoms instantly
-                        }
+                extractor.setDataSource(context, uri, null)
+                var chapterTrackIndex = -1
+                for (i in 0 until extractor.trackCount) {
+                    val format = extractor.getTrackFormat(i)
+                    val mime = format.getString(android.media.MediaFormat.KEY_MIME)
+                    if (mime != null && (mime.startsWith("text/") || mime.contains("tx3g"))) {
+                        chapterTrackIndex = i
+                        break
                     }
                 }
-            } catch (e: Exception) {}
 
-            // Calculate durations for single-file chapters
+                if (chapterTrackIndex != -1) {
+                    extractor.selectTrack(chapterTrackIndex)
+                    val buffer = java.nio.ByteBuffer.allocate(8192)
+                    while (true) {
+                        val sampleSize = extractor.readSampleData(buffer, 0)
+                        if (sampleSize < 0) break
+                        val timeMs = extractor.sampleTime / 1000
+                        
+                        val titleBytes = ByteArray(sampleSize)
+                        buffer.get(titleBytes)
+                        
+                        var title = "Chapter ${chapters.size + 1}"
+                        if (sampleSize >= 2) {
+                            val len = ((titleBytes[0].toInt() and 0xFF) shl 8) or (titleBytes[1].toInt() and 0xFF)
+                            title = if (len in 1..sampleSize - 2) {
+                                String(titleBytes, 2, len, Charsets.UTF_8).trim()
+                            } else {
+                                String(titleBytes, Charsets.UTF_8).replace(Regex("[^\\x20-\\x7E]"), "").trim()
+                            }
+                        } else if (sampleSize == 1) {
+                            title = String(titleBytes, Charsets.UTF_8).replace(Regex("[^\\x20-\\x7E]"), "").trim()
+                        }
+                        
+                        if (title.isBlank()) title = "Chapter ${chapters.size + 1}"
+                        chapters.add(Chapter(title, timeMs, 0L, 0))
+                        extractor.advance()
+                        buffer.clear()
+                    }
+                }
+            } catch (e: Exception) {} finally {
+                try { extractor.release() } catch (e: Exception) {}
+            }
+
+            // METHOD 2: Fallback to Nero 'chpl' atom scanner
+            if (chapters.isEmpty()) {
+                try {
+                    val pfd = context.contentResolver.openFileDescriptor(uri, "r")
+                    if (pfd != null) {
+                        java.io.FileInputStream(pfd.fileDescriptor).use { fis ->
+                            val channel = fis.channel
+                            val fileSize = channel.size()
+                            var pos = 0L
+                            var moovBytes: ByteArray? = null
+
+                            while (pos < fileSize) {
+                                channel.position(pos)
+                                val header = java.nio.ByteBuffer.allocate(8)
+                                if (channel.read(header) < 8) break
+                                header.flip()
+
+                                var size = header.getInt().toLong() and 0xFFFFFFFFL
+                                val typeBytes = ByteArray(4)
+                                header.get(typeBytes)
+                                val type = String(typeBytes, Charsets.US_ASCII)
+
+                                if (size == 1L) {
+                                    val ext = java.nio.ByteBuffer.allocate(8)
+                                    channel.read(ext)
+                                    ext.flip()
+                                    size = ext.getLong()
+                                } else if (size == 0L) {
+                                    size = fileSize - pos
+                                }
+
+                                if (type == "moov") {
+                                    if (size < 50 * 1024 * 1024) {
+                                        moovBytes = ByteArray((size - 8).toInt())
+                                        channel.read(java.nio.ByteBuffer.wrap(moovBytes))
+                                    }
+                                    break
+                                }
+                                pos += size
+                            }
+
+                            if (moovBytes != null) {
+                                val chplSig = byteArrayOf('c'.code.toByte(), 'h'.code.toByte(), 'p'.code.toByte(), 'l'.code.toByte())
+                                for (i in 0 until moovBytes.size - 8) {
+                                    if (moovBytes[i] == chplSig[0] && moovBytes[i+1] == chplSig[1] &&
+                                        moovBytes[i+2] == chplSig[2] && moovBytes[i+3] == chplSig[3]) {
+                                        
+                                        val buffer = java.nio.ByteBuffer.wrap(moovBytes, i + 4, moovBytes.size - (i + 4))
+                                        val version = buffer.get().toInt()
+                                        buffer.get(); buffer.get(); buffer.get() // flags
+                                        
+                                        if (version == 1) buffer.position(buffer.position() + 4)
+                                        
+                                        var count = buffer.getInt()
+                                        if (count > 10000 || count < 0) {
+                                            buffer.position(buffer.position() - 3)
+                                            count = buffer.get().toInt() and 0xFF
+                                        }
+                                        
+                                        for (c in 0 until count) {
+                                            if (buffer.remaining() < 9) break
+                                            val time100ns = buffer.getLong()
+                                            val len = buffer.get().toInt() and 0xFF
+                                            if (buffer.remaining() < len) break
+                                            val titleBytesArr = ByteArray(len)
+                                            buffer.get(titleBytesArr)
+                                            val title = String(titleBytesArr, Charsets.UTF_8).trim()
+                                            chapters.add(Chapter(title.ifBlank { "Chapter ${c + 1}" }, time100ns / 10000L, 0L, 0))
+                                        }
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {}
+            }
+
+            // Calculate exact duration of each chapter
             if (chapters.isNotEmpty()) {
                 for (i in 0 until chapters.size - 1) {
                     chapters[i] = chapters[i].copy(durationMs = chapters[i+1].startMs - chapters[i].startMs)
                 }
                 try {
-                    val retriever = MediaMetadataRetriever()
+                    val retriever = android.media.MediaMetadataRetriever()
                     retriever.setDataSource(context, uri)
-                    val totalDuration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: chapters.last().startMs
+                    val totalDuration = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: chapters.last().startMs
                     chapters[chapters.size - 1] = chapters.last().copy(durationMs = totalDuration - chapters.last().startMs)
                     retriever.release()
                 } catch (e: Exception) {}
