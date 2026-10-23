@@ -58,7 +58,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         repository = AudiobookRepository(this)
-        
         libraryViewModel = ViewModelProvider(this, LibraryViewModelFactory(repository))[LibraryViewModel::class.java]
 
         setContent {
@@ -166,7 +165,11 @@ fun SirinAudiobookApp(
                     viewModel.applyBookSpecificSpeed(selectedBook.id)
                     viewModel.refreshBookmarks()
                     viewModel.loadChapters(selectedBook)
-                    playBook(player, selectedBook, 0, 0L, false)
+                    
+                    val savedTrackIdx = viewModel.repository.getBookTrackIndex(selectedBook.id)
+                    val savedPos = viewModel.repository.getBookPosition(selectedBook.id)
+                    viewModel.currentPosition = savedPos
+                    playBook(player, selectedBook, savedTrackIdx, savedPos, false)
                 }
             }
         }
@@ -206,13 +209,12 @@ fun SirinAudiobookApp(
                     viewModel.books = scannedBooks
                     
                     val lastBookId = viewModel.repository.getLastBookId()
-                    val savedBook = scannedBooks.find { b -> b.id == lastBookId }
+                    val savedBook = scannedBooks.find { b -> b.id == lastBookId } ?: scannedBooks.firstOrNull()
                     if (savedBook != null) {
                         viewModel.currentBookId = savedBook.id
-                        val prefs = viewModel.repository.getPreferences()
-                        val savedTrackIdx = prefs.getInt("last_track_index", 0)
-                        val savedPos = prefs.getLong("last_track_pos", 0L)
-                        val lastPauseTime = prefs.getLong("last_pause_time", 0L)
+                        val savedTrackIdx = viewModel.repository.getBookTrackIndex(savedBook.id)
+                        val savedPos = viewModel.repository.getBookPosition(savedBook.id)
+                        val lastPauseTime = viewModel.repository.getPreferences().getLong("last_pause_time", 0L)
                         val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
                         
                         viewModel.currentPosition = rewindPos
@@ -250,6 +252,7 @@ fun SirinAudiobookApp(
         }
     }
 
+    // --- PER-BOOK POSITION AUTO-SAVING ---
     LaunchedEffect(viewModel.isPlaying) {
         var saveCounter = 0
         while (viewModel.isPlaying) {
@@ -258,10 +261,10 @@ fun SirinAudiobookApp(
             viewModel.totalListenMs += 1000L
             saveCounter++
 
-            if (saveCounter >= 15) {
+            if (saveCounter >= 5) { // Save every 5 seconds for robust bookmarking
                 saveCounter = 0
                 activeBook?.let { b ->
-                    viewModel.repository.savePlaybackState(b.id, player.currentMediaItemIndex, viewModel.currentPosition, viewModel.totalListenMs)
+                    viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, viewModel.currentPosition, viewModel.totalListenMs)
                 }
             }
 
@@ -277,7 +280,7 @@ fun SirinAudiobookApp(
 
         if (!viewModel.isPlaying) {
             activeBook?.let { b ->
-                viewModel.repository.savePlaybackState(b.id, player.currentMediaItemIndex, viewModel.currentPosition, viewModel.totalListenMs)
+                viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, viewModel.currentPosition, viewModel.totalListenMs)
             }
         }
     }
@@ -286,7 +289,12 @@ fun SirinAudiobookApp(
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 viewModel.isPlaying = playing
-                if (!playing) viewModel.repository.markPauseTime()
+                if (!playing) {
+                    viewModel.repository.markPauseTime()
+                    activeBook?.let { b ->
+                        viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs)
+                    }
+                }
             }
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY) viewModel.duration = player.duration.coerceAtLeast(0L)
@@ -464,12 +472,21 @@ fun SirinAudiobookApp(
                             viewMode = viewModel.viewMode,
                             viewModel = viewModel,
                             onSelectBook = { book ->
+                                // Save current playing book state before switching
+                                activeBook?.let { curr ->
+                                    viewModel.repository.saveBookProgress(curr.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs)
+                                }
+                                
                                 viewModel.currentBookId = book.id
                                 viewModel.applyBookSpecificSpeed(book.id)
                                 viewModel.refreshBookmarks()
                                 viewModel.loadChapters(book)
                                 viewModel.updateCoverArt(book)
-                                playBook(player, book, 0, 0L, true)
+                                
+                                val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
+                                val savedPos = viewModel.repository.getBookPosition(book.id)
+                                viewModel.currentPosition = savedPos
+                                playBook(player, book, savedTrackIdx, savedPos, true)
                                 viewModel.isPlayerFullScreen = true
                             },
                             onChangeCover = { book ->
@@ -617,7 +634,7 @@ fun SirinAudiobookApp(
                         )
                     }
                     if (viewModel.chaptersList.isEmpty()) {
-                        item { Text("No chapters found.", color = Color.Gray) }
+                        item { Text("No chapters found in this file.", color = Color.Gray) }
                     }
                 }
             },

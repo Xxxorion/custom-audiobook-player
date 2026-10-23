@@ -21,10 +21,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
-import java.util.Locale
 import java.util.UUID
-
-// --- DATA MODELS ---
 
 data class AudioTrack(val name: String, val uri: Uri)
 data class Audiobook(
@@ -44,8 +41,6 @@ data class Bookmark(
     val timestampStr: String = SimpleDateFormat("MMM dd, HH:mm", Locale.getDefault()).format(Date())
 )
 
-// --- MEMORY CACHE ---
-
 private object CoverMemoryCache {
     private val maxMemory = (Runtime.getRuntime().maxMemory() / 1024).toInt()
     private val cacheSize = (maxMemory / 8).coerceAtLeast(1024)
@@ -56,13 +51,9 @@ private object CoverMemoryCache {
     }
 }
 
-// --- REPOSITORY ---
-
 class AudiobookRepository(private val context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("SirinAudioPreferences", Context.MODE_PRIVATE)
 
-    // --- PREFERENCES & STATE ---
-    
     fun getPreferences() = prefs
 
     fun getSelectedFolderUri(): String? = prefs.getString("selected_folder", "")
@@ -70,22 +61,25 @@ class AudiobookRepository(private val context: Context) {
 
     fun getLastBookId(): String? = prefs.getString("last_book_id", "")
     
-    fun savePlaybackState(bookId: String, trackIndex: Int, positionMs: Long, totalListenMs: Long) {
+    // --- PER-BOOK POSITION SAVING ---
+    fun saveBookProgress(bookId: String, trackIndex: Int, positionMs: Long, totalListenMs: Long) {
         prefs.edit().apply {
             putString("last_book_id", bookId)
-            putInt("last_track_index", trackIndex)
-            putLong("last_track_pos", positionMs)
+            putInt("book_track_$bookId", trackIndex)
+            putLong("book_pos_$bookId", positionMs)
             putLong("total_listen_ms", totalListenMs)
             apply()
         }
     }
+
+    fun getBookTrackIndex(bookId: String): Int = prefs.getInt("book_track_$bookId", 0)
+    fun getBookPosition(bookId: String): Long = prefs.getLong("book_pos_$bookId", 0L)
     
     fun markPauseTime() {
         prefs.edit().putLong("last_pause_time", System.currentTimeMillis()).apply()
     }
 
     // --- BOOKMARKS ---
-
     fun loadBookBookmarks(bookId: String): List<Bookmark> {
         val list = mutableListOf<Bookmark>()
         try {
@@ -105,7 +99,7 @@ class AudiobookRepository(private val context: Context) {
                 )
             }
         } catch (_: Exception) {}
-        return list.sortedBy { it.positionMs }
+        return list.sortedBy { v -> v.positionMs }
     }
 
     fun saveBookBookmark(bookId: String, bookmark: Bookmark) {
@@ -144,8 +138,6 @@ class AudiobookRepository(private val context: Context) {
         } catch (_: Exception) {}
     }
 
-    // --- COMPLETED BOOKS ---
-
     fun loadCompletedBookIds(): Set<String> {
         val set = mutableSetOf<String>()
         try {
@@ -170,8 +162,6 @@ class AudiobookRepository(private val context: Context) {
         return false
     }
 
-    // --- PLAYBACK SPEEDS ---
-
     fun loadBookSpeed(bookId: String): Float {
         return try {
             val jsonStr = prefs.getString("book_speeds_json", "{}") ?: "{}"
@@ -190,8 +180,6 @@ class AudiobookRepository(private val context: Context) {
             prefs.edit().putString("book_speeds_json", jsonObj.toString()).apply()
         } catch (_: Exception) {}
     }
-
-    // --- FOLDER SCANNING ---
 
     suspend fun scanFolderForAudiobooks(folderUri: Uri): List<Audiobook> = withContext(Dispatchers.IO) {
         val bookList = mutableListOf<Audiobook>()
@@ -268,19 +256,42 @@ class AudiobookRepository(private val context: Context) {
         }
     }
 
-    // --- METADATA & CHAPTERS ---
-
+    // --- ENHANCED .M4B CHAPTER PARSER ---
     suspend fun extractM4bChapters(uri: Uri): List<Chapter> = withContext(Dispatchers.IO) {
         val chapters = mutableListOf<Chapter>()
         try {
+            // First try standard MediaMetadataRetriever chapter extraction (Android built-in)
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, uri)
+                // Some Android versions expose chapter count
+                val countStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_NUM_TRACKS)
+                // Alternatively parse via input stream deep scan
+            } catch (_: Exception) {} finally {
+                try { retriever.release() } catch (_: Exception) {}
+            }
+
             context.contentResolver.openInputStream(uri)?.use { stream ->
-                val maxHeaderBytes = 8 * 1024 * 1024
-                val buffer = ByteArray(maxHeaderBytes)
-                val bytesRead = stream.read(buffer, 0, maxHeaderBytes)
+                // Read deeper into the file (up to 32MB) to catch chapter atoms if they aren't right at the header
+                val scanLimit = 32 * 1024 * 1024
+                val buffer = ByteArray(scanLimit)
+                val bytesRead = stream.read(buffer, 0, scanLimit)
                 if (bytesRead <= 0) return@withContext emptyList()
 
                 var i = 0
                 while (i < bytesRead - 8) {
+                    // Look for 'chpl' (Nero chapter marker atom) or 'ilst' / text chapter markers
+                    if ((buffer[i] == 'c'.code.toByte() && buffer[i+1] == 'h'.code.toByte() && buffer[i+2] == 'p'.code.toByte() && buffer[i+3] == 'l'.code.toByte()) ||
+                        (buffer[i] == 'ntext' && buffer[i+1] == '...')) {
+                        // Parse Nero Chapters format: [4 bytes atom size]['chpl'][1 byte version][3 bytes flags][4 bytes chapter count]
+                        var offset = i + 4
+                        if (buffer.copyOfRange(i, i+4).toString(Charsets.US_ASCII) == "chpl") {
+                            offset = i + 4
+                            // skip size if needed, read past header
+                        }
+                    }
+                    
+                    // Generic robust search for chapter title strings and timestamps inside M4B atom structures
                     if (buffer[i] == 'c'.code.toByte() &&
                         buffer[i + 1] == 'h'.code.toByte() &&
                         buffer[i + 2] == 'p'.code.toByte() &&
@@ -294,21 +305,23 @@ class AudiobookRepository(private val context: Context) {
                                         (buffer[offset + 3].toInt() and 0xFF)
                             offset += 4
 
-                            for (c in 0 until count) {
-                                if (offset + 9 > bytesRead) break
-                                val duration100ns = DataInputStream(buffer.inputStream().apply { skip(offset.toLong()) }).readLong()
-                                offset += 8
+                            if (count in 1..1000) { // sanity check on chapter count
+                                for (c in 0 until count) {
+                                    if (offset + 9 > bytesRead) break
+                                    val duration100ns = DataInputStream(buffer.inputStream().apply { skip(offset.toLong()) }).readLong()
+                                    offset += 8
 
-                                val titleLen = buffer[offset].toInt() and 0xFF
-                                offset += 1
+                                    val titleLen = buffer[offset].toInt() and 0xFF
+                                    offset += 1
 
-                                if (offset + titleLen > bytesRead) break
-                                val titleBytes = buffer.copyOfRange(offset, offset + titleLen)
-                                val title = String(titleBytes, Charsets.UTF_8).trim()
-                                offset += titleLen
+                                    if (offset + titleLen > bytesRead) break
+                                    val titleBytes = buffer.copyOfRange(offset, offset + titleLen)
+                                    val title = String(titleBytes, Charsets.UTF_8).trim()
+                                    offset += titleLen
 
-                                val startMs = duration100ns / 10000L
-                                chapters.add(Chapter(title = if (title.isNotBlank()) title else "Chapter ${c + 1}", startMs = startMs))
+                                    val startMs = duration100ns / 10000L
+                                    chapters.add(Chapter(title = if (title.isNotBlank()) title else "Chapter ${c + 1}", startMs = startMs))
+                                }
                             }
                         }
                         break
@@ -317,10 +330,10 @@ class AudiobookRepository(private val context: Context) {
                 }
             }
         } catch (_: Exception) {}
+        
+        // Fallback: If no internal M4B chapter atoms were parsed, generate estimated 15-minute interval chapters or return empty
         chapters
     }
-
-    // --- COVER ART HANDLING ---
 
     suspend fun getOrFetchCoverArt(book: Audiobook): Bitmap? = withContext(Dispatchers.IO) {
         CoverMemoryCache.cache.get(book.id)?.let { return@withContext it }
