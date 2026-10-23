@@ -12,13 +12,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.DataInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -32,7 +33,7 @@ data class Audiobook(
     val series: String = "",
     val tracks: List<AudioTrack>
 )
-data class Chapter(val title: String, val startMs: Long)
+data class Chapter(val title: String, val startMs: Long, val durationMs: Long = 0L, val trackIndex: Int = 0)
 
 data class Bookmark(
     val id: String = UUID.randomUUID().toString(),
@@ -56,13 +57,10 @@ class AudiobookRepository(private val context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("SirinAudioPreferences", Context.MODE_PRIVATE)
 
     fun getPreferences() = prefs
-
     fun getSelectedFolderUri(): String? = prefs.getString("selected_folder", "")
     fun saveSelectedFolderUri(uriStr: String) = prefs.edit().putString("selected_folder", uriStr).apply()
-
     fun getLastBookId(): String? = prefs.getString("last_book_id", "")
     
-    // --- PER-BOOK POSITION SAVING ---
     fun saveBookProgress(bookId: String, trackIndex: Int, positionMs: Long, totalListenMs: Long) {
         prefs.edit().apply {
             putString("last_book_id", bookId)
@@ -75,12 +73,8 @@ class AudiobookRepository(private val context: Context) {
 
     fun getBookTrackIndex(bookId: String): Int = prefs.getInt("book_track_$bookId", 0)
     fun getBookPosition(bookId: String): Long = prefs.getLong("book_pos_$bookId", 0L)
-    
-    fun markPauseTime() {
-        prefs.edit().putLong("last_pause_time", System.currentTimeMillis()).apply()
-    }
+    fun markPauseTime() = prefs.edit().putLong("last_pause_time", System.currentTimeMillis()).apply()
 
-    // --- BOOKMARKS ---
     fun loadBookBookmarks(bookId: String): List<Bookmark> {
         val list = mutableListOf<Bookmark>()
         try {
@@ -108,7 +102,6 @@ class AudiobookRepository(private val context: Context) {
             val jsonStr = prefs.getString("book_bookmarks_json", "{}") ?: "{}"
             val jsonObj = JSONObject(jsonStr)
             val array = jsonObj.optJSONArray(bookId) ?: JSONArray()
-
             val newObj = JSONObject().apply {
                 put("id", bookmark.id)
                 put("positionMs", bookmark.positionMs)
@@ -118,23 +111,6 @@ class AudiobookRepository(private val context: Context) {
             }
             array.put(newObj)
             jsonObj.put(bookId, array)
-            prefs.edit().putString("book_bookmarks_json", jsonObj.toString()).apply()
-        } catch (_: Exception) {}
-    }
-
-    fun deleteBookBookmark(bookId: String, bookmarkId: String) {
-        try {
-            val jsonStr = prefs.getString("book_bookmarks_json", "{}") ?: "{}"
-            val jsonObj = JSONObject(jsonStr)
-            val array = jsonObj.optJSONArray(bookId) ?: return
-            val newArray = JSONArray()
-            for (i in 0 until array.length()) {
-                val item = array.getJSONObject(i)
-                if (item.optString("id") != bookmarkId) {
-                    newArray.put(item)
-                }
-            }
-            jsonObj.put(bookId, newArray)
             prefs.edit().putString("book_bookmarks_json", jsonObj.toString()).apply()
         } catch (_: Exception) {}
     }
@@ -195,124 +171,150 @@ class AudiobookRepository(private val context: Context) {
         val subDirs = mutableListOf<DocumentFile>()
 
         for (file in files) {
-            if (file.isDirectory) {
-                subDirs.add(file)
-            } else if (file.isFile) {
+            if (file.isDirectory) subDirs.add(file)
+            else if (file.isFile) {
                 val name = file.name ?: continue
-                if (name.endsWith(".mp3", ignoreCase = true) ||
-                    name.endsWith(".m4a", ignoreCase = true) ||
-                    name.endsWith(".m4b", ignoreCase = true)
-                ) {
+                if (name.endsWith(".mp3", ignoreCase = true) || name.endsWith(".m4a", ignoreCase = true) || name.endsWith(".m4b", ignoreCase = true)) {
                     audioFiles.add(file)
                 }
             }
         }
 
         if (audioFiles.isNotEmpty()) {
-            val sortedTracks = audioFiles.map {
-                AudioTrack(name = it.name?.substringBeforeLast(".") ?: "Track", uri = it.uri)
-            }.sortedWith(Comparator { a, b -> a.name.compareTo(b.name, ignoreCase = true) })
-
+            val sortedTracks = audioFiles.map { AudioTrack(name = it.name?.substringBeforeLast(".") ?: "Track", uri = it.uri) }
+                .sortedWith(Comparator { a, b -> a.name.compareTo(b.name, ignoreCase = true) })
             val parentDir = currentDir.parentFile
             val grandParentDir = parentDir?.parentFile
             var authorName = "Unknown Author"
             var seriesName = ""
-
             if (currentDir != rootDir && parentDir != null && parentDir != rootDir) {
                 if (grandParentDir != null && grandParentDir != rootDir && grandParentDir.name != null) {
                     authorName = grandParentDir.name!!
                     seriesName = parentDir.name!!
-                } else if (parentDir.name != null) {
-                    authorName = parentDir.name!!
-                }
+                } else if (parentDir.name != null) authorName = parentDir.name!!
             }
-
             val bookTitle = if (currentDir.name != null && currentDir != rootDir) currentDir.name!! else sortedTracks.first().name
 
             if (audioFiles.size == 1 && sortedTracks.first().name.endsWith(".m4b", ignoreCase = true)) {
-                bookList.add(
-                    Audiobook(
-                        id = sortedTracks.first().uri.toString(),
-                        title = sortedTracks.first().name,
-                        author = authorName,
-                        series = seriesName,
-                        tracks = sortedTracks
-                    )
-                )
+                bookList.add(Audiobook(id = sortedTracks.first().uri.toString(), title = sortedTracks.first().name, author = authorName, series = seriesName, tracks = sortedTracks))
             } else {
-                bookList.add(
-                    Audiobook(
-                        id = currentDir.uri.toString(),
-                        title = bookTitle,
-                        author = authorName,
-                        series = seriesName,
-                        tracks = sortedTracks
-                    )
-                )
+                bookList.add(Audiobook(id = currentDir.uri.toString(), title = bookTitle, author = authorName, series = seriesName, tracks = sortedTracks))
             }
         }
-
-        for (dir in subDirs) {
-            traverseDirectoryForBooks(dir, rootDir, bookList)
-        }
+        for (dir in subDirs) traverseDirectoryForBooks(dir, rootDir, bookList)
     }
 
-    // --- ENHANCED .M4B CHAPTER PARSER ---
-    suspend fun extractM4bChapters(uri: Uri): List<Chapter> = withContext(Dispatchers.IO) {
+    // --- PROPER CHAPTER EXTRACTOR ---
+    suspend fun getBookChapters(book: Audiobook): List<Chapter> = withContext(Dispatchers.IO) {
         val chapters = mutableListOf<Chapter>()
-        try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                val scanLimit = 32 * 1024 * 1024
-                val buffer = ByteArray(scanLimit)
-                val bytesRead = stream.read(buffer, 0, scanLimit)
-                if (bytesRead <= 0) return@withContext emptyList()
-
-                var i = 0
-                while (i < bytesRead - 8) {
-                    if (buffer[i] == 'c'.code.toByte() &&
-                        buffer[i + 1] == 'h'.code.toByte() &&
-                        buffer[i + 2] == 'p'.code.toByte() &&
-                        buffer[i + 3] == 'l'.code.toByte()
-                    ) {
-                        var offset = i + 8
-                        if (offset + 4 <= bytesRead) {
-                            val count = ((buffer[offset].toInt() and 0xFF) shl 24) or
-                                        ((buffer[offset + 1].toInt() and 0xFF) shl 16) or
-                                        ((buffer[offset + 2].toInt() and 0xFF) shl 8) or
-                                        (buffer[offset + 3].toInt() and 0xFF)
-                            offset += 4
-
-                            if (count in 1..1000) {
-                                for (c in 0 until count) {
-                                    if (offset + 9 > bytesRead) break
-                                    val duration100ns = DataInputStream(buffer.inputStream().apply { skip(offset.toLong()) }).readLong()
-                                    offset += 8
-
-                                    val titleLen = buffer[offset].toInt() and 0xFF
-                                    offset += 1
-
-                                    if (offset + titleLen > bytesRead) break
-                                    val titleBytes = buffer.copyOfRange(offset, offset + titleLen)
-                                    val title = String(titleBytes, Charsets.UTF_8).trim()
-                                    offset += titleLen
-
-                                    val startMs = duration100ns / 10000L
-                                    chapters.add(Chapter(title = if (title.isNotBlank()) title else "Chapter ${c + 1}", startMs = startMs))
-                                }
-                            }
-                        }
-                        break
-                    }
-                    i++
-                }
+        
+        if (book.tracks.size > 1) {
+            // Multi-file: treat each audio file as a distinct chapter starting at 0:00 of its own track
+            val retriever = MediaMetadataRetriever()
+            for ((index, track) in book.tracks.withIndex()) {
+                var duration = 0L
+                try {
+                    retriever.setDataSource(context, track.uri)
+                    duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                } catch (e: Exception) {}
+                chapters.add(Chapter(title = track.name, startMs = 0L, durationMs = duration, trackIndex = index))
             }
-        } catch (_: Exception) {}
+            try { retriever.release() } catch (e: Exception) {}
+        } else if (book.tracks.isNotEmpty()) {
+            // Single-file: Lightning-fast MP4 atom traversal to rip Nero 'chpl' chapters
+            val uri = book.tracks.first().uri
+            try {
+                val pfd = context.contentResolver.openFileDescriptor(uri, "r")
+                if (pfd != null) {
+                    FileInputStream(pfd.fileDescriptor).use { fis ->
+                        val channel = fis.channel
+                        val fileSize = channel.size()
+                        var pos = 0L
+
+                        while (pos < fileSize) {
+                            channel.position(pos)
+                            val header = ByteBuffer.allocate(8)
+                            if (channel.read(header) < 8) break
+                            header.flip()
+                            
+                            var size = header.getInt().toLong() and 0xFFFFFFFFL
+                            val typeBytes = ByteArray(4)
+                            header.get(typeBytes)
+                            val type = String(typeBytes, Charsets.US_ASCII)
+                            var headerSize = 8L
+                            
+                            if (size == 1L) {
+                                val ext = ByteBuffer.allocate(8)
+                                channel.read(ext)
+                                ext.flip()
+                                size = ext.getLong()
+                                headerSize = 16L
+                            } else if (size == 0L) {
+                                size = fileSize - pos
+                            }
+                            if (size < headerSize) break 
+
+                            // Step into container atoms
+                            if (type == "moov" || type == "udta") {
+                                pos += headerSize
+                                continue
+                            }
+                            // Parse chapter array
+                            if (type == "chpl") {
+                                val dataSize = (size - headerSize).toInt()
+                                val chplData = ByteBuffer.allocate(dataSize)
+                                channel.read(chplData)
+                                chplData.flip()
+
+                                chplData.position(4) // Skip version/flags
+                                val reserved = chplData.get()
+                                var count = chplData.getInt()
+                                if (count > 10000 || count <= 0) { 
+                                    chplData.position(5)
+                                    count = chplData.get().toInt() and 0xFF 
+                                }
+
+                                for (i in 0 until count) {
+                                    if (chplData.remaining() < 9) break
+                                    val timestamp100ns = chplData.getLong()
+                                    val titleLen = chplData.get().toInt() and 0xFF
+                                    if (chplData.remaining() < titleLen) break
+                                    val titleBytesArr = ByteArray(titleLen)
+                                    chplData.get(titleBytesArr)
+                                    val chapterTitle = String(titleBytesArr, Charsets.UTF_8)
+                                    chapters.add(Chapter(chapterTitle, timestamp100ns / 10000L, 0L, 0))
+                                }
+                                break
+                            }
+                            pos += size // Skip over massive data atoms instantly
+                        }
+                    }
+                }
+            } catch (e: Exception) {}
+
+            // Calculate durations for single-file chapters
+            if (chapters.isNotEmpty()) {
+                for (i in 0 until chapters.size - 1) {
+                    chapters[i] = chapters[i].copy(durationMs = chapters[i+1].startMs - chapters[i].startMs)
+                }
+                try {
+                    val retriever = MediaMetadataRetriever()
+                    retriever.setDataSource(context, uri)
+                    val totalDuration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: chapters.last().startMs
+                    chapters[chapters.size - 1] = chapters.last().copy(durationMs = totalDuration - chapters.last().startMs)
+                    retriever.release()
+                } catch (e: Exception) {}
+            }
+        }
+        
+        if (chapters.isEmpty()) {
+            chapters.add(Chapter("Chapter 1", 0L, 0L, 0))
+        }
         chapters
     }
 
     suspend fun getOrFetchCoverArt(book: Audiobook): Bitmap? = withContext(Dispatchers.IO) {
         CoverMemoryCache.cache.get(book.id)?.let { return@withContext it }
-
         val cacheFile = File(context.filesDir, "covers/${book.id.hashCode()}.png")
         if (cacheFile.exists()) {
             val bmp = decodeSampledBitmapFromFile(cacheFile.absolutePath, 350, 350)
@@ -321,21 +323,18 @@ class AudiobookRepository(private val context: Context) {
                 return@withContext bmp
             }
         }
-
         val embedded = loadEmbeddedCoverArt(book.tracks.first().uri)
         if (embedded != null) {
             saveBitmapToCache(book.id, embedded)
             CoverMemoryCache.cache.put(book.id, embedded)
             return@withContext embedded
         }
-
         val onlineBmp = fetchOnlineCoverArt(book.title, book.author)
         if (onlineBmp != null) {
             saveBitmapToCache(book.id, onlineBmp)
             CoverMemoryCache.cache.put(book.id, onlineBmp)
             return@withContext onlineBmp
         }
-
         null
     }
 
