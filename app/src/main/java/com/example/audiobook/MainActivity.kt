@@ -647,7 +647,6 @@ fun SirinAudiobookApp(
                     items(viewModel.chaptersList.size) { idx ->
                         val chap = viewModel.chaptersList[idx]
                         
-                        // Active chapter dot logic handling both M4B and MP3 structure
                         val isCurrent = if (viewModel.chaptersList.any { it.trackIndex > 0 }) {
                             player.currentMediaItemIndex == chap.trackIndex
                         } else {
@@ -799,13 +798,4 @@ fun getChapterTitle(chapters: List<Chapter>, currentPosMs: Long, trackIndex: Int
         }
     }
     return currentChapter.title
-}
-
-// Added formatting helper to ensure the dialogs and stats display cleanly without compile issues
-fun formatTime(ms: Long): String {
-    val totalSeconds = ms / 1000
-    val h = totalSeconds / 3600
-    val m = (totalSeconds % 3600) / 60
-    val s = totalSeconds % 60
-    return if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
 }
