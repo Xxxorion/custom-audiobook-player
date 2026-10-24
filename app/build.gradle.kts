@@ -44,4 +44,5 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-session:1.2.1")
+    implementation("com.arthenica:ffmpeg-kit-min:6.0-2")
 }
