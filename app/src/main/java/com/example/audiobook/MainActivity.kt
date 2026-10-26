@@ -90,7 +90,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = if (isDarkTheme) darkColors else lightColors) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     if (controller != null) {
-                        SirinAudiobookApp(
+                        FablewoodAudiobookApp(
                             player = controller!!,
                             viewModel = libraryViewModel,
                             isDarkTheme = isDarkTheme,
@@ -112,7 +112,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SirinAudiobookApp(
+fun FablewoodAudiobookApp(
     player: Player,
     viewModel: LibraryViewModel,
     isDarkTheme: Boolean,
@@ -156,7 +156,7 @@ fun SirinAudiobookApp(
                 if (scannedBooks.isNotEmpty()) {
                     viewModel.books = scannedBooks
                     viewModel.repository.saveBooksCache(scannedBooks)
-                    
+
                     val selectedBook = scannedBooks[0]
                     viewModel.currentBookId = selectedBook.id
                     viewModel.applyBookSpecificSpeed(selectedBook.id)
@@ -202,10 +202,9 @@ fun SirinAudiobookApp(
         if (!savedUriStr.isNullOrEmpty()) {
             coroutineScope.launch {
                 try {
-                    // Instantly wire up the active book from the cached library if available
                     val lastBookId = viewModel.repository.getLastBookId()
                     val initialBook = viewModel.books.find { b -> b.id == lastBookId } ?: viewModel.books.firstOrNull()
-                    
+
                     if (initialBook != null && viewModel.currentBookId.isEmpty()) {
                         viewModel.currentBookId = initialBook.id
                         viewModel.applyBookSpecificSpeed(initialBook.id)
@@ -227,12 +226,10 @@ fun SirinAudiobookApp(
                         }
                     }
 
-                    // Background sync: quietly scan folder and update the cache without freezing UI
                     val folderUri = Uri.parse(savedUriStr)
                     val scannedBooks = viewModel.repository.scanFolderForAudiobooks(folderUri)
                     viewModel.books = scannedBooks
                     viewModel.repository.saveBooksCache(scannedBooks)
-
                 } catch (_: Throwable) {}
             }
         }
@@ -325,7 +322,7 @@ fun SirinAudiobookApp(
         drawerContent = {
             ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
                 Spacer(Modifier.height(24.dp))
-                Text("Fablewood Audio", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(16.dp), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                Text("Fablewood Audiobooks", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(16.dp), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                 HorizontalDivider()
                 NavigationDrawerItem(
                     icon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
@@ -482,7 +479,7 @@ fun SirinAudiobookApp(
             Scaffold(
                 topBar = {
                     CenterAlignedTopAppBar(
-                        title = { Text("Fablewood Library", fontWeight = FontWeight.Bold) },
+                        title = { Text("Fablewood Audiobooks", fontWeight = FontWeight.Bold) },
                         navigationIcon = {
                             IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
                                 Icon(Icons.Default.Menu, contentDescription = "Menu")

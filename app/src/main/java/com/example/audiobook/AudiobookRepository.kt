@@ -69,7 +69,7 @@ private object CoverMemoryCache {
 }
 
 class AudiobookRepository(private val context: Context) {
-    private val prefs: SharedPreferences = context.getSharedPreferences("SirinAudioPreferences", Context.MODE_PRIVATE)
+    private val prefs: SharedPreferences = context.getSharedPreferences("FablewoodPreferences", Context.MODE_PRIVATE)
 
     fun getPreferences() = prefs
     fun getSelectedFolderUri(): String? = prefs.getString("selected_folder", "")
@@ -447,7 +447,6 @@ class AudiobookRepository(private val context: Context) {
             }
         }
 
-        // Multi-file MP3 fallback logic
         val chapters = mutableListOf<Chapter>()
         val retriever = MediaMetadataRetriever()
         for ((index, track) in book.tracks.withIndex()) {
@@ -467,11 +466,9 @@ class AudiobookRepository(private val context: Context) {
         chapters
     }
 
-    // PURE KOTLIN MP4/M4B CHAPTER EXTRACTOR (Zero native C libraries, crash-proof)
     private fun extractM4bChapters(uri: Uri, trackIndex: Int = 0): List<Chapter> {
         val chapters = mutableListOf<Chapter>()
 
-        // METHOD 1: Direct MP4/M4B Atom Parser (Reads Audible/Nero 'chpl' and QuickTime 'tx3g'/'text' chapter tracks)
         try {
             context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
                 FileInputStream(pfd.fileDescriptor).use { fis ->
@@ -481,7 +478,6 @@ class AudiobookRepository(private val context: Context) {
             }
         } catch (_: Throwable) {}
 
-        // METHOD 2: Fallback to Android Native MediaExtractor
         if (chapters.isEmpty()) {
             val extractor = MediaExtractor()
             try {
@@ -523,7 +519,6 @@ class AudiobookRepository(private val context: Context) {
             }
         }
 
-        // Calculate exact duration of each chapter
         if (chapters.isNotEmpty()) {
             chapters.sortBy { it.startMs }
             val deduplicated = mutableListOf<Chapter>()
@@ -613,7 +608,6 @@ class AudiobookRepository(private val context: Context) {
         val moov = topBoxes.firstOrNull { it.type == "moov" } ?: return emptyList()
         val moovChildren = listChildBoxes(channel, moov.payloadOffset, moov.endOffset)
 
-        // 1. Check Nero chapters inside moov -> udta -> chpl
         val udta = moovChildren.firstOrNull { it.type == "udta" }
         if (udta != null) {
             val udtaChildren = listChildBoxes(channel, udta.payloadOffset, udta.endOffset)
@@ -624,7 +618,6 @@ class AudiobookRepository(private val context: Context) {
             }
         }
 
-        // 2. Check QuickTime chapter tracks inside moov -> trak
         val traks = moovChildren.filter { it.type == "trak" }
         val referencedChapterTrackIds = findReferencedChapterTrackIds(channel, traks)
 
@@ -664,8 +657,8 @@ class AudiobookRepository(private val context: Context) {
     private fun parseChplBox(channel: FileChannel, chpl: Mp4Box, trackIndex: Int): List<Chapter> {
         val buf = readBoxPayload(channel, chpl, 6) ?: return emptyList()
         val version = buf.get().toInt() and 0xFF
-        buf.get(); buf.get(); buf.get() // 3 bytes flags
-        buf.get() // 1 byte reserved
+        buf.get(); buf.get(); buf.get()
+        buf.get()
 
         val count: Int = if (version == 0) {
             if (buf.remaining() < 1) return emptyList()
@@ -680,7 +673,7 @@ class AudiobookRepository(private val context: Context) {
         val result = mutableListOf<Chapter>()
         for (i in 0 until count) {
             if (buf.remaining() < 9) break
-            val startTicks = buf.long // 100-nanosecond units
+            val startTicks = buf.long
             val startMs = (startTicks / 10_000L).coerceAtLeast(0L)
             val titleLen = buf.get().toInt() and 0xFF
             if (buf.remaining() < titleLen) break
@@ -816,7 +809,7 @@ class AudiobookRepository(private val context: Context) {
             if (stscBuf.remaining() < 12) break
             val firstChunk = stscBuf.int
             val samplesPerChunk = stscBuf.int
-            stscBuf.int // sampleDescriptionIndex
+            stscBuf.int
             if (firstChunk > 0 && samplesPerChunk > 0) {
                 stscEntries.add(StscEntry(firstChunk, samplesPerChunk))
             }

@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Deep Forest Green Background -->
+    <path
+        android:fillColor="#0C261B"
+        android:pathData="M0,0 L108,0 L108,108 L0,108 Z" />
+
+    <!-- Inner Gold-Bordered Badge -->
+    <path
+        android:fillColor="#133326"
+        android:strokeColor="#D4AF37"
+        android:strokeWidth="2.5"
+        android:pathData="M20,10 L88,10 Q98,10 98,20 L98,88 Q98,98 88,98 L20,98 Q10,98 10,88 L10,20 Q10,10 20,10 Z" />
+
+    <!-- Open Book Base -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M22,84 L49,84 Q54,87 59,84 L86,84 L86,86 L22,86 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M24,78 Q39,72 54,81 L54,84 Q39,75 24,81 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M84,78 Q69,72 54,81 L54,84 Q69,75 84,81 Z" />
+    <path
+        android:fillColor="#E6C65A"
+        android:pathData="M27,73 Q40,67 54,77 L54,80 Q40,70 27,76 Z" />
+    <path
+        android:fillColor="#E6C65A"
+        android:pathData="M81,73 Q68,67 54,77 L54,80 Q68,70 81,76 Z" />
+
+    <!-- Tree Trunk & Branches -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M50,78 Q52,64 51,48 L57,48 Q56,64 58,78 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M52,54 Q44,46 39,38 L42,36 Q47,43 53,50 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M56,54 Q64,46 69,38 L66,36 Q61,43 55,50 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M52,50 L52,32 L56,32 L56,50 Z" />
+
+    <!-- Golden Oak Leaves Crown -->
+    <path
+        android:fillColor="#E6C65A"
+        android:pathData="M54,17 Q61,24 54,33 Q47,24 54,17 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M42,21 Q50,24 48,34 Q40,30 42,21 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M66,21 Q58,24 60,34 Q68,30 66,21 Z" />
+    <path
+        android:fillColor="#E6C65A"
+        android:pathData="M33,29 Q42,30 42,39 Q33,37 33,29 Z" />
+    <path
+        android:fillColor="#E6C65A"
+        android:pathData="M75,29 Q66,30 66,39 Q75,37 75,29 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M37,40 Q45,41 44,47 Q36,46 37,40 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M71,40 Q63,41 64,47 Q72,46 71,40 Z" />
+
+    <!-- Left Audio Soundwave Bars -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M21,50 L23,50 L23,58 L21,58 Z" />
+    <path
+        android:fillColor="#E6C65A"
+        android:pathData="M25,45 L27,45 L27,63 L25,63 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M29,40 L31,40 L31,68 L29,68 Z" />
+    <path
+        android:fillColor="#E6C65A"
+        android:pathData="M33,46 L35,46 L35,62 L33,62 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M37,50 L39,50 L39,58 L37,58 Z" />
+
+    <!-- Right Audio Soundwave Bars -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M69,50 L71,50 L71,58 L69,58 Z" />
+    <path
+        android:fillColor="#E6C65A"
+        android:pathData="M73,46 L75,46 L75,62 L73,62 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M77,40 L79,40 L79,68 L77,68 Z" />
+    <path
+        android:fillColor="#E6C65A"
+        android:pathData="M81,45 L83,45 L83,63 L81,63 Z" />
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M85,50 L87,50 L87,58 L85,58 Z" />
+</vector>
