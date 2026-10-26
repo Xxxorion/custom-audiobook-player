@@ -14,6 +14,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -68,14 +69,9 @@ class MainActivity : ComponentActivity() {
                 val sessionToken = SessionToken(context, ComponentName(context, AudiobookPlaybackService::class.java))
                 val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
                 controllerFuture.addListener({
-                    try {
-                        controller = controllerFuture.get()
-                    } catch (_: Exception) {}
+                    try { controller = controllerFuture.get() } catch (_: Exception) {}
                 }, ContextCompat.getMainExecutor(context))
-
-                onDispose {
-                    MediaController.releaseFuture(controllerFuture)
-                }
+                onDispose { MediaController.releaseFuture(controllerFuture) }
             }
 
             var isDarkTheme by remember { mutableStateOf(repository.getPreferences().getBoolean("is_dark_theme", true)) }
@@ -143,17 +139,14 @@ fun SirinAudiobookApp(
 
     val customCoverLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { selectedUri ->
-            targetBookForCustomCover?.let { book ->
-                viewModel.setCustomCover(book.id, selectedUri)
-            }
+            targetBookForCustomCover?.let { book -> viewModel.setCustomCover(book.id, selectedUri) }
         }
     }
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let {
-            val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             try { context.contentResolver.takePersistableUriPermission(it, takeFlags) } catch (_: Exception) {}
-
             viewModel.repository.saveSelectedFolderUri(it.toString())
 
             coroutineScope.launch {
@@ -266,9 +259,6 @@ fun SirinAudiobookApp(
             viewModel.totalListenMs += 1000L
             activeBook?.let { b ->
                 viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, viewModel.currentPosition, viewModel.totalListenMs)
-            }
-
-            activeBook?.let { b ->
                 val isLastTrack = !player.hasNextMediaItem()
                 if (isLastTrack && viewModel.duration > 0L && viewModel.currentPosition >= viewModel.duration - 2000L) {
                     if (viewModel.repository.markBookCompleted(b.id)) {
@@ -353,14 +343,14 @@ fun SirinAudiobookApp(
                     val newPos = (player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)).coerceAtLeast(0L)
                     player.seekTo(newPos)
                     viewModel.currentPosition = newPos
-                    activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, newPos, viewModel.totalListenMs) }
+                    viewModel.repository.saveBookProgress(activeBook.id, player.currentMediaItemIndex, newPos, viewModel.totalListenMs)
                 },
                 onQuickForward = {
                     val maxDur = if (viewModel.duration > 0L) viewModel.duration else Long.MAX_VALUE
                     val newPos = (player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)).coerceAtMost(maxDur)
                     player.seekTo(newPos)
                     viewModel.currentPosition = newPos
-                    activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, newPos, viewModel.totalListenMs) }
+                    viewModel.repository.saveBookProgress(activeBook.id, player.currentMediaItemIndex, newPos, viewModel.totalListenMs)
                 },
                 onAddBookmark = { showAddBookmarkPrompt = true },
                 onExitCarMode = { viewModel.isCarModeActive = false }
@@ -383,14 +373,14 @@ fun SirinAudiobookApp(
                 playbackSpeed = viewModel.playbackSpeed,
                 onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
                 onBackToBookshelf = {
-                    activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs) }
+                    viewModel.repository.saveBookProgress(activeBook.id, player.currentMediaItemIndex, player.currentPosition, viewModel.totalListenMs)
                     viewModel.isPlayerFullScreen = false
                 },
                 onPlayPause = { if (viewModel.isPlaying) player.pause() else player.play() },
                 onSeek = { pos ->
                     player.seekTo(pos)
                     viewModel.currentPosition = pos
-                    activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, pos, viewModel.totalListenMs) }
+                    viewModel.repository.saveBookProgress(activeBook.id, player.currentMediaItemIndex, pos, viewModel.totalListenMs)
                 },
                 onSkipPrevChapter = {
                     val chapters = viewModel.chaptersList
@@ -399,12 +389,12 @@ fun SirinAudiobookApp(
                         if (currChap != null && viewModel.currentPosition - currChap.startMs > 3000L) {
                             player.seekTo(currChap.trackIndex, currChap.startMs)
                             viewModel.currentPosition = currChap.startMs
-                            activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, currChap.trackIndex, currChap.startMs, viewModel.totalListenMs) }
+                            viewModel.repository.saveBookProgress(activeBook.id, currChap.trackIndex, currChap.startMs, viewModel.totalListenMs)
                         } else if (currentChapterIndex > 0) {
                             val prevChap = chapters[currentChapterIndex - 1]
                             player.seekTo(prevChap.trackIndex, prevChap.startMs)
                             viewModel.currentPosition = prevChap.startMs
-                            activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, prevChap.trackIndex, prevChap.startMs, viewModel.totalListenMs) }
+                            viewModel.repository.saveBookProgress(activeBook.id, prevChap.trackIndex, prevChap.startMs, viewModel.totalListenMs)
                         } else {
                             player.seekTo(0, 0L)
                             viewModel.currentPosition = 0L
@@ -419,7 +409,7 @@ fun SirinAudiobookApp(
                         val nextChap = chapters[currentChapterIndex + 1]
                         player.seekTo(nextChap.trackIndex, nextChap.startMs)
                         viewModel.currentPosition = nextChap.startMs
-                        activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, nextChap.trackIndex, nextChap.startMs, viewModel.totalListenMs) }
+                        viewModel.repository.saveBookProgress(activeBook.id, nextChap.trackIndex, nextChap.startMs, viewModel.totalListenMs)
                     } else if (player.hasNextMediaItem()) {
                         player.seekToNextMediaItem()
                     }
@@ -428,14 +418,14 @@ fun SirinAudiobookApp(
                     val newPos = (player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)).coerceAtLeast(0L)
                     player.seekTo(newPos)
                     viewModel.currentPosition = newPos
-                    activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, newPos, viewModel.totalListenMs) }
+                    viewModel.repository.saveBookProgress(activeBook.id, player.currentMediaItemIndex, newPos, viewModel.totalListenMs)
                 },
                 onQuickForward = {
                     val maxDur = if (viewModel.duration > 0L) viewModel.duration else Long.MAX_VALUE
                     val newPos = (player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)).coerceAtMost(maxDur)
                     player.seekTo(newPos)
                     viewModel.currentPosition = newPos
-                    activeBook.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, newPos, viewModel.totalListenMs) }
+                    viewModel.repository.saveBookProgress(activeBook.id, player.currentMediaItemIndex, newPos, viewModel.totalListenMs)
                 },
                 onToggleSilenceTrim = {
                     viewModel.silenceTrimEnabled = !viewModel.silenceTrimEnabled
@@ -495,7 +485,6 @@ fun SirinAudiobookApp(
                         when (viewModel.sortBy) {
                             "TITLE" -> list.sortedBy { it.title.lowercase() }
                             "AUTHOR" -> list.sortedBy { it.author.lowercase() }
-                            "RECENT" -> list
                             else -> list
                         }
                     }
@@ -509,4 +498,324 @@ fun SirinAudiobookApp(
                                 placeholder = { Text("Search books...") },
                                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                                 trailingIcon = {
-                                    if (viewModel.search
+                                    if (viewModel.searchQuery.isNotEmpty()) {
+                                        IconButton(onClick = { viewModel.searchQuery = "" }) {
+                                            Icon(Icons.Default.Clear, contentDescription = null)
+                                        }
+                                    }
+                                },
+                                singleLine = true,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                        }
+
+                        BookshelfContent(
+                            books = displayedBooks,
+                            activeBookId = viewModel.currentBookId,
+                            duration = viewModel.duration,
+                            currentPosition = viewModel.currentPosition,
+                            viewMode = viewModel.viewMode,
+                            viewModel = viewModel,
+                            onSelectBook = { book ->
+                                val snapshotPos = player.currentPosition
+                                val snapshotIdx = player.currentMediaItemIndex
+                                activeBook?.let { curr ->
+                                    viewModel.repository.saveBookProgress(curr.id, snapshotIdx, snapshotPos, viewModel.totalListenMs)
+                                }
+                                player.playWhenReady = false
+                                player.pause()
+
+                                viewModel.currentBookId = book.id
+                                viewModel.applyBookSpecificSpeed(book.id)
+                                viewModel.refreshBookmarks()
+                                viewModel.loadChapters(book)
+                                viewModel.updateCoverArt(book)
+
+                                val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
+                                val savedPos = viewModel.repository.getBookPosition(book.id)
+                                viewModel.currentPosition = savedPos
+
+                                playBook(player, book, savedTrackIdx, savedPos, false)
+                                viewModel.isPlayerFullScreen = true
+                            },
+                            onChangeCover = { book ->
+                                targetBookForCustomCover = book
+                                customCoverLauncher.launch("image/*")
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (showAddBookmarkPrompt) {
+        AlertDialog(
+            onDismissRequest = { showAddBookmarkPrompt = false },
+            title = { Text("Add Bookmark") },
+            text = {
+                OutlinedTextField(
+                    value = newBookmarkNoteText,
+                    onValueChange = { newBookmarkNoteText = it },
+                    label = { Text("Note (Optional)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val chapterName = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, player.currentMediaItemIndex)
+                    val bm = Bookmark(positionMs = viewModel.currentPosition, chapterTitle = chapterName, note = newBookmarkNoteText)
+                    viewModel.repository.saveBookBookmark(viewModel.currentBookId, bm)
+                    viewModel.refreshBookmarks()
+                    showAddBookmarkPrompt = false
+                    newBookmarkNoteText = ""
+                    Toast.makeText(context, "Bookmark Saved", Toast.LENGTH_SHORT).show()
+                }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { showAddBookmarkPrompt = false }) { Text("Cancel") } }
+        )
+    }
+
+    if (showViewDialog) {
+        AlertDialog(
+            onDismissRequest = { showViewDialog = false },
+            title = { Text("View Mode") },
+            text = {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
+                        viewModel.viewMode = "GRID"
+                        viewModel.repository.getPreferences().edit().putString("view_mode", "GRID").apply()
+                        showViewDialog = false
+                    }.padding(vertical = 12.dp)) {
+                        RadioButton(selected = viewModel.viewMode == "GRID", onClick = null)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Grid View")
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable {
+                        viewModel.viewMode = "LIST"
+                        viewModel.repository.getPreferences().edit().putString("view_mode", "LIST").apply()
+                        showViewDialog = false
+                    }.padding(vertical = 12.dp)) {
+                        RadioButton(selected = viewModel.viewMode == "LIST", onClick = null)
+                        Spacer(Modifier.width(12.dp))
+                        Text("List View")
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showViewDialog = false }) { Text("Close") } }
+        )
+    }
+
+    if (showSettingsDialog) {
+        AlertDialog(
+            onDismissRequest = { showSettingsDialog = false },
+            title = { Text("Settings") },
+            text = {
+                Column {
+                    Text("Skip Interval (seconds)", fontWeight = FontWeight.Bold)
+                    Slider(
+                        value = viewModel.skipIntervalSeconds.toFloat(),
+                        onValueChange = {
+                            val newVal = round(it).toInt()
+                            viewModel.skipIntervalSeconds = newVal
+                            viewModel.repository.getPreferences().edit().putInt("skip_interval", newVal).apply()
+                        },
+                        valueRange = 5f..60f,
+                        steps = 10
+                    )
+                    Text("${viewModel.skipIntervalSeconds}s", modifier = Modifier.align(Alignment.End))
+                }
+            },
+            confirmButton = { TextButton(onClick = { showSettingsDialog = false }) { Text("Close") } }
+        )
+    }
+
+    if (showAnalyticsDialog) {
+        AlertDialog(
+            onDismissRequest = { showAnalyticsDialog = false },
+            title = { Text("Listening Stats") },
+            text = {
+                Column {
+                    Text("Total Listen Time: ${formatTime(viewModel.totalListenMs)}")
+                    Text("Completed Books: ${viewModel.completedBooksCount}")
+                }
+            },
+            confirmButton = { TextButton(onClick = { showAnalyticsDialog = false }) { Text("Close") } }
+        )
+    }
+
+    if (showSpeedDialog) {
+        AlertDialog(
+            onDismissRequest = { showSpeedDialog = false },
+            title = { Text("Playback Speed") },
+            text = {
+                Column {
+                    Slider(
+                        value = viewModel.playbackSpeed,
+                        onValueChange = { viewModel.updateSpeed(it) },
+                        valueRange = 0.5f..3.0f,
+                        steps = 24
+                    )
+                    Text(String.format("%.1fx", viewModel.playbackSpeed), modifier = Modifier.align(Alignment.CenterHorizontally))
+                }
+            },
+            confirmButton = { TextButton(onClick = { showSpeedDialog = false }) { Text("Close") } }
+        )
+    }
+
+    if (showChaptersDialog) {
+        AlertDialog(
+            onDismissRequest = { showChaptersDialog = false },
+            title = { Text("Chapters (${viewModel.chaptersList.size})") },
+            text = {
+                LazyColumn {
+                    items(viewModel.chaptersList.size) { idx ->
+                        val chap = viewModel.chaptersList[idx]
+                        val isCurrent = idx == currentChapterIndex
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                player.seekTo(chap.trackIndex, chap.startMs)
+                                viewModel.currentPosition = chap.startMs
+                                activeBook?.let { b -> viewModel.repository.saveBookProgress(b.id, chap.trackIndex, chap.startMs, viewModel.totalListenMs) }
+                                showChaptersDialog = false
+                            }.padding(vertical = 12.dp)
+                        ) {
+                            if (isCurrent) {
+                                Box(modifier = Modifier.size(8.dp).background(MaterialTheme.colorScheme.primary, shape = CircleShape))
+                            } else {
+                                Spacer(Modifier.width(8.dp))
+                            }
+                            Spacer(Modifier.width(16.dp))
+                            Column {
+                                Text(chap.title, fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal)
+                                val timeSubtitle = if (chap.durationMs > 0L) {
+                                    "${formatTime(chap.startMs)} • ${formatTime(chap.durationMs)}"
+                                } else {
+                                    formatTime(chap.startMs)
+                                }
+                                Text(timeSubtitle, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                            }
+                        }
+                    }
+                    if (viewModel.chaptersList.isEmpty()) {
+                        item { Text("No chapters found in this file.", color = Color.Gray) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showChaptersDialog = false }) { Text("Close") } }
+        )
+    }
+
+    if (showBookmarksDialog) {
+        AlertDialog(
+            onDismissRequest = { showBookmarksDialog = false },
+            title = { Text("Bookmarks") },
+            text = {
+                LazyColumn {
+                    items(viewModel.currentBookBookmarks.size) { idx ->
+                        val bm = viewModel.currentBookBookmarks[idx]
+                        Column(modifier = Modifier.fillMaxWidth().clickable {
+                            player.seekTo(bm.positionMs)
+                            viewModel.currentPosition = bm.positionMs
+                            activeBook?.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, bm.positionMs, viewModel.totalListenMs) }
+                            showBookmarksDialog = false
+                        }.padding(vertical = 8.dp)) {
+                            Text(bm.chapterTitle, fontWeight = FontWeight.Bold)
+                            Text(formatTime(bm.positionMs), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                            if (bm.note.isNotEmpty()) Text(bm.note, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    if (viewModel.currentBookBookmarks.isEmpty()) {
+                        item { Text("No bookmarks yet.", color = Color.Gray) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showBookmarksDialog = false }) { Text("Close") } }
+        )
+    }
+
+    if (showSleepMenu) {
+        AlertDialog(
+            onDismissRequest = { showSleepMenu = false },
+            title = { Text("Sleep Timer") },
+            text = {
+                Column {
+                    listOf(15, 30, 45, 60).forEach { mins ->
+                        TextButton(onClick = {
+                            viewModel.sleepTimeRemaining = mins * 60 * 1000L
+                            viewModel.sleepEndAtChapter = false
+                            viewModel.sleepTimerActive = true
+                            showSleepMenu = false
+                        }, modifier = Modifier.fillMaxWidth()) { Text("$mins Minutes") }
+                    }
+                    TextButton(onClick = {
+                        viewModel.sleepEndAtChapter = true
+                        viewModel.sleepTimerActive = true
+                        showSleepMenu = false
+                    }, modifier = Modifier.fillMaxWidth()) { Text("End of Chapter") }
+                    if (viewModel.sleepTimerActive) {
+                        TextButton(onClick = {
+                            viewModel.sleepTimerActive = false
+                            showSleepMenu = false
+                        }, modifier = Modifier.fillMaxWidth()) { Text("Cancel Timer", color = MaterialTheme.colorScheme.error) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showSleepMenu = false }) { Text("Close") } }
+        )
+    }
+}
+
+fun playBook(player: Player, book: Audiobook, trackIndex: Int, positionMs: Long, autoPlay: Boolean) {
+    player.playWhenReady = autoPlay
+    player.stop()
+    player.clearMediaItems()
+    val mediaItems = book.tracks.map { track ->
+        MediaItem.Builder()
+            .setUri(track.uri)
+            .setMediaId(track.uri.toString())
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(book.title)
+                    .setArtist(book.author)
+                    .setAlbumTitle(book.series)
+                    .setDisplayTitle(track.name)
+                    .build()
+            )
+            .build()
+    }
+    player.setMediaItems(mediaItems)
+    val validIndex = if (trackIndex in mediaItems.indices) trackIndex else 0
+    player.seekTo(validIndex, positionMs)
+    player.prepare()
+}
+
+fun calculateSmartRewindPos(savedPos: Long, lastPauseTime: Long): Long {
+    if (lastPauseTime == 0L || savedPos == 0L) return savedPos
+    val hoursSincePause = (System.currentTimeMillis() - lastPauseTime) / (1000 * 60 * 60)
+    val rewindMs = when {
+        hoursSincePause < 2 -> 0L
+        hoursSincePause < 24 -> 15_000L
+        else -> 30_000L
+    }
+    return (savedPos - rewindMs).coerceAtLeast(0L)
+}
+
+fun getCurrentChapterIndex(chapters: List<Chapter>, currentPosMs: Long, trackIndex: Int): Int {
+    if (chapters.isEmpty()) return 0
+    val idx = chapters.indexOfLast {
+        it.trackIndex < trackIndex || (it.trackIndex == trackIndex && currentPosMs >= it.startMs)
+    }
+    return if (idx >= 0) idx else 0
+}
+
+fun getCurrentChapter(chapters: List<Chapter>, currentPosMs: Long, trackIndex: Int): Chapter? {
+    if (chapters.isEmpty()) return null
+    return chapters[getCurrentChapterIndex(chapters, currentPosMs, trackIndex)]
+}
+
+fun getChapterTitle(chapters: List<Chapter>, currentPosMs: Long, trackIndex: Int): String {
+    return getCurrentChapter(chapters, currentPosMs, trackIndex)?.title ?: "Chapter 1"
+}
+// END OF FILE
