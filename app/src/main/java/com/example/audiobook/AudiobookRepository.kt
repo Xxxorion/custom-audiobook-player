@@ -76,6 +76,64 @@ class AudiobookRepository(private val context: Context) {
     fun saveSelectedFolderUri(uriStr: String) = prefs.edit().putString("selected_folder", uriStr).apply()
     fun getLastBookId(): String? = prefs.getString("last_book_id", "")
 
+    fun saveBooksCache(books: List<Audiobook>) {
+        try {
+            val jsonArray = JSONArray()
+            for (book in books) {
+                val bookObj = JSONObject().apply {
+                    put("id", book.id)
+                    put("title", book.title)
+                    put("author", book.author)
+                    put("series", book.series)
+                    val tracksArray = JSONArray()
+                    for (track in book.tracks) {
+                        tracksArray.put(JSONObject().apply {
+                            put("name", track.name)
+                            put("uri", track.uri.toString())
+                            put("isM4b", track.isM4b)
+                        })
+                    }
+                    put("tracks", tracksArray)
+                }
+                jsonArray.put(bookObj)
+            }
+            prefs.edit().putString("cached_books_list", jsonArray.toString()).apply()
+        } catch (_: Throwable) {}
+    }
+
+    fun loadBooksCache(): List<Audiobook> {
+        val list = mutableListOf<Audiobook>()
+        try {
+            val jsonStr = prefs.getString("cached_books_list", "[]") ?: "[]"
+            val array = JSONArray(jsonStr)
+            for (i in 0 until array.length()) {
+                val bookObj = array.getJSONObject(i)
+                val tracksArray = bookObj.optJSONArray("tracks") ?: JSONArray()
+                val tracks = mutableListOf<AudioTrack>()
+                for (j in 0 until tracksArray.length()) {
+                    val trackObj = tracksArray.getJSONObject(j)
+                    tracks.add(
+                        AudioTrack(
+                            name = trackObj.optString("name", "Track"),
+                            uri = Uri.parse(trackObj.optString("uri", "")),
+                            isM4b = trackObj.optBoolean("isM4b", false)
+                        )
+                    )
+                }
+                list.add(
+                    Audiobook(
+                        id = bookObj.optString("id", ""),
+                        title = bookObj.optString("title", "Unknown"),
+                        author = bookObj.optString("author", "Unknown"),
+                        series = bookObj.optString("series", ""),
+                        tracks = tracks
+                    )
+                )
+            }
+        } catch (_: Throwable) {}
+        return list
+    }
+
     fun saveBookProgress(bookId: String, trackIndex: Int, positionMs: Long, totalListenMs: Long) {
         prefs.edit().apply {
             putString("last_book_id", bookId)
@@ -555,7 +613,7 @@ class AudiobookRepository(private val context: Context) {
         val moov = topBoxes.firstOrNull { it.type == "moov" } ?: return emptyList()
         val moovChildren = listChildBoxes(channel, moov.payloadOffset, moov.endOffset)
 
-        // 1. Check Nero chapters inside moov -> udta -> chpl (Used by Audible, Libation, OpenAudible, FFmpeg)
+        // 1. Check Nero chapters inside moov -> udta -> chpl
         val udta = moovChildren.firstOrNull { it.type == "udta" }
         if (udta != null) {
             val udtaChildren = listChildBoxes(channel, udta.payloadOffset, udta.endOffset)
@@ -607,7 +665,7 @@ class AudiobookRepository(private val context: Context) {
         val buf = readBoxPayload(channel, chpl, 6) ?: return emptyList()
         val version = buf.get().toInt() and 0xFF
         buf.get(); buf.get(); buf.get() // 3 bytes flags
-        buf.get() // 1 byte reserved (present in both version 0 and version 1)
+        buf.get() // 1 byte reserved
 
         val count: Int = if (version == 0) {
             if (buf.remaining() < 1) return emptyList()
@@ -692,7 +750,6 @@ class AudiobookRepository(private val context: Context) {
         val co64 = stblChildren.firstOrNull { it.type == "co64" }
         if (stco == null && co64 == null) return emptyList()
 
-        // 1. Read sample deltas from stts
         val sttsBuf = readBoxPayload(channel, stts, 8) ?: return emptyList()
         sttsBuf.position(4)
         val sttsCount = sttsBuf.int
@@ -710,7 +767,6 @@ class AudiobookRepository(private val context: Context) {
         }
         if (sampleDeltas.isEmpty()) return emptyList()
 
-        // 2. Read sample sizes from stsz
         val stszBuf = readBoxPayload(channel, stsz, 12) ?: return emptyList()
         stszBuf.position(4)
         val defaultSize = stszBuf.int
@@ -727,7 +783,6 @@ class AudiobookRepository(private val context: Context) {
             }
         }
 
-        // 3. Read chunk offsets from stco or co64
         val chunkOffsets: LongArray
         if (stco != null) {
             val stcoBuf = readBoxPayload(channel, stco, 8) ?: return emptyList()
@@ -751,7 +806,6 @@ class AudiobookRepository(private val context: Context) {
             }
         }
 
-        // 4. Read sample-to-chunk mapping from stsc
         val stscBuf = readBoxPayload(channel, stsc, 8) ?: return emptyList()
         stscBuf.position(4)
         val stscCount = stscBuf.int
@@ -769,7 +823,6 @@ class AudiobookRepository(private val context: Context) {
         }
         if (stscEntries.isEmpty()) return emptyList()
 
-        // 5. Resolve each sample's file offset and decode the chapter title
         val chapters = mutableListOf<Chapter>()
         var sampleIdx = 0
         var accumulatedTicks = 0L

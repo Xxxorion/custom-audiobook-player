@@ -10,38 +10,39 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
 
 class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
-    var books by mutableStateOf<List<Audiobook>>(emptyList())
+    // INSTANTLY LOAD CACHED LIBRARY ON APP LAUNCH
+    var books by mutableStateOf<List<Audiobook>>(repository.loadBooksCache())
     var currentBookId by mutableStateOf("")
-    
+
     var isPlaying by mutableStateOf(false)
     var currentPosition by mutableStateOf(0L)
     var duration by mutableStateOf(0L)
     var totalListenMs by mutableStateOf(repository.getPreferences().getLong("total_listen_ms", 0L))
-    
+
     var isPlayerFullScreen by mutableStateOf(false)
     var isCarModeActive by mutableStateOf(false)
-    
+
     var chaptersList by mutableStateOf<List<Chapter>>(emptyList())
     var currentBookBookmarks by mutableStateOf<List<Bookmark>>(emptyList())
-    
+
     var searchQuery by mutableStateOf("")
     var isSearching by mutableStateOf(false)
-    
+
     var viewMode by mutableStateOf(repository.getPreferences().getString("view_mode", "GRID") ?: "GRID")
     var sortBy by mutableStateOf(repository.getPreferences().getString("sort_by", "RECENT") ?: "RECENT")
-    
+
     var playbackSpeed by mutableStateOf(1.0f)
     var playbackPitch by mutableStateOf(1.0f)
     var playerVolume by mutableStateOf(1.0f)
-    
+
     var skipIntervalSeconds by mutableStateOf(repository.getPreferences().getInt("skip_interval", 15))
     var silenceTrimEnabled by mutableStateOf(repository.getPreferences().getBoolean("silence_trim", false))
     var volumeBoostEnabled by mutableStateOf(repository.getPreferences().getBoolean("volume_boost", false))
-    
+
     var sleepTimerActive by mutableStateOf(false)
     var sleepTimeRemaining by mutableStateOf(0L)
     var sleepEndAtChapter by mutableStateOf(false)
-    
+
     var completedBooksCount by mutableStateOf(repository.loadCompletedBookIds().size)
     var currentCoverArt by mutableStateOf<Bitmap?>(null)
 
@@ -58,7 +59,6 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
 
     fun loadChapters(book: Audiobook) {
         viewModelScope.launch {
-            // Calls the newly updated universal chapter parser
             chaptersList = repository.getBookChapters(book)
         }
     }
@@ -84,3 +84,4 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
         }
     }
 }
+// END OF FILE

@@ -26,11 +26,14 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 fun formatTime(ms: Long): String {
@@ -193,24 +196,15 @@ fun BookshelfContent(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             items(count = books.size, key = { idx -> books[idx].id }) { index ->
-                val book = books[index]
-                val isSelected = book.id == activeBookId
-                var cardArt by remember(book.id) { mutableStateOf<ImageBitmap?>(null) }
-
-                LaunchedEffect(book.id) {
-                    val bmp = viewModel.repository.getOrFetchCoverArt(book)
-                    cardArt = bmp?.asImageBitmap()
-                }
-
-                val cardProgress = if (isSelected && duration > 0L) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f
-
-                GridBookCard(
-                    book = book,
-                    coverArt = cardArt,
-                    progress = cardProgress,
-                    isSelected = isSelected,
-                    onClick = { onSelectBook(book) },
-                    onLongClick = { onChangeCover(book) }
+                BookCardWrapper(
+                    book = books[index],
+                    activeBookId = activeBookId,
+                    duration = duration,
+                    currentPosition = currentPosition,
+                    viewMode = "GRID",
+                    viewModel = viewModel,
+                    onSelectBook = onSelectBook,
+                    onChangeCover = onChangeCover
                 )
             }
         }
@@ -220,33 +214,230 @@ fun BookshelfContent(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(count = books.size, key = { idx -> books[idx].id }) { index ->
-                val book = books[index]
-                val isSelected = book.id == activeBookId
-                var cardArt by remember(book.id) { mutableStateOf<ImageBitmap?>(null) }
-
-                LaunchedEffect(book.id) {
-                    val bmp = viewModel.repository.getOrFetchCoverArt(book)
-                    cardArt = bmp?.asImageBitmap()
-                }
-
-                val cardProgress = if (isSelected && duration > 0L) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f
-                val subtitleText = when {
-                    isSelected && viewModel.chaptersList.size > 1 -> "${viewModel.chaptersList.size} chapters • ${formatTime(duration)}"
-                    isSelected && duration > 0L -> formatTime(duration)
-                    book.tracks.size == 1 && book.tracks.first().isM4b -> "M4B Audiobook"
-                    else -> "${book.tracks.size} tracks"
-                }
-
-                ListBookCard(
-                    book = book,
-                    coverArt = cardArt,
-                    progress = cardProgress,
-                    durationText = subtitleText,
-                    isSelected = isSelected,
-                    onClick = { onSelectBook(book) },
-                    onLongClick = { onChangeCover(book) }
+                BookCardWrapper(
+                    book = books[index],
+                    activeBookId = activeBookId,
+                    duration = duration,
+                    currentPosition = currentPosition,
+                    viewMode = "LIST",
+                    viewModel = viewModel,
+                    onSelectBook = onSelectBook,
+                    onChangeCover = onChangeCover
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun BookCardWrapper(
+    book: Audiobook,
+    activeBookId: String,
+    duration: Long,
+    currentPosition: Long,
+    viewMode: String,
+    viewModel: LibraryViewModel,
+    onSelectBook: (Audiobook) -> Unit,
+    onChangeCover: (Audiobook) -> Unit
+) {
+    val context = LocalContext.current
+    val isSelected = book.id == activeBookId
+
+    var cardArt by remember(book.id) { mutableStateOf<ImageBitmap?>(null) }
+    var cardProgress by remember(book.id, isSelected, currentPosition, duration) { mutableStateOf(0f) }
+    var subtitleText by remember(book.id, isSelected, duration) { mutableStateOf("") }
+
+    LaunchedEffect(book.id, isSelected, currentPosition, duration) {
+        if (cardArt == null) {
+            val bmp = viewModel.repository.getOrFetchCoverArt(book)
+            cardArt = bmp?.asImageBitmap()
+        }
+
+        if (isSelected && duration > 0L) {
+            // Actively Playing Book
+            cardProgress = (currentPosition.toFloat() / duration).coerceIn(0f, 1f)
+            subtitleText = if (viewModel.chaptersList.size > 1) {
+                "${viewModel.chaptersList.size} chapters • ${formatTime(duration)}"
+            } else {
+                formatTime(duration)
+            }
+        } else {
+            // Background / Saved Books
+            val isCompleted = viewModel.repository.loadCompletedBookIds().contains(book.id)
+            if (isCompleted) {
+                cardProgress = 1f
+                subtitleText = "Completed"
+            } else {
+                val savedPos = viewModel.repository.getBookPosition(book.id)
+                val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
+
+                if (savedPos > 0L || savedTrackIdx > 0) {
+                    val prefs = viewModel.repository.getPreferences()
+                    var bookDur = prefs.getLong("book_dur_${book.id}", 0L)
+
+                    // If it's a single m4b file and we don't know the length yet, asynchronously fetch it
+                    if (bookDur == 0L && book.tracks.size == 1) {
+                        withContext(Dispatchers.IO) {
+                            try {
+                                val retriever = android.media.MediaMetadataRetriever()
+                                retriever.setDataSource(context, book.tracks.first().uri)
+                                bookDur = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                                retriever.release()
+                                if (bookDur > 0L) {
+                                    prefs.edit().putLong("book_dur_${book.id}", bookDur).apply()
+                                }
+                            } catch (_: Throwable) {}
+                        }
+                    }
+
+                    if (book.tracks.size > 1) {
+                        val trackRatio = savedTrackIdx.toFloat() / book.tracks.size
+                        cardProgress = trackRatio.coerceIn(0.01f, 0.99f)
+                        subtitleText = "Part ${savedTrackIdx + 1} of ${book.tracks.size}"
+                    } else if (bookDur > 0L) {
+                        cardProgress = (savedPos.toFloat() / bookDur).coerceIn(0.01f, 0.99f)
+                        val remaining = (bookDur - savedPos).coerceAtLeast(0L)
+                        subtitleText = "${formatTime(remaining)} left"
+                    } else {
+                        cardProgress = 0.05f
+                        subtitleText = "In Progress"
+                    }
+                } else {
+                    cardProgress = 0f
+                    subtitleText = if (book.tracks.size == 1 && book.tracks.first().isM4b) "M4B Audiobook" else "${book.tracks.size} tracks"
+                }
+            }
+        }
+    }
+
+    if (viewMode == "GRID") {
+        GridBookCard(
+            book = book,
+            coverArt = cardArt,
+            progress = cardProgress,
+            subtitleText = subtitleText,
+            isSelected = isSelected,
+            onClick = { onSelectBook(book) },
+            onLongClick = { onChangeCover(book) }
+        )
+    } else {
+        ListBookCard(
+            book = book,
+            coverArt = cardArt,
+            progress = cardProgress,
+            subtitleText = subtitleText,
+            isSelected = isSelected,
+            onClick = { onSelectBook(book) },
+            onLongClick = { onChangeCover(book) }
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun GridBookCard(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    progress: Float,
+    subtitleText: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick)
+    ) {
+        Box(
+            modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            if (coverArt != null) {
+                Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(48.dp), tint = Color.Gray)
+            }
+
+            Box(
+                modifier = Modifier.align(Alignment.BottomStart).padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.6f)).padding(4.dp)
+            ) {
+                Icon(Icons.Default.Headphones, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+
+            if (progress > 0f) {
+                Box(
+                    modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(4.dp).background(MaterialTheme.colorScheme.tertiary)
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (subtitleText.isNotEmpty()) {
+            Text(
+                text = subtitleText,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else Color.Gray,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ListBookCard(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    progress: Float,
+    subtitleText: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary),
+                contentAlignment = Alignment.Center
+            ) {
+                if (coverArt != null) {
+                    Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else {
+                    Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
+                }
+
+                if (progress > 0f) {
+                    Box(
+                        modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(4.dp).background(MaterialTheme.colorScheme.tertiary)
+                    )
+                }
+            }
+
+            Spacer(Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (subtitleText.isNotEmpty()) {
+                    Text(
+                        text = subtitleText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else Color.Gray,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Icon(Icons.Default.Headphones, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.DarkGray)
         }
     }
 }
@@ -503,99 +694,6 @@ fun NowPlayingScreen(
                     }
                 }
             }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun GridBookCard(
-    book: Audiobook,
-    coverArt: ImageBitmap?,
-    progress: Float,
-    isSelected: Boolean,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit
-) {
-    Column(
-        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick)
-    ) {
-        Box(
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            if (coverArt != null) {
-                Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            } else {
-                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(48.dp), tint = Color.Gray)
-            }
-
-            Box(
-                modifier = Modifier.align(Alignment.BottomStart).padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.6f)).padding(4.dp)
-            ) {
-                Icon(Icons.Default.Headphones, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-            }
-
-            if (progress > 0f) {
-                Box(
-                    modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(4.dp).background(MaterialTheme.colorScheme.tertiary)
-                )
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-        Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun ListBookCard(
-    book: Audiobook,
-    coverArt: ImageBitmap?,
-    progress: Float,
-    durationText: String,
-    isSelected: Boolean,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
-        ),
-        shape = RoundedCornerShape(16.dp)
-    ) {
-        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary),
-                contentAlignment = Alignment.Center
-            ) {
-                if (coverArt != null) {
-                    Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                } else {
-                    Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
-                }
-
-                if (progress > 0f) {
-                    Box(
-                        modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(4.dp).background(MaterialTheme.colorScheme.tertiary)
-                    )
-                }
-            }
-
-            Spacer(Modifier.width(16.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (durationText.isNotEmpty()) {
-                    Text(durationText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                }
-            }
-
-            Icon(Icons.Default.Headphones, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.DarkGray)
         }
     }
 }

@@ -155,6 +155,8 @@ fun SirinAudiobookApp(
                 val scannedBooks = viewModel.repository.scanFolderForAudiobooks(it)
                 if (scannedBooks.isNotEmpty()) {
                     viewModel.books = scannedBooks
+                    viewModel.repository.saveBooksCache(scannedBooks)
+                    
                     val selectedBook = scannedBooks[0]
                     viewModel.currentBookId = selectedBook.id
                     viewModel.applyBookSpecificSpeed(selectedBook.id)
@@ -200,33 +202,37 @@ fun SirinAudiobookApp(
         if (!savedUriStr.isNullOrEmpty()) {
             coroutineScope.launch {
                 try {
-                    val folderUri = Uri.parse(savedUriStr)
-                    val scannedBooks = viewModel.repository.scanFolderForAudiobooks(folderUri)
-                    viewModel.books = scannedBooks
-
+                    // Instantly wire up the active book from the cached library if available
                     val lastBookId = viewModel.repository.getLastBookId()
-                    val savedBook = scannedBooks.find { b -> b.id == lastBookId } ?: scannedBooks.firstOrNull()
-                    if (savedBook != null) {
-                        viewModel.currentBookId = savedBook.id
-                        viewModel.applyBookSpecificSpeed(savedBook.id)
+                    val initialBook = viewModel.books.find { b -> b.id == lastBookId } ?: viewModel.books.firstOrNull()
+                    
+                    if (initialBook != null && viewModel.currentBookId.isEmpty()) {
+                        viewModel.currentBookId = initialBook.id
+                        viewModel.applyBookSpecificSpeed(initialBook.id)
                         viewModel.refreshBookmarks()
-                        viewModel.loadChapters(savedBook)
-                        viewModel.updateCoverArt(savedBook)
+                        viewModel.loadChapters(initialBook)
+                        viewModel.updateCoverArt(initialBook)
 
-                        // If the background service is already loaded with this book, sync with it instead of resetting!
                         if (player.mediaItemCount > 0) {
                             viewModel.isPlaying = player.isPlaying
                             viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
                             viewModel.duration = player.duration.coerceAtLeast(0L)
                         } else {
-                            val savedTrackIdx = viewModel.repository.getBookTrackIndex(savedBook.id)
-                            val savedPos = viewModel.repository.getBookPosition(savedBook.id)
+                            val savedTrackIdx = viewModel.repository.getBookTrackIndex(initialBook.id)
+                            val savedPos = viewModel.repository.getBookPosition(initialBook.id)
                             val lastPauseTime = viewModel.repository.getPreferences().getLong("last_pause_time", 0L)
                             val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
                             viewModel.currentPosition = rewindPos
-                            playBook(player, savedBook, savedTrackIdx, rewindPos, false)
+                            playBook(player, initialBook, savedTrackIdx, rewindPos, false)
                         }
                     }
+
+                    // Background sync: quietly scan folder and update the cache without freezing UI
+                    val folderUri = Uri.parse(savedUriStr)
+                    val scannedBooks = viewModel.repository.scanFolderForAudiobooks(folderUri)
+                    viewModel.books = scannedBooks
+                    viewModel.repository.saveBooksCache(scannedBooks)
+
                 } catch (_: Throwable) {}
             }
         }
