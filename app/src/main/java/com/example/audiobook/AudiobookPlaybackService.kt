@@ -2,7 +2,9 @@ package com.example.audiobook
 
 import android.media.audiofx.LoudnessEnhancer
 import android.os.Bundle
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -15,6 +17,7 @@ class AudiobookPlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private var exoPlayer: ExoPlayer? = null
     private var loudnessEnhancer: LoudnessEnhancer? = null
+    private var volumeBoostEnabled: Boolean = false
 
     companion object {
         const val ACTION_SET_SILENCE_TRIM = "com.example.audiobook.SET_SILENCE_TRIM"
@@ -24,7 +27,25 @@ class AudiobookPlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
-        exoPlayer = ExoPlayer.Builder(this).build()
+
+        // Speech audio attributes ensure Android pauses (instead of ducking) during GPS directions or calls
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
+            .build()
+
+        exoPlayer = ExoPlayer.Builder(this)
+            .setAudioAttributes(audioAttributes, true)
+            .setHandleAudioBecomingNoisy(true) // Auto-pause when Bluetooth or headphones disconnect
+            .build().apply {
+                addListener(object : Player.Listener {
+                    override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                        if (volumeBoostEnabled) {
+                            applyVolumeBoost(true)
+                        }
+                    }
+                })
+            }
 
         val callback = object : MediaSession.Callback {
             override fun onConnect(
@@ -56,6 +77,7 @@ class AudiobookPlaybackService : MediaSessionService() {
                     }
                     ACTION_SET_VOLUME_BOOST -> {
                         val enabled = args.getBoolean(KEY_ENABLED, false)
+                        volumeBoostEnabled = enabled
                         applyVolumeBoost(enabled)
                         return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                     }
@@ -73,20 +95,20 @@ class AudiobookPlaybackService : MediaSessionService() {
         val player = exoPlayer ?: return
         try {
             if (enabled) {
-                if (player.audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
-                    if (loudnessEnhancer == null) {
-                        loudnessEnhancer = LoudnessEnhancer(player.audioSessionId).apply {
-                            setTargetGain(1200)
-                        }
+                val sessionId = player.audioSessionId
+                if (sessionId != C.AUDIO_SESSION_ID_UNSET && sessionId != 0) {
+                    loudnessEnhancer?.release()
+                    loudnessEnhancer = LoudnessEnhancer(sessionId).apply {
+                        setTargetGain(1200) // +12 dB boost for quiet audiobook recordings
+                        this.enabled = true
                     }
-                    loudnessEnhancer?.enabled = true
                 }
             } else {
                 loudnessEnhancer?.enabled = false
                 loudnessEnhancer?.release()
                 loudnessEnhancer = null
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
@@ -97,7 +119,7 @@ class AudiobookPlaybackService : MediaSessionService() {
         try {
             loudnessEnhancer?.enabled = false
             loudnessEnhancer?.release()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
         loudnessEnhancer = null
 
         mediaSession?.run {
@@ -109,3 +131,4 @@ class AudiobookPlaybackService : MediaSessionService() {
         super.onDestroy()
     }
 }
+// END OF FILE

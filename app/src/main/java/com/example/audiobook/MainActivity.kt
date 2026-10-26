@@ -40,6 +40,8 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.round
 
 class LibraryViewModelFactory(private val repository: AudiobookRepository) : ViewModelProvider.Factory {
@@ -69,7 +71,7 @@ class MainActivity : ComponentActivity() {
                 val sessionToken = SessionToken(context, ComponentName(context, AudiobookPlaybackService::class.java))
                 val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
                 controllerFuture.addListener({
-                    try { controller = controllerFuture.get() } catch (_: Exception) {}
+                    try { controller = controllerFuture.get() } catch (_: Throwable) {}
                 }, ContextCompat.getMainExecutor(context))
                 onDispose { MediaController.releaseFuture(controllerFuture) }
             }
@@ -146,7 +148,7 @@ fun SirinAudiobookApp(
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let {
             val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            try { context.contentResolver.takePersistableUriPermission(it, takeFlags) } catch (_: Exception) {}
+            try { context.contentResolver.takePersistableUriPermission(it, takeFlags) } catch (_: Throwable) {}
             viewModel.repository.saveSelectedFolderUri(it.toString())
 
             coroutineScope.launch {
@@ -206,19 +208,26 @@ fun SirinAudiobookApp(
                     val savedBook = scannedBooks.find { b -> b.id == lastBookId } ?: scannedBooks.firstOrNull()
                     if (savedBook != null) {
                         viewModel.currentBookId = savedBook.id
-                        val savedTrackIdx = viewModel.repository.getBookTrackIndex(savedBook.id)
-                        val savedPos = viewModel.repository.getBookPosition(savedBook.id)
-                        val lastPauseTime = viewModel.repository.getPreferences().getLong("last_pause_time", 0L)
-                        val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
-
-                        viewModel.currentPosition = rewindPos
                         viewModel.applyBookSpecificSpeed(savedBook.id)
                         viewModel.refreshBookmarks()
                         viewModel.loadChapters(savedBook)
                         viewModel.updateCoverArt(savedBook)
-                        playBook(player, savedBook, savedTrackIdx, rewindPos, false)
+
+                        // If the background service is already loaded with this book, sync with it instead of resetting!
+                        if (player.mediaItemCount > 0) {
+                            viewModel.isPlaying = player.isPlaying
+                            viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
+                            viewModel.duration = player.duration.coerceAtLeast(0L)
+                        } else {
+                            val savedTrackIdx = viewModel.repository.getBookTrackIndex(savedBook.id)
+                            val savedPos = viewModel.repository.getBookPosition(savedBook.id)
+                            val lastPauseTime = viewModel.repository.getPreferences().getLong("last_pause_time", 0L)
+                            val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
+                            viewModel.currentPosition = rewindPos
+                            playBook(player, savedBook, savedTrackIdx, rewindPos, false)
+                        }
                     }
-                } catch (_: Exception) {}
+                } catch (_: Throwable) {}
             }
         }
     }
@@ -255,6 +264,9 @@ fun SirinAudiobookApp(
     LaunchedEffect(viewModel.isPlaying) {
         while (viewModel.isPlaying) {
             viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
+            if (player.duration > 0L) {
+                viewModel.duration = player.duration.coerceAtLeast(0L)
+            }
             delay(1000)
             viewModel.totalListenMs += 1000L
             activeBook?.let { b ->
@@ -285,6 +297,12 @@ fun SirinAudiobookApp(
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY) viewModel.duration = player.duration.coerceAtLeast(0L)
             }
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
+                if (player.duration > 0L) {
+                    viewModel.duration = player.duration.coerceAtLeast(0L)
+                }
+            }
             override fun onPlayerError(error: PlaybackException) {
                 Toast.makeText(context, "Playback error: ${error.localizedMessage}", Toast.LENGTH_LONG).show()
             }
@@ -310,6 +328,15 @@ fun SirinAudiobookApp(
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
                         folderPicker.launch(null)
+                    }
+                )
+                NavigationDrawerItem(
+                    icon = { Icon(Icons.Default.GraphicEq, contentDescription = null) },
+                    label = { Text("Audio FX & Volume Boost") },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        showAudioFXDialog = true
                     }
                 )
                 NavigationDrawerItem(
@@ -456,6 +483,12 @@ fun SirinAudiobookApp(
                             }
                         },
                         actions = {
+                            IconButton(onClick = {
+                                viewModel.isSearching = !viewModel.isSearching
+                                if (!viewModel.isSearching) viewModel.searchQuery = ""
+                            }) {
+                                Icon(Icons.Default.Search, contentDescription = "Search")
+                            }
                             IconButton(onClick = { showViewDialog = true }) {
                                 Icon(if (viewModel.viewMode == "GRID") Icons.Default.GridView else Icons.Default.ViewList, contentDescription = "View Mode")
                             }
@@ -495,13 +528,14 @@ fun SirinAudiobookApp(
                                 value = viewModel.searchQuery,
                                 onValueChange = { viewModel.searchQuery = it },
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                                placeholder = { Text("Search books...") },
+                                placeholder = { Text("Search books by title or author...") },
                                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                                 trailingIcon = {
-                                    if (viewModel.searchQuery.isNotEmpty()) {
-                                        IconButton(onClick = { viewModel.searchQuery = "" }) {
-                                            Icon(Icons.Default.Clear, contentDescription = null)
-                                        }
+                                    IconButton(onClick = {
+                                        viewModel.searchQuery = ""
+                                        viewModel.isSearching = false
+                                    }) {
+                                        Icon(Icons.Default.Close, contentDescription = "Close Search")
                                     }
                                 },
                                 singleLine = true,
@@ -517,26 +551,30 @@ fun SirinAudiobookApp(
                             viewMode = viewModel.viewMode,
                             viewModel = viewModel,
                             onSelectBook = { book ->
-                                val snapshotPos = player.currentPosition
-                                val snapshotIdx = player.currentMediaItemIndex
-                                activeBook?.let { curr ->
-                                    viewModel.repository.saveBookProgress(curr.id, snapshotIdx, snapshotPos, viewModel.totalListenMs)
+                                if (book.id == viewModel.currentBookId && player.mediaItemCount > 0) {
+                                    viewModel.isPlayerFullScreen = true
+                                } else {
+                                    val snapshotPos = player.currentPosition
+                                    val snapshotIdx = player.currentMediaItemIndex
+                                    activeBook?.let { curr ->
+                                        viewModel.repository.saveBookProgress(curr.id, snapshotIdx, snapshotPos, viewModel.totalListenMs)
+                                    }
+                                    player.playWhenReady = false
+                                    player.pause()
+
+                                    viewModel.currentBookId = book.id
+                                    viewModel.applyBookSpecificSpeed(book.id)
+                                    viewModel.refreshBookmarks()
+                                    viewModel.loadChapters(book)
+                                    viewModel.updateCoverArt(book)
+
+                                    val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
+                                    val savedPos = viewModel.repository.getBookPosition(book.id)
+                                    viewModel.currentPosition = savedPos
+
+                                    playBook(player, book, savedTrackIdx, savedPos, false)
+                                    viewModel.isPlayerFullScreen = true
                                 }
-                                player.playWhenReady = false
-                                player.pause()
-
-                                viewModel.currentBookId = book.id
-                                viewModel.applyBookSpecificSpeed(book.id)
-                                viewModel.refreshBookmarks()
-                                viewModel.loadChapters(book)
-                                viewModel.updateCoverArt(book)
-
-                                val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
-                                val savedPos = viewModel.repository.getBookPosition(book.id)
-                                viewModel.currentPosition = savedPos
-
-                                playBook(player, book, savedTrackIdx, savedPos, false)
-                                viewModel.isPlayerFullScreen = true
                             },
                             onChangeCover = { book ->
                                 targetBookForCustomCover = book
@@ -606,6 +644,120 @@ fun SirinAudiobookApp(
         )
     }
 
+    if (showSortDialog) {
+        AlertDialog(
+            onDismissRequest = { showSortDialog = false },
+            title = { Text("Sort Library By") },
+            text = {
+                Column {
+                    val sortOptions = listOf(
+                        "RECENT" to "Folder Order / Recent",
+                        "TITLE" to "Book Title (A–Z)",
+                        "AUTHOR" to "Author (A–Z)"
+                    )
+                    sortOptions.forEach { (key, label) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                viewModel.sortBy = key
+                                viewModel.repository.getPreferences().edit().putString("sort_by", key).apply()
+                                showSortDialog = false
+                            }.padding(vertical = 12.dp)
+                        ) {
+                            RadioButton(selected = viewModel.sortBy == key, onClick = null)
+                            Spacer(Modifier.width(12.dp))
+                            Text(label)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showSortDialog = false }) { Text("Close") } }
+        )
+    }
+
+    if (showAudioFXDialog) {
+        AlertDialog(
+            onDismissRequest = { showAudioFXDialog = false },
+            title = { Text("Audio FX & Equalizer") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Volume Boost (+12 dB)", fontWeight = FontWeight.Bold)
+                            Text("Amplifies quiet audiobook recordings", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                        }
+                        Switch(
+                            checked = viewModel.volumeBoostEnabled,
+                            onCheckedChange = { enabled ->
+                                viewModel.volumeBoostEnabled = enabled
+                                viewModel.repository.getPreferences().edit().putBoolean("volume_boost", enabled).apply()
+                            }
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Trim Silence", fontWeight = FontWeight.Bold)
+                            Text("Automatically skips dead air between sentences", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                        }
+                        Switch(
+                            checked = viewModel.silenceTrimEnabled,
+                            onCheckedChange = { enabled ->
+                                viewModel.silenceTrimEnabled = enabled
+                                viewModel.repository.getPreferences().edit().putBoolean("silence_trim", enabled).apply()
+                            }
+                        )
+                    }
+
+                    HorizontalDivider()
+
+                    Column {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Voice Pitch", fontWeight = FontWeight.Bold)
+                            Text(String.format("%.2fx", viewModel.playbackPitch), color = MaterialTheme.colorScheme.primary)
+                        }
+                        Slider(
+                            value = viewModel.playbackPitch,
+                            onValueChange = { viewModel.playbackPitch = (round(it * 20f) / 20f).coerceIn(0.75f, 1.25f) },
+                            valueRange = 0.75f..1.25f
+                        )
+                    }
+
+                    Column {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("App Volume", fontWeight = FontWeight.Bold)
+                            Text("${(viewModel.playerVolume * 100).toInt()}%", color = MaterialTheme.colorScheme.primary)
+                        }
+                        Slider(
+                            value = viewModel.playerVolume,
+                            onValueChange = { vol ->
+                                viewModel.playerVolume = vol
+                                player.volume = vol
+                            },
+                            valueRange = 0.1f..1.0f
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.playbackPitch = 1.0f
+                    viewModel.playerVolume = 1.0f
+                    player.volume = 1.0f
+                }) { Text("Reset Pitch/Vol") }
+            },
+            dismissButton = { TextButton(onClick = { showAudioFXDialog = false }) { Text("Done") } }
+        )
+    }
+
     if (showSettingsDialog) {
         AlertDialog(
             onDismissRequest = { showSettingsDialog = false },
@@ -635,9 +787,10 @@ fun SirinAudiobookApp(
             onDismissRequest = { showAnalyticsDialog = false },
             title = { Text("Listening Stats") },
             text = {
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Total Listen Time: ${formatTime(viewModel.totalListenMs)}")
                     Text("Completed Books: ${viewModel.completedBooksCount}")
+                    Text("Books in Library: ${viewModel.books.size}")
                 }
             },
             confirmButton = { TextButton(onClick = { showAnalyticsDialog = false }) { Text("Close") } }
@@ -649,14 +802,26 @@ fun SirinAudiobookApp(
             onDismissRequest = { showSpeedDialog = false },
             title = { Text("Playback Speed") },
             text = {
-                Column {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(String.format("%.2fx", viewModel.playbackSpeed), style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                     Slider(
                         value = viewModel.playbackSpeed,
-                        onValueChange = { viewModel.updateSpeed(it) },
-                        valueRange = 0.5f..3.0f,
-                        steps = 24
+                        onValueChange = {
+                            val stepped = (round(it * 20f) / 20f).coerceIn(0.5f, 3.0f)
+                            viewModel.updateSpeed(stepped)
+                        },
+                        valueRange = 0.5f..2.5f
                     )
-                    Text(String.format("%.1fx", viewModel.playbackSpeed), modifier = Modifier.align(Alignment.CenterHorizontally))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        listOf(1.0f, 1.25f, 1.5f, 2.0f).forEach { preset ->
+                            TextButton(onClick = { viewModel.updateSpeed(preset) }) {
+                                Text("${preset}x")
+                            }
+                        }
+                    }
                 }
             },
             confirmButton = { TextButton(onClick = { showSpeedDialog = false }) { Text("Close") } }
@@ -715,15 +880,26 @@ fun SirinAudiobookApp(
                 LazyColumn {
                     items(viewModel.currentBookBookmarks.size) { idx ->
                         val bm = viewModel.currentBookBookmarks[idx]
-                        Column(modifier = Modifier.fillMaxWidth().clickable {
-                            player.seekTo(bm.positionMs)
-                            viewModel.currentPosition = bm.positionMs
-                            activeBook?.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, bm.positionMs, viewModel.totalListenMs) }
-                            showBookmarksDialog = false
-                        }.padding(vertical = 8.dp)) {
-                            Text(bm.chapterTitle, fontWeight = FontWeight.Bold)
-                            Text(formatTime(bm.positionMs), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                            if (bm.note.isNotEmpty()) Text(bm.note, style = MaterialTheme.typography.bodySmall)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                player.seekTo(bm.positionMs)
+                                viewModel.currentPosition = bm.positionMs
+                                activeBook?.let { b -> viewModel.repository.saveBookProgress(b.id, player.currentMediaItemIndex, bm.positionMs, viewModel.totalListenMs) }
+                                showBookmarksDialog = false
+                            }.padding(vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(bm.chapterTitle, fontWeight = FontWeight.Bold)
+                                Text(formatTime(bm.positionMs), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                                if (bm.note.isNotEmpty()) Text(bm.note, style = MaterialTheme.typography.bodySmall)
+                            }
+                            IconButton(onClick = {
+                                deleteBookBookmark(viewModel, viewModel.currentBookId, bm.id)
+                            }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete Bookmark", tint = Color.Gray)
+                            }
                         }
                     }
                     if (viewModel.currentBookBookmarks.isEmpty()) {
@@ -731,7 +907,13 @@ fun SirinAudiobookApp(
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { showBookmarksDialog = false }) { Text("Close") } }
+            confirmButton = {
+                TextButton(onClick = {
+                    showBookmarksDialog = false
+                    showAddBookmarkPrompt = true
+                }) { Text("+ Add Bookmark") }
+            },
+            dismissButton = { TextButton(onClick = { showBookmarksDialog = false }) { Text("Close") } }
         )
     }
 
@@ -765,6 +947,25 @@ fun SirinAudiobookApp(
             confirmButton = { TextButton(onClick = { showSleepMenu = false }) { Text("Close") } }
         )
     }
+}
+
+fun deleteBookBookmark(viewModel: LibraryViewModel, bookId: String, bookmarkId: String) {
+    try {
+        val prefs = viewModel.repository.getPreferences()
+        val jsonStr = prefs.getString("book_bookmarks_json", "{}") ?: "{}"
+        val jsonObj = JSONObject(jsonStr)
+        val array = jsonObj.optJSONArray(bookId) ?: return
+        val newArray = JSONArray()
+        for (i in 0 until array.length()) {
+            val item = array.getJSONObject(i)
+            if (item.optString("id") != bookmarkId) {
+                newArray.put(item)
+            }
+        }
+        jsonObj.put(bookId, newArray)
+        prefs.edit().putString("book_bookmarks_json", jsonObj.toString()).apply()
+        viewModel.refreshBookmarks()
+    } catch (_: Throwable) {}
 }
 
 fun playBook(player: Player, book: Audiobook, trackIndex: Int, positionMs: Long, autoPlay: Boolean) {
