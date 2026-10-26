@@ -4,12 +4,12 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.LruCache
 import androidx.documentfile.provider.DocumentFile
-import com.arthenica.ffmpegkit.FFmpegKitConfig
-import com.arthenica.ffmpegkit.FFprobeKit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -108,7 +108,7 @@ class AudiobookRepository(private val context: Context) {
                     )
                 )
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
         return list.sortedBy { v -> v.positionMs }
     }
 
@@ -127,7 +127,7 @@ class AudiobookRepository(private val context: Context) {
             array.put(newObj)
             jsonObj.put(bookId, array)
             prefs.edit().putString("book_bookmarks_json", jsonObj.toString()).apply()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun loadCompletedBookIds(): Set<String> {
@@ -138,7 +138,7 @@ class AudiobookRepository(private val context: Context) {
             for (i in 0 until array.length()) {
                 set.add(array.getString(i))
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
         return set
     }
 
@@ -159,7 +159,7 @@ class AudiobookRepository(private val context: Context) {
             val jsonStr = prefs.getString("book_speeds_json", "{}") ?: "{}"
             val jsonObj = JSONObject(jsonStr)
             if (jsonObj.has(bookId)) jsonObj.getDouble(bookId).toFloat() else 1.0f
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             1.0f
         }
     }
@@ -170,7 +170,7 @@ class AudiobookRepository(private val context: Context) {
             val jsonObj = JSONObject(jsonStr)
             jsonObj.put(bookId, speed.toDouble())
             prefs.edit().putString("book_speeds_json", jsonObj.toString()).apply()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     suspend fun scanFolderForAudiobooks(folderUri: Uri): List<Audiobook> = withContext(Dispatchers.IO) {
@@ -213,7 +213,6 @@ class AudiobookRepository(private val context: Context) {
                 }
             }
 
-            // If multiple standalone .m4b files sit directly in the root folder, treat each .m4b as its own book
             val allM4bInRoot = currentDir == rootDir && audioFiles.size > 1 && audioFiles.all {
                 it.name?.endsWith(".m4b", ignoreCase = true) == true
             }
@@ -281,7 +280,6 @@ class AudiobookRepository(private val context: Context) {
     }
 
     suspend fun getBookChapters(book: Audiobook): List<Chapter> = withContext(Dispatchers.IO) {
-        // Check embedded chapters for M4B/M4A files or any single-file audiobook
         if (book.tracks.size == 1 || book.tracks.any { it.isM4b }) {
             val embeddedChapters = mutableListOf<Chapter>()
             for ((index, track) in book.tracks.withIndex()) {
@@ -291,14 +289,16 @@ class AudiobookRepository(private val context: Context) {
                 } else {
                     var duration = 0L
                     var title = track.name
+                    val retriever = MediaMetadataRetriever()
                     try {
-                        val retriever = MediaMetadataRetriever()
                         retriever.setDataSource(context, track.uri)
                         duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
                         val metaTitle = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
                         if (!metaTitle.isNullOrBlank()) title = metaTitle
-                        retriever.release()
-                    } catch (_: Exception) {}
+                    } catch (_: Throwable) {
+                    } finally {
+                        try { retriever.release() } catch (_: Throwable) {}
+                    }
                     embeddedChapters.add(Chapter(title = title, startMs = 0L, durationMs = duration, trackIndex = index))
                 }
             }
@@ -318,88 +318,40 @@ class AudiobookRepository(private val context: Context) {
                 duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
                 val metaTitle = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
                 if (!metaTitle.isNullOrBlank()) title = metaTitle
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
             chapters.add(Chapter(title = title, startMs = 0L, durationMs = duration, trackIndex = index))
         }
-        try { retriever.release() } catch (_: Exception) {}
+        try { retriever.release() } catch (_: Throwable) {}
 
         if (chapters.isEmpty()) chapters.add(Chapter("Chapter 1", 0L, 0L, 0))
         chapters
     }
 
+    // PURE KOTLIN MP4/M4B CHAPTER EXTRACTOR (Zero native C libraries, crash-proof)
     private fun extractM4bChapters(uri: Uri, trackIndex: Int = 0): List<Chapter> {
         val chapters = mutableListOf<Chapter>()
 
-        // METHOD 1: FFprobeKit (Handles structured MediaInformation + raw JSON fallback if cover art logs a warning)
+        // METHOD 1: Direct MP4/M4B Atom Parser (Reads Audible/Nero 'chpl' and QuickTime 'tx3g'/'text' chapter tracks)
         try {
-            val safUrl = FFmpegKitConfig.getSafParameterForRead(context, uri)
-            val session = FFprobeKit.getMediaInformation(safUrl)
-            val info = session.mediaInformation
-
-            if (info != null && info.chapters != null && info.chapters.isNotEmpty()) {
-                for ((index, ch) in info.chapters.withIndex()) {
-                    val tags = ch.allProperties?.optJSONObject("tags")
-                    val title = tags?.optString("title")?.takeIf { it.isNotBlank() }
-                        ?: tags?.optString("TITLE")?.takeIf { it.isNotBlank() }
-                        ?: "Chapter ${index + 1}"
-                    val startMs = (ch.startTime?.toDoubleOrNull()?.times(1000.0))?.toLong() ?: 0L
-                    val endMs = (ch.endTime?.toDoubleOrNull()?.times(1000.0))?.toLong() ?: 0L
-                    val durationMs = if (endMs > startMs) endMs - startMs else 0L
-                    chapters.add(Chapter(title.trim(), startMs, durationMs, trackIndex))
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                FileInputStream(pfd.fileDescriptor).use { fis ->
+                    val parsed = parseMp4ChaptersFromChannel(fis.channel, trackIndex)
+                    chapters.addAll(parsed)
                 }
             }
+        } catch (_: Throwable) {}
 
-            if (chapters.isEmpty()) {
-                val rawOutput = session.output ?: ""
-                val firstBrace = rawOutput.indexOf('{')
-                val lastBrace = rawOutput.lastIndexOf('}')
-                if (firstBrace != -1 && lastBrace > firstBrace) {
-                    val jsonObj = JSONObject(rawOutput.substring(firstBrace, lastBrace + 1))
-                    val chArray = jsonObj.optJSONArray("chapters")
-                    if (chArray != null && chArray.length() > 0) {
-                        for (i in 0 until chArray.length()) {
-                            val chObj = chArray.getJSONObject(i)
-                            val tags = chObj.optJSONObject("tags")
-                            val title = tags?.optString("title")?.takeIf { it.isNotBlank() }
-                                ?: tags?.optString("TITLE")?.takeIf { it.isNotBlank() }
-                                ?: "Chapter ${i + 1}"
-                            val startMs = parseFfprobeTimeMs(chObj, "start_time", "start")
-                            val endMs = parseFfprobeTimeMs(chObj, "end_time", "end")
-                            val durationMs = if (endMs > startMs) endMs - startMs else 0L
-                            chapters.add(Chapter(title.trim(), startMs, durationMs, trackIndex))
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        // METHOD 2: Direct MP4/M4B Atom Parser (Reads Audible/Nero 'chpl' and QuickTime 'tx3g' chapter tracks directly)
+        // METHOD 2: Fallback to Android Native MediaExtractor
         if (chapters.isEmpty()) {
-            try {
-                context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                    FileInputStream(pfd.fileDescriptor).use { fis ->
-                        val parsed = parseMp4ChaptersFromChannel(fis.channel, trackIndex)
-                        chapters.addAll(parsed)
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        // METHOD 3: Fallback to Android Native MediaExtractor
-        if (chapters.isEmpty()) {
-            val extractor = android.media.MediaExtractor()
+            val extractor = MediaExtractor()
             try {
                 extractor.setDataSource(context, uri, null)
                 var textTrackIndex = -1
 
                 for (i in 0 until extractor.trackCount) {
                     val format = extractor.getTrackFormat(i)
-                    val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: ""
-                    if (mime.startsWith("text/") || mime.contains("tx3g") || mime.contains("3gpp")) {
+                    val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                    if (mime.startsWith("text/") || mime.contains("tx3g") || mime.contains("3gpp") || mime.contains("application/x-quicktime")) {
                         textTrackIndex = i
                         break
                     }
@@ -411,6 +363,7 @@ class AudiobookRepository(private val context: Context) {
                     var chapterIndex = 1
 
                     while (true) {
+                        buffer.clear()
                         val sampleSize = extractor.readSampleData(buffer, 0)
                         if (sampleSize < 0) break
 
@@ -421,60 +374,47 @@ class AudiobookRepository(private val context: Context) {
                         val title = decodeTx3gTitle(titleBytes, sampleSize, chapterIndex)
                         chapters.add(Chapter(title, timeMs, 0L, trackIndex))
                         chapterIndex++
-                        extractor.advance()
-                        buffer.clear()
+                        if (!extractor.advance()) break
                     }
                 }
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
             } finally {
-                try { extractor.release() } catch (_: Exception) {}
+                try { extractor.release() } catch (_: Throwable) {}
             }
         }
 
-        // Fill in exact durations for each extracted chapter
+        // Calculate exact duration of each chapter
         if (chapters.isNotEmpty()) {
             chapters.sortBy { it.startMs }
-            for (i in 0 until chapters.size - 1) {
-                val calcDuration = (chapters[i + 1].startMs - chapters[i].startMs).coerceAtLeast(0L)
-                if (chapters[i].durationMs <= 0L || calcDuration > 0L) {
-                    chapters[i] = chapters[i].copy(durationMs = calcDuration)
+            val deduplicated = mutableListOf<Chapter>()
+            for (ch in chapters) {
+                if (deduplicated.isEmpty() || ch.startMs - deduplicated.last().startMs >= 500L) {
+                    deduplicated.add(ch)
                 }
             }
-            if (chapters.last().durationMs <= 0L) {
-                try {
-                    val retriever = MediaMetadataRetriever()
-                    retriever.setDataSource(context, uri)
-                    val totalDuration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                    if (totalDuration > chapters.last().startMs) {
-                        chapters[chapters.size - 1] = chapters.last().copy(
-                            durationMs = totalDuration - chapters.last().startMs
-                        )
-                    }
-                    retriever.release()
-                } catch (_: Exception) {}
+            chapters.clear()
+            chapters.addAll(deduplicated)
+
+            for (i in 0 until chapters.size - 1) {
+                val calcDuration = (chapters[i + 1].startMs - chapters[i].startMs).coerceAtLeast(0L)
+                chapters[i] = chapters[i].copy(durationMs = calcDuration)
+            }
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, uri)
+                val totalDuration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                if (totalDuration > chapters.last().startMs) {
+                    chapters[chapters.size - 1] = chapters.last().copy(
+                        durationMs = totalDuration - chapters.last().startMs
+                    )
+                }
+            } catch (_: Throwable) {
+            } finally {
+                try { retriever.release() } catch (_: Throwable) {}
             }
         }
 
         return chapters
-    }
-
-    private fun parseFfprobeTimeMs(chObj: JSONObject, timeStrKey: String, ptsKey: String): Long {
-        val strVal = chObj.optString(timeStrKey, "")
-        val seconds = strVal.toDoubleOrNull()
-        if (seconds != null) {
-            return (seconds * 1000.0).toLong().coerceAtLeast(0L)
-        }
-        val pts = chObj.optLong(ptsKey, -1L)
-        val tb = chObj.optString("time_base", "")
-        if (pts >= 0L && tb.contains("/")) {
-            val parts = tb.split("/")
-            val num = parts[0].toDoubleOrNull() ?: 1.0
-            val den = parts[1].toDoubleOrNull() ?: 1000.0
-            if (den > 0.0) {
-                return ((pts * num / den) * 1000.0).toLong().coerceAtLeast(0L)
-            }
-        }
-        return 0L
     }
 
     private data class Mp4Box(
@@ -488,7 +428,7 @@ class AudiobookRepository(private val context: Context) {
     }
 
     private fun readBoxHeader(channel: FileChannel, position: Long, limit: Long): Mp4Box? {
-        if (position + 8 > limit) return null
+        if (position < 0L || position + 8L > limit) return null
         val buf = ByteBuffer.allocate(16).order(ByteOrder.BIG_ENDIAN)
         val read = channel.read(buf, position)
         if (read < 8) return null
@@ -514,21 +454,26 @@ class AudiobookRepository(private val context: Context) {
     private fun listChildBoxes(channel: FileChannel, start: Long, end: Long): List<Mp4Box> {
         val list = mutableListOf<Mp4Box>()
         var pos = start
-        while (pos + 8 <= end) {
+        var safetyCounter = 0
+        while (pos + 8L <= end && safetyCounter < 10000) {
             val box = readBoxHeader(channel, pos, end) ?: break
             list.add(box)
+            if (box.endOffset <= pos) break
             pos = box.endOffset
+            safetyCounter++
         }
         return list
     }
 
     private fun parseMp4ChaptersFromChannel(channel: FileChannel, trackIndex: Int): List<Chapter> {
         val fileSize = channel.size()
+        if (fileSize <= 8L) return emptyList()
+
         val topBoxes = listChildBoxes(channel, 0L, fileSize)
         val moov = topBoxes.firstOrNull { it.type == "moov" } ?: return emptyList()
         val moovChildren = listChildBoxes(channel, moov.payloadOffset, moov.endOffset)
 
-        // 1. Check Nero chapters inside moov -> udta -> chpl
+        // 1. Check Nero chapters inside moov -> udta -> chpl (Used by Audible, Libation, OpenAudible, FFmpeg)
         val udta = moovChildren.firstOrNull { it.type == "udta" }
         if (udta != null) {
             val udtaChildren = listChildBoxes(channel, udta.payloadOffset, udta.endOffset)
@@ -539,33 +484,60 @@ class AudiobookRepository(private val context: Context) {
             }
         }
 
-        // 2. Check QuickTime chapter text track inside moov -> trak
+        // 2. Check QuickTime chapter tracks inside moov -> trak
         val traks = moovChildren.filter { it.type == "trak" }
+        val referencedChapterTrackIds = findReferencedChapterTrackIds(channel, traks)
+
         for (trak in traks) {
-            val trakChapters = parseQuickTimeTextTrak(channel, trak, trackIndex)
+            val trakChapters = parseQuickTimeTextTrak(channel, trak, trackIndex, referencedChapterTrackIds)
             if (trakChapters.isNotEmpty()) return trakChapters
         }
 
         return emptyList()
     }
 
-    private fun parseChplBox(channel: FileChannel, chpl: Mp4Box, trackIndex: Int): List<Chapter> {
-        val payloadSize = (chpl.endOffset - chpl.payloadOffset).toInt()
-        if (payloadSize < 9 || payloadSize > 2 * 1024 * 1024) return emptyList()
+    private fun findReferencedChapterTrackIds(channel: FileChannel, traks: List<Mp4Box>): Set<Int> {
+        val ids = mutableSetOf<Int>()
+        for (trak in traks) {
+            val trakChildren = listChildBoxes(channel, trak.payloadOffset, trak.endOffset)
+            val tref = trakChildren.firstOrNull { it.type == "tref" } ?: continue
+            val trefChildren = listChildBoxes(channel, tref.payloadOffset, tref.endOffset)
+            val chap = trefChildren.firstOrNull { it.type == "chap" } ?: continue
+            val buf = readBoxPayload(channel, chap, 4) ?: continue
+            while (buf.remaining() >= 4) {
+                ids.add(buf.int)
+            }
+        }
+        return ids
+    }
 
-        val buf = ByteBuffer.allocate(payloadSize).order(ByteOrder.BIG_ENDIAN)
-        channel.read(buf, chpl.payloadOffset)
-        buf.flip()
-
+    private fun readTrackId(channel: FileChannel, trakChildren: List<Mp4Box>): Int {
+        val tkhd = trakChildren.firstOrNull { it.type == "tkhd" } ?: return -1
+        val buf = readBoxPayload(channel, tkhd, 24) ?: return -1
         val version = buf.get().toInt() and 0xFF
-        buf.get(); buf.get(); buf.get() // 3 bytes flags
-        buf.get() // 1 byte reserved
+        val trackIdOffset = if (version == 1) 20 else 12
+        if (buf.limit() < trackIdOffset + 4) return -1
+        buf.position(trackIdOffset)
+        return buf.int
+    }
 
-        val count = if (version == 0) {
+    private fun parseChplBox(channel: FileChannel, chpl: Mp4Box, trackIndex: Int): List<Chapter> {
+        val buf = readBoxPayload(channel, chpl, 5) ?: return emptyList()
+        val version = buf.get().toInt() and 0xFF
+        if (buf.remaining() < 3) return emptyList()
+        buf.get(); buf.get(); buf.get() // 3 bytes flags
+
+        val count: Int = if (version == 0) {
+            if (buf.remaining() < 1) return emptyList()
             buf.get().toInt() and 0xFF
         } else {
+            // Version 1 has 1 reserved byte + 4-byte big-endian chapter count (or 4 reserved bytes + 1-byte count)
+            if (buf.remaining() < 5) return emptyList()
+            buf.get() // 1 byte reserved
             buf.int
         }
+
+        if (count <= 0 || count > 5000) return emptyList()
 
         val result = mutableListOf<Chapter>()
         for (i in 0 until count) {
@@ -582,8 +554,16 @@ class AudiobookRepository(private val context: Context) {
         return result
     }
 
-    private fun parseQuickTimeTextTrak(channel: FileChannel, trak: Mp4Box, trackIndex: Int): List<Chapter> {
+    private fun parseQuickTimeTextTrak(
+        channel: FileChannel,
+        trak: Mp4Box,
+        trackIndex: Int,
+        referencedChapterTrackIds: Set<Int>
+    ): List<Chapter> {
         val trakChildren = listChildBoxes(channel, trak.payloadOffset, trak.endOffset)
+        val tkhdId = readTrackId(channel, trakChildren)
+        val isReferencedChapTrack = tkhdId != -1 && referencedChapterTrackIds.contains(tkhdId)
+
         val mdia = trakChildren.firstOrNull { it.type == "mdia" } ?: return emptyList()
         val mdiaChildren = listChildBoxes(channel, mdia.payloadOffset, mdia.endOffset)
 
@@ -591,22 +571,22 @@ class AudiobookRepository(private val context: Context) {
         val hdlr = mdiaChildren.firstOrNull { it.type == "hdlr" }
         val minf = mdiaChildren.firstOrNull { it.type == "minf" } ?: return emptyList()
 
-        // Read timescale from mdhd
-        val mdhdBuf = ByteBuffer.allocate(32).order(ByteOrder.BIG_ENDIAN)
-        channel.read(mdhdBuf, mdhd.payloadOffset)
-        mdhdBuf.flip()
+        // Read timescale from mdhd safely
+        val mdhdBuf = readBoxPayload(channel, mdhd, 16) ?: return emptyList()
         val mdhdVersion = mdhdBuf.get().toInt() and 0xFF
-        mdhdBuf.position(if (mdhdVersion == 1) 20 else 12)
+        val timescalePos = if (mdhdVersion == 1) 20 else 12
+        if (mdhdBuf.limit() < timescalePos + 4) return emptyList()
+        mdhdBuf.position(timescalePos)
         val timescale = (mdhdBuf.int.toLong() and 0xFFFFFFFFL).coerceAtLeast(1L)
 
-        // Check handler type in hdlr
-        var isTextTrack = false
-        if (hdlr != null && (hdlr.endOffset - hdlr.payloadOffset) >= 12) {
-            val hdlrBuf = ByteBuffer.allocate(12)
-            channel.read(hdlrBuf, hdlr.payloadOffset)
-            val hdlrType = String(hdlrBuf.array(), 8, 4, Charsets.ISO_8859_1)
-            if (hdlrType == "text" || hdlrType == "sbtl" || hdlrType == "subt") {
-                isTextTrack = true
+        var isTextTrack = isReferencedChapTrack
+        if (!isTextTrack && hdlr != null) {
+            val hdlrBuf = readBoxPayload(channel, hdlr, 12)
+            if (hdlrBuf != null && hdlrBuf.limit() >= 12) {
+                val hdlrType = String(hdlrBuf.array(), 8, 4, Charsets.ISO_8859_1)
+                if (hdlrType == "text" || hdlrType == "sbtl" || hdlrType == "subt" || hdlrType == "chap") {
+                    isTextTrack = true
+                }
             }
         }
 
@@ -615,12 +595,13 @@ class AudiobookRepository(private val context: Context) {
         val stblChildren = listChildBoxes(channel, stbl.payloadOffset, stbl.endOffset)
 
         val stsd = stblChildren.firstOrNull { it.type == "stsd" }
-        if (!isTextTrack && stsd != null && (stsd.endOffset - stsd.payloadOffset) >= 16) {
-            val stsdBuf = ByteBuffer.allocate(16)
-            channel.read(stsdBuf, stsd.payloadOffset)
-            val sampleFmt = String(stsdBuf.array(), 12, 4, Charsets.ISO_8859_1)
-            if (sampleFmt == "tx3g" || sampleFmt == "text") {
-                isTextTrack = true
+        if (!isTextTrack && stsd != null) {
+            val stsdBuf = readBoxPayload(channel, stsd, 16)
+            if (stsdBuf != null && stsdBuf.limit() >= 16) {
+                val sampleFmt = String(stsdBuf.array(), 12, 4, Charsets.ISO_8859_1)
+                if (sampleFmt == "tx3g" || sampleFmt == "text" || sampleFmt == "c608") {
+                    isTextTrack = true
+                }
             }
         }
         if (!isTextTrack) return emptyList()
@@ -633,36 +614,44 @@ class AudiobookRepository(private val context: Context) {
         if (stco == null && co64 == null) return emptyList()
 
         // 1. Read sample deltas from stts
-        val sttsBuf = readBoxPayload(channel, stts) ?: return emptyList()
+        val sttsBuf = readBoxPayload(channel, stts, 8) ?: return emptyList()
         sttsBuf.position(4)
         val sttsCount = sttsBuf.int
+        if (sttsCount <= 0 || sttsCount > 10000) return emptyList()
         val sampleDeltas = mutableListOf<Long>()
         for (i in 0 until sttsCount) {
             if (sttsBuf.remaining() < 8) break
-            val sampleCount = sttsBuf.int
-            val sampleDelta = sttsBuf.int.toLong() and 0xFFFFFFFFL
-            for (j in 0 until sampleCount) {
+            val sCount = sttsBuf.int
+            val sDelta = sttsBuf.int.toLong() and 0xFFFFFFFFL
+            if (sCount <= 0 || sCount > 10000) break
+            for (j in 0 until sCount) {
                 if (sampleDeltas.size >= 5000) break
-                sampleDeltas.add(sampleDelta)
+                sampleDeltas.add(sDelta)
             }
         }
         if (sampleDeltas.isEmpty()) return emptyList()
 
         // 2. Read sample sizes from stsz
-        val stszBuf = readBoxPayload(channel, stsz) ?: return emptyList()
+        val stszBuf = readBoxPayload(channel, stsz, 12) ?: return emptyList()
         stszBuf.position(4)
         val defaultSize = stszBuf.int
         val sampleCount = stszBuf.int
         if (sampleCount <= 0 || sampleCount > 5000) return emptyList()
         val sampleSizes = IntArray(sampleCount)
         for (i in 0 until sampleCount) {
-            sampleSizes[i] = if (defaultSize != 0) defaultSize else if (stszBuf.remaining() >= 4) stszBuf.int else 0
+            sampleSizes[i] = if (defaultSize != 0) {
+                defaultSize
+            } else if (stszBuf.remaining() >= 4) {
+                stszBuf.int
+            } else {
+                0
+            }
         }
 
         // 3. Read chunk offsets from stco or co64
         val chunkOffsets: LongArray
         if (stco != null) {
-            val stcoBuf = readBoxPayload(channel, stco) ?: return emptyList()
+            val stcoBuf = readBoxPayload(channel, stco, 8) ?: return emptyList()
             stcoBuf.position(4)
             val chunkCount = stcoBuf.int
             if (chunkCount <= 0 || chunkCount > 10000) return emptyList()
@@ -672,7 +661,7 @@ class AudiobookRepository(private val context: Context) {
                 chunkOffsets[i] = stcoBuf.int.toLong() and 0xFFFFFFFFL
             }
         } else {
-            val co64Buf = readBoxPayload(channel, co64!!) ?: return emptyList()
+            val co64Buf = readBoxPayload(channel, co64!!, 8) ?: return emptyList()
             co64Buf.position(4)
             val chunkCount = co64Buf.int
             if (chunkCount <= 0 || chunkCount > 10000) return emptyList()
@@ -684,9 +673,10 @@ class AudiobookRepository(private val context: Context) {
         }
 
         // 4. Read sample-to-chunk mapping from stsc
-        val stscBuf = readBoxPayload(channel, stsc) ?: return emptyList()
+        val stscBuf = readBoxPayload(channel, stsc, 8) ?: return emptyList()
         stscBuf.position(4)
         val stscCount = stscBuf.int
+        if (stscCount <= 0 || stscCount > 10000) return emptyList()
         data class StscEntry(val firstChunk: Int, val samplesPerChunk: Int)
         val stscEntries = mutableListOf<StscEntry>()
         for (i in 0 until stscCount) {
@@ -694,7 +684,9 @@ class AudiobookRepository(private val context: Context) {
             val firstChunk = stscBuf.int
             val samplesPerChunk = stscBuf.int
             stscBuf.int // sampleDescriptionIndex
-            stscEntries.add(StscEntry(firstChunk, samplesPerChunk))
+            if (firstChunk > 0 && samplesPerChunk > 0) {
+                stscEntries.add(StscEntry(firstChunk, samplesPerChunk))
+            }
         }
         if (stscEntries.isEmpty()) return emptyList()
 
@@ -702,6 +694,7 @@ class AudiobookRepository(private val context: Context) {
         val chapters = mutableListOf<Chapter>()
         var sampleIdx = 0
         var accumulatedTicks = 0L
+        val fileSize = channel.size()
 
         for (chunkIdx in chunkOffsets.indices) {
             val chunkNum1Based = chunkIdx + 1
@@ -715,7 +708,7 @@ class AudiobookRepository(private val context: Context) {
                 val startMs = (accumulatedTicks * 1000L) / timescale
                 val durationMs = (delta * 1000L) / timescale
 
-                if (size in 2..8192) {
+                if (size in 2..8192 && currentOffset >= 0L && currentOffset + size <= fileSize) {
                     val sampleBuf = ByteBuffer.allocate(size)
                     val readBytes = channel.read(sampleBuf, currentOffset)
                     if (readBytes >= 2) {
@@ -724,7 +717,7 @@ class AudiobookRepository(private val context: Context) {
                     }
                 }
                 accumulatedTicks += delta
-                currentOffset += size
+                currentOffset += size.coerceAtLeast(0)
                 sampleIdx++
             }
             if (sampleIdx >= sampleCount) break
@@ -733,35 +726,39 @@ class AudiobookRepository(private val context: Context) {
         return chapters
     }
 
-    private fun readBoxPayload(channel: FileChannel, box: Mp4Box): ByteBuffer? {
-        val size = (box.endOffset - box.payloadOffset).toInt()
-        if (size <= 4 || size > 5 * 1024 * 1024) return null
+    private fun readBoxPayload(channel: FileChannel, box: Mp4Box, minBytes: Int): ByteBuffer? {
+        val rawSize = box.endOffset - box.payloadOffset
+        if (rawSize < minBytes || rawSize > 5 * 1024 * 1024) return null
+        val size = rawSize.toInt()
         val buf = ByteBuffer.allocate(size).order(ByteOrder.BIG_ENDIAN)
-        channel.read(buf, box.payloadOffset)
+        val read = channel.read(buf, box.payloadOffset)
+        if (read < minBytes) return null
         buf.flip()
         return buf
     }
 
     private fun decodeTx3gTitle(bytes: ByteArray, sampleSize: Int, chapterNumber: Int): String {
         var title = "Chapter $chapterNumber"
-        if (sampleSize >= 2) {
-            val len = ((bytes[0].toInt() and 0xFF) shl 8) or (bytes[1].toInt() and 0xFF)
-            if (len in 1..(sampleSize - 2)) {
-                val charset = if (len >= 2 &&
-                    ((bytes[2] == 0xFE.toByte() && bytes[3] == 0xFF.toByte()) ||
-                        (bytes[2] == 0xFF.toByte() && bytes[3] == 0xFE.toByte()))
-                ) {
-                    Charsets.UTF_16
+        try {
+            if (sampleSize >= 2) {
+                val len = ((bytes[0].toInt() and 0xFF) shl 8) or (bytes[1].toInt() and 0xFF)
+                if (len in 1..(sampleSize - 2)) {
+                    val charset = if (len >= 2 &&
+                        ((bytes[2] == 0xFE.toByte() && bytes[3] == 0xFF.toByte()) ||
+                            (bytes[2] == 0xFF.toByte() && bytes[3] == 0xFE.toByte()))
+                    ) {
+                        Charsets.UTF_16
+                    } else {
+                        Charsets.UTF_8
+                    }
+                    title = String(bytes, 2, len, charset).trim()
                 } else {
-                    Charsets.UTF_8
+                    title = String(bytes, 0, sampleSize, Charsets.UTF_8)
+                        .replace(Regex("[^\\x20-\\x7E]"), "")
+                        .trim()
                 }
-                title = String(bytes, 2, len, charset).trim()
-            } else {
-                title = String(bytes, 0, sampleSize, Charsets.UTF_8)
-                    .replace(Regex("[^\\x20-\\x7E]"), "")
-                    .trim()
             }
-        }
+        } catch (_: Throwable) {}
         return title.ifBlank { "Chapter $chapterNumber" }
     }
 
@@ -802,7 +799,7 @@ class AudiobookRepository(private val context: Context) {
                     return@withContext bitmap
                 }
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
         null
     }
 
@@ -826,7 +823,7 @@ class AudiobookRepository(private val context: Context) {
                 }
             }
             null
-        } catch (_: Exception) { null }
+        } catch (_: Throwable) { null }
     }
 
     private fun loadEmbeddedCoverArt(uri: Uri): Bitmap? {
@@ -842,8 +839,8 @@ class AudiobookRepository(private val context: Context) {
                 options.inJustDecodeBounds = false
                 BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size, options)
             } else null
-        } catch (_: Exception) {
-            try { retriever.release() } catch (_: Exception) {}
+        } catch (_: Throwable) {
+            try { retriever.release() } catch (_: Throwable) {}
             null
         }
     }
@@ -856,7 +853,7 @@ class AudiobookRepository(private val context: Context) {
             FileOutputStream(cacheFile).use { out ->
                 bitmap.compress(Bitmap.CompressFormat.PNG, 90, out)
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     private fun decodeSampledBitmapFromFile(path: String, reqWidth: Int, reqHeight: Int): Bitmap? {
@@ -889,3 +886,4 @@ class AudiobookRepository(private val context: Context) {
         return inSampleSize
     }
 }
+// END OF FILE

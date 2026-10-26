@@ -44,5 +44,5 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-session:1.2.1")
-    implementation("dev.ffmpegkit-maintained:ffmpeg-kit-min:8.1.7")
 }
+// END OF FILE
