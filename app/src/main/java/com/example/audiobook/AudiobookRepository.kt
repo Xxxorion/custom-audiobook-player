@@ -202,14 +202,14 @@ class AudiobookRepository(private val context: Context) {
         if (audioFiles.isNotEmpty()) {
             val parentDir = currentDir.parentFile
             val grandParentDir = parentDir?.parentFile
-            var authorName = "Unknown Author"
+            var folderAuthor = "Unknown Author"
             var seriesName = ""
             if (currentDir != rootDir && parentDir != null && parentDir != rootDir) {
                 if (grandParentDir != null && grandParentDir != rootDir && grandParentDir.name != null) {
-                    authorName = grandParentDir.name!!
+                    folderAuthor = grandParentDir.name!!
                     seriesName = parentDir.name!!
                 } else if (parentDir.name != null) {
-                    authorName = parentDir.name!!
+                    folderAuthor = parentDir.name!!
                 }
             }
 
@@ -221,12 +221,18 @@ class AudiobookRepository(private val context: Context) {
                 for (file in audioFiles) {
                     val rawName = file.name ?: "Audiobook.m4b"
                     val cleanName = rawName.substringBeforeLast(".")
-                    val track = AudioTrack(name = cleanName, uri = file.uri, isM4b = true)
+                    val (metaTitle, metaAuthor) = extractEmbeddedBookMetadata(
+                        uri = file.uri,
+                        fallbackTitle = cleanName,
+                        fallbackAuthor = folderAuthor,
+                        preferEmbeddedTitle = true
+                    )
+                    val track = AudioTrack(name = metaTitle, uri = file.uri, isM4b = true)
                     bookList.add(
                         Audiobook(
                             id = file.uri.toString(),
-                            title = cleanName,
-                            author = authorName,
+                            title = metaTitle,
+                            author = metaAuthor,
                             series = seriesName,
                             tracks = listOf(track)
                         )
@@ -244,18 +250,26 @@ class AudiobookRepository(private val context: Context) {
                     )
                 }.sortedWith(Comparator { a, b -> a.name.compareTo(b.name, ignoreCase = true) })
 
-                val bookTitle = if (currentDir.name != null && currentDir != rootDir) {
+                val fallbackTitle = if (currentDir.name != null && currentDir != rootDir) {
                     currentDir.name!!
                 } else {
                     sortedTracks.first().name
                 }
 
-                if (sortedTracks.size == 1 && sortedTracks.first().isM4b) {
+                val isSingleM4b = sortedTracks.size == 1 && sortedTracks.first().isM4b
+                val (resolvedTitle, resolvedAuthor) = extractEmbeddedBookMetadata(
+                    uri = sortedTracks.first().uri,
+                    fallbackTitle = fallbackTitle,
+                    fallbackAuthor = folderAuthor,
+                    preferEmbeddedTitle = isSingleM4b || currentDir == rootDir
+                )
+
+                if (isSingleM4b) {
                     bookList.add(
                         Audiobook(
                             id = sortedTracks.first().uri.toString(),
-                            title = bookTitle,
-                            author = authorName,
+                            title = resolvedTitle,
+                            author = resolvedAuthor,
                             series = seriesName,
                             tracks = sortedTracks
                         )
@@ -264,8 +278,8 @@ class AudiobookRepository(private val context: Context) {
                     bookList.add(
                         Audiobook(
                             id = currentDir.uri.toString(),
-                            title = bookTitle,
-                            author = authorName,
+                            title = resolvedTitle,
+                            author = resolvedAuthor,
                             series = seriesName,
                             tracks = sortedTracks
                         )
@@ -277,6 +291,74 @@ class AudiobookRepository(private val context: Context) {
         for (dir in subDirs) {
             traverseDirectoryForBooks(dir, rootDir, bookList)
         }
+    }
+
+    private fun extractEmbeddedBookMetadata(
+        uri: Uri,
+        fallbackTitle: String,
+        fallbackAuthor: String,
+        preferEmbeddedTitle: Boolean
+    ): Pair<String, String> {
+        val cacheKey = uri.toString().hashCode()
+        val cachedTitle = prefs.getString("meta_title_$cacheKey", null)
+        val cachedAuthor = prefs.getString("meta_author_$cacheKey", null)
+        if (!cachedTitle.isNullOrBlank() && !cachedAuthor.isNullOrBlank()) {
+            val finalTitle = if (preferEmbeddedTitle) cachedTitle else fallbackTitle
+            val finalAuthor = if (fallbackAuthor == "Unknown Author" || preferEmbeddedTitle) cachedAuthor else fallbackAuthor
+            return Pair(finalTitle, finalAuthor)
+        }
+
+        var embeddedTitle: String? = null
+        var embeddedAuthor: String? = null
+
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(context, uri)
+            val rawTitle = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.trim()
+            val rawAlbum = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)?.trim()
+            val rawAuthor = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_AUTHOR)?.trim()
+            val rawArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.trim()
+            val rawAlbumArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST)?.trim()
+
+            val isGenericTrackTitle = rawTitle.isNullOrBlank() ||
+                rawTitle.startsWith("Track", ignoreCase = true) ||
+                rawTitle.startsWith("Chapter", ignoreCase = true) ||
+                rawTitle.startsWith("Part", ignoreCase = true)
+
+            embeddedTitle = when {
+                !isGenericTrackTitle -> rawTitle
+                !rawAlbum.isNullOrBlank() -> rawAlbum
+                !rawTitle.isNullOrBlank() -> rawTitle
+                else -> null
+            }
+
+            embeddedAuthor = listOf(rawAuthor, rawArtist, rawAlbumArtist)
+                .firstOrNull { !it.isNullOrBlank() }
+        } catch (_: Throwable) {
+        } finally {
+            try { retriever.release() } catch (_: Throwable) {}
+        }
+
+        val resolvedTitle = if (preferEmbeddedTitle && !embeddedTitle.isNullOrBlank()) {
+            embeddedTitle
+        } else {
+            fallbackTitle
+        }
+
+        val resolvedAuthor = if (!embeddedAuthor.isNullOrBlank() && (fallbackAuthor == "Unknown Author" || preferEmbeddedTitle)) {
+            embeddedAuthor
+        } else {
+            fallbackAuthor
+        }
+
+        try {
+            prefs.edit()
+                .putString("meta_title_$cacheKey", resolvedTitle)
+                .putString("meta_author_$cacheKey", resolvedAuthor)
+                .apply()
+        } catch (_: Throwable) {}
+
+        return Pair(resolvedTitle, resolvedAuthor)
     }
 
     suspend fun getBookChapters(book: Audiobook): List<Chapter> = withContext(Dispatchers.IO) {
@@ -522,18 +604,16 @@ class AudiobookRepository(private val context: Context) {
     }
 
     private fun parseChplBox(channel: FileChannel, chpl: Mp4Box, trackIndex: Int): List<Chapter> {
-        val buf = readBoxPayload(channel, chpl, 5) ?: return emptyList()
+        val buf = readBoxPayload(channel, chpl, 6) ?: return emptyList()
         val version = buf.get().toInt() and 0xFF
-        if (buf.remaining() < 3) return emptyList()
         buf.get(); buf.get(); buf.get() // 3 bytes flags
+        buf.get() // 1 byte reserved (present in both version 0 and version 1)
 
         val count: Int = if (version == 0) {
             if (buf.remaining() < 1) return emptyList()
             buf.get().toInt() and 0xFF
         } else {
-            // Version 1 has 1 reserved byte + 4-byte big-endian chapter count (or 4 reserved bytes + 1-byte count)
-            if (buf.remaining() < 5) return emptyList()
-            buf.get() // 1 byte reserved
+            if (buf.remaining() < 4) return emptyList()
             buf.int
         }
 
@@ -571,7 +651,6 @@ class AudiobookRepository(private val context: Context) {
         val hdlr = mdiaChildren.firstOrNull { it.type == "hdlr" }
         val minf = mdiaChildren.firstOrNull { it.type == "minf" } ?: return emptyList()
 
-        // Read timescale from mdhd safely
         val mdhdBuf = readBoxPayload(channel, mdhd, 16) ?: return emptyList()
         val mdhdVersion = mdhdBuf.get().toInt() and 0xFF
         val timescalePos = if (mdhdVersion == 1) 20 else 12
