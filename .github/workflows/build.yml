@@ -18,13 +18,19 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.5'
-          cache-disabled: true
 
-      - name: Build APK with Gradle
-        run: gradle assembleDebug --stacktrace
+      - name: Run Unit Tests and Build Debug APK
+        run: |
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew test assembleDebug --stacktrace
+          else
+            gradle test assembleDebug --stacktrace
+          fi
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: audiobook-player-apk
           path: app/build/outputs/apk/debug/*.apk
+# END OF FILE

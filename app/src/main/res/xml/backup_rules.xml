@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="FablewoodPreferences.xml" />
+    <exclude domain="sharedpref" path="SirinAudioPreferences.xml" />
+    <exclude domain="file" path="library.json" />
+    <exclude domain="file" path="covers" />
+</full-backup-content>
+<!-- END OF FILE -->

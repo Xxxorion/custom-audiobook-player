@@ -26,27 +26,26 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 fun formatTime(ms: Long): String {
-    val totalSeconds = ms / 1000
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    val hours = minutes / 60
-    val remainingMinutes = minutes % 60
+    val totalSeconds = ms.coerceAtLeast(0L) / 1000L
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    val hours = minutes / 60L
+    val remainingMinutes = minutes % 60L
 
-    return if (hours > 0) {
-        String.format("%d:%02d:%02d", hours, remainingMinutes, seconds)
+    return if (hours > 0L) {
+        String.format(Locale.US, "%d:%02d:%02d", hours, remainingMinutes, seconds)
     } else {
-        String.format("%02d:%02d", remainingMinutes, seconds)
+        String.format(Locale.US, "%02d:%02d", remainingMinutes, seconds)
     }
 }
 
@@ -73,10 +72,89 @@ fun ContrastThemeIcon(
 }
 
 @Composable
+fun MiniPlayerBar(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    chapterTitle: String,
+    isPlaying: Boolean,
+    onPlayPause: () -> Unit,
+    onOpenPlayer: () -> Unit
+) {
+    Surface(
+        tonalElevation = 6.dp,
+        shadowElevation = 8.dp,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .clickable { onOpenPlayer() }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surface),
+                contentAlignment = Alignment.Center
+            ) {
+                if (coverArt != null) {
+                    Image(
+                        bitmap = coverArt,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Headphones,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            Spacer(Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = book.title,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = chapterTitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            IconButton(onClick = onPlayPause) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = "Play/Pause",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun CarModeScreen(
     book: Audiobook,
     chapterTitle: String,
     isPlaying: Boolean,
+    skipIntervalSeconds: Int,
     onPlayPause: () -> Unit,
     onQuickRewind: () -> Unit,
     onQuickForward: () -> Unit,
@@ -84,7 +162,11 @@ fun CarModeScreen(
     onExitCarMode: () -> Unit
 ) {
     Column(
-        modifier = Modifier.fillMaxSize().background(Color(0xFF08120E)).padding(24.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF08120E))
+            .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
@@ -96,7 +178,7 @@ fun CarModeScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.DirectionsCar, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(36.dp))
                 Spacer(Modifier.width(12.dp))
-                Text("CAR MODE", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
+                Text(stringResource(R.string.car_mode), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
             }
             IconButton(
                 onClick = onExitCarMode,
@@ -136,7 +218,16 @@ fun CarModeScreen(
                 onClick = onQuickRewind,
                 modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF12241C))
             ) {
-                Icon(Icons.Default.Replay30, contentDescription = "Rewind", tint = Color.White, modifier = Modifier.size(40.dp))
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Replay, contentDescription = "Rewind", tint = Color.White, modifier = Modifier.size(48.dp))
+                    Text(
+                        text = "$skipIntervalSeconds",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 3.dp)
+                    )
+                }
             }
 
             IconButton(onClick = onPlayPause, modifier = Modifier.size(128.dp)) {
@@ -152,7 +243,16 @@ fun CarModeScreen(
                 onClick = onQuickForward,
                 modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF12241C))
             ) {
-                Icon(Icons.Default.Forward30, contentDescription = "Forward", tint = Color.White, modifier = Modifier.size(40.dp))
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.RotateRight, contentDescription = "Forward", tint = Color.White, modifier = Modifier.size(48.dp))
+                    Text(
+                        text = "$skipIntervalSeconds",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 3.dp)
+                    )
+                }
             }
         }
 
@@ -164,7 +264,7 @@ fun CarModeScreen(
         ) {
             Icon(Icons.Default.BookmarkAdd, contentDescription = null, tint = Color.White, modifier = Modifier.size(28.dp))
             Spacer(Modifier.width(12.dp))
-            Text("DROP BOOKMARK PIN", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
+            Text(stringResource(R.string.drop_bookmark_pin), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
         }
     }
 }
@@ -173,19 +273,41 @@ fun CarModeScreen(
 fun BookshelfContent(
     books: List<Audiobook>,
     activeBookId: String,
-    duration: Long,
-    currentPosition: Long,
+    activeBookProgress: Float,
+    activeBookSubtitle: String,
+    hasSelectedFolder: Boolean,
     viewMode: String,
     viewModel: LibraryViewModel,
+    onChooseFolder: () -> Unit,
     onSelectBook: (Audiobook) -> Unit,
-    onChangeCover: (Audiobook) -> Unit
+    onLongPressBook: (Audiobook) -> Unit
 ) {
     if (books.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(64.dp), tint = Color.DarkGray)
+                Icon(
+                    imageVector = Icons.Default.FolderOpen,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Spacer(Modifier.height(16.dp))
-                Text("No audiobooks found.", style = MaterialTheme.typography.bodyLarge, color = Color.Gray)
+                Text(
+                    text = if (!hasSelectedFolder) {
+                        stringResource(R.string.no_folder_selected)
+                    } else {
+                        stringResource(R.string.no_supported_audio_files)
+                    },
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onChooseFolder) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.choose_audiobook_folder))
+                }
             }
         }
     } else if (viewMode == "GRID") {
@@ -196,15 +318,17 @@ fun BookshelfContent(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             items(count = books.size, key = { idx -> books[idx].id }) { index ->
+                val book = books[index]
+                val isSelected = book.id == activeBookId
                 BookCardWrapper(
-                    book = books[index],
-                    activeBookId = activeBookId,
-                    duration = duration,
-                    currentPosition = currentPosition,
+                    book = book,
+                    isSelected = isSelected,
+                    liveProgress = if (isSelected) activeBookProgress else null,
+                    liveSubtitle = if (isSelected) activeBookSubtitle else null,
                     viewMode = "GRID",
                     viewModel = viewModel,
                     onSelectBook = onSelectBook,
-                    onChangeCover = onChangeCover
+                    onLongPressBook = onLongPressBook
                 )
             }
         }
@@ -214,121 +338,106 @@ fun BookshelfContent(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(count = books.size, key = { idx -> books[idx].id }) { index ->
+                val book = books[index]
+                val isSelected = book.id == activeBookId
                 BookCardWrapper(
-                    book = books[index],
-                    activeBookId = activeBookId,
-                    duration = duration,
-                    currentPosition = currentPosition,
+                    book = book,
+                    isSelected = isSelected,
+                    liveProgress = if (isSelected) activeBookProgress else null,
+                    liveSubtitle = if (isSelected) activeBookSubtitle else null,
                     viewMode = "LIST",
                     viewModel = viewModel,
                     onSelectBook = onSelectBook,
-                    onChangeCover = onChangeCover
+                    onLongPressBook = onLongPressBook
                 )
             }
         }
     }
 }
 
+// PHASE 3.13: Inactive cards do NOT key on currentPosition or duration, avoiding 1s full-shelf recomposition
 @Composable
 fun BookCardWrapper(
     book: Audiobook,
-    activeBookId: String,
-    duration: Long,
-    currentPosition: Long,
+    isSelected: Boolean,
+    liveProgress: Float?,
+    liveSubtitle: String?,
     viewMode: String,
     viewModel: LibraryViewModel,
     onSelectBook: (Audiobook) -> Unit,
-    onChangeCover: (Audiobook) -> Unit
+    onLongPressBook: (Audiobook) -> Unit
 ) {
-    val context = LocalContext.current
-    val isSelected = book.id == activeBookId
+    var cardArt by remember(book.id, viewModel.coverRevision) { mutableStateOf<ImageBitmap?>(null) }
+    var savedProgress by remember(book.id, viewModel.progressRevision) { mutableFloatStateOf(0f) }
+    var savedSubtitle by remember(book.id, viewModel.progressRevision) { mutableStateOf("") }
 
-    var cardArt by remember(book.id) { mutableStateOf<ImageBitmap?>(null) }
-    var cardProgress by remember(book.id, isSelected, currentPosition, duration) { mutableStateOf(0f) }
-    var subtitleText by remember(book.id, isSelected, duration) { mutableStateOf("") }
+    LaunchedEffect(book.id, viewModel.coverRevision) {
+        val bmp = viewModel.repository.getOrFetchCoverArt(book)
+        cardArt = bmp?.asImageBitmap()
+    }
 
-    LaunchedEffect(book.id, isSelected, currentPosition, duration) {
-        if (cardArt == null) {
-            val bmp = viewModel.repository.getOrFetchCoverArt(book)
-            cardArt = bmp?.asImageBitmap()
-        }
-
-        if (isSelected && duration > 0L) {
-            // Actively Playing Book
-            cardProgress = (currentPosition.toFloat() / duration).coerceIn(0f, 1f)
-            subtitleText = if (viewModel.chaptersList.size > 1) {
-                "${viewModel.chaptersList.size} chapters • ${formatTime(duration)}"
-            } else {
-                formatTime(duration)
-            }
+    LaunchedEffect(book.id, viewModel.progressRevision) {
+        val isCompleted = viewModel.repository.loadCompletedBookIds().contains(book.id)
+        if (isCompleted) {
+            savedProgress = 1f
+            savedSubtitle = "Completed"
         } else {
-            // Background / Saved Books
-            val isCompleted = viewModel.repository.loadCompletedBookIds().contains(book.id)
-            if (isCompleted) {
-                cardProgress = 1f
-                subtitleText = "Completed"
-            } else {
-                val savedPos = viewModel.repository.getBookPosition(book.id)
-                val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
+            val savedPos = viewModel.repository.getBookPosition(book.id)
+            val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
+            val cachedDurations = viewModel.repository.getCachedTrackDurations(book.id)
+            var totalDur = viewModel.repository.getCachedBookDuration(book.id)
 
-                if (savedPos > 0L || savedTrackIdx > 0) {
-                    val prefs = viewModel.repository.getPreferences()
-                    var bookDur = prefs.getLong("book_dur_${book.id}", 0L)
+            if (totalDur <= 0L && (savedPos > 0L || savedTrackIdx > 0)) {
+                val computed = viewModel.repository.getOrComputeTrackDurations(book)
+                totalDur = bookDurationMs(computed)
+            }
 
-                    // If it's a single m4b file and we don't know the length yet, asynchronously fetch it
-                    if (bookDur == 0L && book.tracks.size == 1) {
-                        withContext(Dispatchers.IO) {
-                            try {
-                                val retriever = android.media.MediaMetadataRetriever()
-                                retriever.setDataSource(context, book.tracks.first().uri)
-                                bookDur = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                                retriever.release()
-                                if (bookDur > 0L) {
-                                    prefs.edit().putLong("book_dur_${book.id}", bookDur).apply()
-                                }
-                            } catch (_: Throwable) {}
-                        }
-                    }
-
-                    if (book.tracks.size > 1) {
-                        val trackRatio = savedTrackIdx.toFloat() / book.tracks.size
-                        cardProgress = trackRatio.coerceIn(0.01f, 0.99f)
-                        subtitleText = "Part ${savedTrackIdx + 1} of ${book.tracks.size}"
-                    } else if (bookDur > 0L) {
-                        cardProgress = (savedPos.toFloat() / bookDur).coerceIn(0.01f, 0.99f)
-                        val remaining = (bookDur - savedPos).coerceAtLeast(0L)
-                        subtitleText = "${formatTime(remaining)} left"
+            if (savedPos > 0L || savedTrackIdx > 0) {
+                if (totalDur > 0L) {
+                    val offsetMs = if (book.tracks.size > 1 && cachedDurations.isNotEmpty()) {
+                        bookOffsetMs(cachedDurations, savedTrackIdx, savedPos)
                     } else {
-                        cardProgress = 0.05f
-                        subtitleText = "In Progress"
+                        savedPos
                     }
+                    savedProgress = (offsetMs.toFloat() / totalDur).coerceIn(0.01f, 0.99f)
+                    val remaining = (totalDur - offsetMs).coerceAtLeast(0L)
+                    savedSubtitle = "${formatTime(remaining)} left"
+                } else if (book.tracks.size > 1) {
+                    savedProgress = (savedTrackIdx.toFloat() / book.tracks.size).coerceIn(0.01f, 0.99f)
+                    savedSubtitle = "Part ${savedTrackIdx + 1} of ${book.tracks.size}"
                 } else {
-                    cardProgress = 0f
-                    subtitleText = if (book.tracks.size == 1 && book.tracks.first().isM4b) "M4B Audiobook" else "${book.tracks.size} tracks"
+                    savedProgress = 0.05f
+                    savedSubtitle = "In Progress"
                 }
+            } else {
+                savedProgress = 0f
+                savedSubtitle = if (book.tracks.size == 1 && book.tracks.first().isM4b) "M4B Audiobook" else "${book.tracks.size} tracks"
             }
         }
     }
+
+    val displayProgress = if (isSelected && liveProgress != null && liveProgress > 0f) liveProgress else savedProgress
+    val displaySubtitle = if (isSelected && !liveSubtitle.isNullOrEmpty()) liveSubtitle else savedSubtitle
 
     if (viewMode == "GRID") {
         GridBookCard(
             book = book,
             coverArt = cardArt,
-            progress = cardProgress,
-            subtitleText = subtitleText,
+            progress = displayProgress,
+            subtitleText = displaySubtitle,
             isSelected = isSelected,
             onClick = { onSelectBook(book) },
-            onLongClick = { onChangeCover(book) }
+            onLongClick = { onLongPressBook(book) }
         )
     } else {
         ListBookCard(
             book = book,
             coverArt = cardArt,
-            progress = cardProgress,
-            subtitleText = subtitleText,
+            progress = displayProgress,
+            subtitleText = displaySubtitle,
             isSelected = isSelected,
             onClick = { onSelectBook(book) },
-            onLongClick = { onChangeCover(book) }
+            onLongClick = { onLongPressBook(book) }
         )
     }
 }
@@ -348,36 +457,55 @@ fun GridBookCard(
         modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
         Box(
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center
         ) {
             if (coverArt != null) {
                 Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             } else {
-                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(48.dp), tint = Color.Gray)
+                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             Box(
-                modifier = Modifier.align(Alignment.BottomStart).padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.6f)).padding(4.dp)
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(4.dp)
             ) {
                 Icon(Icons.Default.Headphones, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
             }
 
             if (progress > 0f) {
                 Box(
-                    modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(4.dp).background(MaterialTheme.colorScheme.tertiary)
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth(progress)
+                        .height(4.dp)
+                        .background(MaterialTheme.colorScheme.tertiary)
                 )
             }
         }
 
         Spacer(Modifier.height(8.dp))
         Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
         if (subtitleText.isNotEmpty()) {
             Text(
                 text = subtitleText,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else Color.Gray,
+                color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -405,7 +533,10 @@ fun ListBookCard(
     ) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
-                modifier = Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary),
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.primary),
                 contentAlignment = Alignment.Center
             ) {
                 if (coverArt != null) {
@@ -416,7 +547,11 @@ fun ListBookCard(
 
                 if (progress > 0f) {
                     Box(
-                        modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(4.dp).background(MaterialTheme.colorScheme.tertiary)
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth(progress)
+                            .height(4.dp)
+                            .background(MaterialTheme.colorScheme.tertiary)
                     )
                 }
             }
@@ -425,19 +560,29 @@ fun ListBookCard(
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
                 if (subtitleText.isNotEmpty()) {
                     Text(
                         text = subtitleText,
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else Color.Gray,
+                        color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
             }
 
-            Icon(Icons.Default.Headphones, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.DarkGray)
+            Icon(
+                imageVector = Icons.Default.Headphones,
+                contentDescription = null,
+                tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -450,6 +595,8 @@ fun NowPlayingScreen(
     isPlaying: Boolean,
     currentPosition: Long,
     duration: Long,
+    bookPositionMs: Long,
+    bookDurationMs: Long,
     skipIntervalSeconds: Int,
     silenceTrimEnabled: Boolean,
     sleepTimerActive: Boolean,
@@ -461,7 +608,8 @@ fun NowPlayingScreen(
     onOpenDrawer: () -> Unit,
     onBackToBookshelf: () -> Unit,
     onPlayPause: () -> Unit,
-    onSeek: (Long) -> Unit,
+    onSeekLive: (Long) -> Unit,
+    onSeekFinished: (Long) -> Unit,
     onSkipPrevChapter: () -> Unit,
     onSkipNextChapter: () -> Unit,
     onQuickRewind: () -> Unit,
@@ -478,7 +626,9 @@ fun NowPlayingScreen(
     chapterStartMs: Long = 0L,
     chapterDurationMs: Long = 0L
 ) {
-    val percentRead = if (duration > 0L) ((currentPosition.toDouble() / duration.toDouble()) * 100).toInt() else 0
+    val totalDur = if (bookDurationMs > 0L) bookDurationMs else duration
+    val totalRead = if (bookDurationMs > 0L) bookPositionMs else currentPosition
+    val percentRead = if (totalDur > 0L) ((totalRead.toDouble() / totalDur.toDouble()) * 100).toInt().coerceIn(0, 100) else 0
 
     val useChapterScrubber = chapterDurationMs > 0L
     val sliderPositionMs = if (useChapterScrubber) {
@@ -492,13 +642,21 @@ fun NowPlayingScreen(
         duration.coerceAtLeast(1L)
     }
 
+    var isDraggingSlider by remember { mutableStateOf(false) }
+    var dragSliderValue by remember { mutableFloatStateOf(0f) }
+    val activeSliderValue = if (isDraggingSlider) dragSliderValue else sliderPositionMs.toFloat()
+
     Column(
-        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(16.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
+            .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -535,7 +693,7 @@ fun NowPlayingScreen(
             Text(
                 text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
                 style = MaterialTheme.typography.bodyMedium,
-                color = Color.Gray,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -543,7 +701,10 @@ fun NowPlayingScreen(
         }
 
         Box(
-            modifier = Modifier.size(220.dp).clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+            modifier = Modifier
+                .size(220.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center
         ) {
             if (coverArt != null) {
@@ -554,8 +715,8 @@ fun NowPlayingScreen(
         }
 
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("Total Book: ${formatTime(duration)}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-            Text("Read: ${formatTime(currentPosition)} ( $percentRead% )", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            Text("Total Book: ${formatTime(totalDur)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Read: ${formatTime(totalRead)} ( $percentRead% )", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
         Card(
@@ -580,15 +741,27 @@ fun NowPlayingScreen(
 
                 Spacer(Modifier.height(6.dp))
 
+                // PHASE 1.6: Seek live on drag, persist only onValueChangeFinished
                 Slider(
-                    value = sliderPositionMs.toFloat(),
+                    value = activeSliderValue.coerceIn(0f, sliderDurationMs.toFloat()),
                     onValueChange = { newSliderVal ->
+                        isDraggingSlider = true
+                        dragSliderValue = newSliderVal
                         val targetMs = if (useChapterScrubber) {
                             chapterStartMs + newSliderVal.toLong()
                         } else {
                             newSliderVal.toLong()
                         }
-                        onSeek(targetMs)
+                        onSeekLive(targetMs)
+                    },
+                    onValueChangeFinished = {
+                        val finalMs = if (useChapterScrubber) {
+                            chapterStartMs + dragSliderValue.toLong()
+                        } else {
+                            dragSliderValue.toLong()
+                        }
+                        isDraggingSlider = false
+                        onSeekFinished(finalMs)
                     },
                     valueRange = 0f..sliderDurationMs.toFloat(),
                     colors = SliderDefaults.colors(
@@ -600,8 +773,8 @@ fun NowPlayingScreen(
                 )
 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(formatTime(sliderPositionMs), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                    Text("-${formatTime((sliderDurationMs - sliderPositionMs).coerceAtLeast(0L))}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Text(formatTime(activeSliderValue.toLong()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("-${formatTime((sliderDurationMs - activeSliderValue.toLong()).coerceAtLeast(0L))}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
                 Spacer(Modifier.height(8.dp))
@@ -652,7 +825,7 @@ fun NowPlayingScreen(
                 ) {
                     IconButton(onClick = onOpenSpeed) {
                         Text(
-                            text = "${String.format("%.1f", playbackSpeed)}x",
+                            text = String.format(Locale.US, "%.1fx", playbackSpeed),
                             fontWeight = FontWeight.Bold,
                             fontSize = 13.sp,
                             color = MaterialTheme.colorScheme.primary
@@ -661,12 +834,14 @@ fun NowPlayingScreen(
 
                     IconButton(
                         onClick = onToggleSilenceTrim,
-                        modifier = Modifier.clip(CircleShape).background(if (silenceTrimEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(if (silenceTrimEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
                     ) {
                         Icon(
                             imageVector = Icons.Default.ContentCut,
                             contentDescription = "Trim Silence",
-                            tint = if (silenceTrimEnabled) Color.Black else Color.Gray
+                            tint = if (silenceTrimEnabled) Color.Black else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
 
@@ -675,11 +850,11 @@ fun NowPlayingScreen(
                             Icon(
                                 imageVector = Icons.Default.Bedtime,
                                 contentDescription = "Sleep Timer",
-                                tint = if (sleepTimerActive) MaterialTheme.colorScheme.primary else Color.Gray
+                                tint = if (sleepTimerActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             if (sleepTimerActive) {
                                 Badge(modifier = Modifier.offset(x = 10.dp, y = (-10).dp)) {
-                                    Text(if (sleepEndAtChapter) "End" else "${TimeUnit.MILLISECONDS.toMinutes(sleepTimeRemaining)}m")
+                                    Text(if (sleepEndAtChapter) "End" else "${TimeUnit.MILLISECONDS.toMinutes(sleepTimeRemaining) + 1}m")
                                 }
                             }
                         }
@@ -690,7 +865,7 @@ fun NowPlayingScreen(
                     }
 
                     IconButton(onClick = onOpenAudioFX) {
-                        Icon(Icons.Default.GraphicEq, contentDescription = "Equalizer", tint = MaterialTheme.colorScheme.primary)
+                        Icon(Icons.Default.GraphicEq, contentDescription = stringResource(R.string.audio_fx), tint = MaterialTheme.colorScheme.primary)
                     }
                 }
             }

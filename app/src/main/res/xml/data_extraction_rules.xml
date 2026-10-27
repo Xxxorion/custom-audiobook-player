@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="FablewoodPreferences.xml" />
+        <exclude domain="sharedpref" path="SirinAudioPreferences.xml" />
+        <exclude domain="file" path="library.json" />
+        <exclude domain="file" path="covers" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="FablewoodPreferences.xml" />
+        <exclude domain="sharedpref" path="SirinAudioPreferences.xml" />
+        <exclude domain="file" path="library.json" />
+        <exclude domain="file" path="covers" />
+    </device-transfer>
+</data-extraction-rules>
+<!-- END OF FILE -->
