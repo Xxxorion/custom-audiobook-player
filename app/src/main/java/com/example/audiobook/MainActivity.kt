@@ -89,17 +89,22 @@ class PlayerBinder(
     }
 
     fun updatePlayingArtwork(book: Audiobook, artworkBytes: ByteArray?) {
-        if (artworkBytes == null || player.mediaItemCount == 0) return
+        if (artworkBytes == null || artworkBytes.isEmpty() || player.mediaItemCount != book.tracks.size) return
         try {
-            for (i in 0 until player.mediaItemCount) {
+            for (i in book.tracks.indices) {
+                val track = book.tracks[i]
                 val existing = player.getMediaItemAt(i)
+                if (existing.mediaMetadata.artworkData != null) continue
                 val updatedMeta = existing.mediaMetadata.buildUpon()
                     .setTitle(book.title)
                     .setArtist(book.author)
                     .setAlbumTitle(book.series)
+                    .setDisplayTitle(track.name)
                     .setArtworkData(artworkBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
                     .build()
-                val updatedItem = existing.buildUpon()
+                val updatedItem = MediaItem.Builder()
+                    .setUri(track.uri)
+                    .setMediaId(track.uri.toString())
                     .setMediaMetadata(updatedMeta)
                     .build()
                 player.replaceMediaItem(i, updatedItem)
@@ -131,7 +136,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // PHASE 1.8: Always pass applicationContext so Repository never leaks an Activity
         repository = AudiobookRepository(applicationContext)
         libraryViewModel = ViewModelProvider(this, LibraryViewModelFactory(repository))[LibraryViewModel::class.java]
 
@@ -266,7 +270,6 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // PHASE 1.2 & 2.11: Explicit folder pick uses READ flag only and distinguishes empty folder vs scan error
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let {
             val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -317,7 +320,6 @@ fun FablewoodAudiobookApp(
         binder.sendCustomCommand(AudiobookPlaybackService.ACTION_SET_VOLUME_BOOST, viewModel.volumeBoostEnabled)
     }
 
-    // Update lock-screen/notification JPEG cover art when cover finishes loading
     LaunchedEffect(viewModel.currentCoverArt, activeBook?.id) {
         val book = activeBook ?: return@LaunchedEffect
         val bmp = viewModel.currentCoverArt ?: return@LaunchedEffect
@@ -325,8 +327,9 @@ fun FablewoodAudiobookApp(
         binder.updatePlayingArtwork(book, jpegBytes)
     }
 
-    // PHASE 1.2: Startup load & non-destructive background rescan
     LaunchedEffect(Unit) {
+        requestNotificationPermissionIfNeeded()
+
         val savedUriStr = viewModel.repository.getSelectedFolderUri()
         if (!savedUriStr.isNullOrEmpty()) {
             viewModel.selectedFolderUri = savedUriStr
@@ -349,7 +352,6 @@ fun FablewoodAudiobookApp(
                 }
             }
 
-            // Background refresh: if it throws or returns empty when we already had books, keep the good cache!
             try {
                 val folderUri = Uri.parse(savedUriStr)
                 val scannedBooks = viewModel.repository.scanFolderForAudiobooks(folderUri)
@@ -376,7 +378,6 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // PHASE 1.1: Fixed Sleep Timer Coroutine (Not keyed on currentPosition or sleepTimeRemaining)
     LaunchedEffect(viewModel.sleepTimerActive, viewModel.sleepEndAtChapter, viewModel.isPlaying, viewModel.sleepTimerVersion) {
         if (viewModel.sleepTimerActive && viewModel.isPlaying && !viewModel.sleepEndAtChapter) {
             while (viewModel.sleepTimerActive && !viewModel.sleepEndAtChapter && viewModel.sleepTimeRemaining > 0L) {
@@ -392,7 +393,6 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // PHASE 1.1 & 4.25: Playback ticker (coalesces disk saves to every 10s, handles end-of-chapter sleep)
     LaunchedEffect(viewModel.isPlaying) {
         var ticksSinceSave = 0
         while (viewModel.isPlaying) {
@@ -445,9 +445,7 @@ fun FablewoodAudiobookApp(
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 viewModel.isPlaying = playing
-                if (playing) {
-                    requestNotificationPermissionIfNeeded()
-                } else {
+                if (!playing) {
                     viewModel.repository.markPauseTime()
                     if (player.mediaItemCount > 0) {
                         activeBook?.let { b ->
@@ -483,7 +481,6 @@ fun FablewoodAudiobookApp(
     val currentChapter = getCurrentChapter(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex)
     val currentChapterIndex = getCurrentChapterIndex(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex)
 
-    // PHASE 1.4: Book-level duration and read position for multi-file and single-file books
     val isMultiFileActive = activeBook != null && activeBook.tracks.size > 1
     val totalBookDurationMs = if (isMultiFileActive && viewModel.currentBookTrackDurations.isNotEmpty()) {
         val sum = bookDurationMs(viewModel.currentBookTrackDurations)
@@ -778,7 +775,6 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // PHASE 3.24: Long-Press Cover Options Dialog
     if (showCoverOptionsDialog && targetBookForCoverAction != null) {
         val targetBook = targetBookForCoverAction!!
         AlertDialog(
@@ -912,7 +908,6 @@ fun FablewoodAudiobookApp(
         )
     }
 
-    // PHASE 2.12, 3.17, 3.18: Audio FX Dialog (renamed from Equalizer, persists pitch, includes silence trim warning)
     if (showAudioFXDialog) {
         AlertDialog(
             onDismissRequest = { showAudioFXDialog = false },
@@ -1036,7 +1031,6 @@ fun FablewoodAudiobookApp(
         )
     }
 
-    // PHASE 3.19: Speed slider 0.5f..3.0f, 6 presets, Locale.US formatting
     if (showSpeedDialog) {
         AlertDialog(
             onDismissRequest = { showSpeedDialog = false },
@@ -1084,7 +1078,6 @@ fun FablewoodAudiobookApp(
         )
     }
 
-    // PHASE 3.20: Chapters dialog with Column + verticalScroll instead of LazyColumn
     if (showChaptersDialog) {
         AlertDialog(
             onDismissRequest = { showChaptersDialog = false },
@@ -1135,7 +1128,6 @@ fun FablewoodAudiobookApp(
         )
     }
 
-    // PHASE 1.3 & 3.20: Bookmarks dialog with trackIndex seeking and Column + verticalScroll
     if (showBookmarksDialog) {
         AlertDialog(
             onDismissRequest = { showBookmarksDialog = false },
