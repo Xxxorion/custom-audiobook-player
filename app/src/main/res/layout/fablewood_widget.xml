@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="96dp"
+    android:background="@drawable/widget_background"
+    android:padding="12dp">
+
+    <!-- Left: Rounded Book Cover Art -->
+    <ImageView
+        android:id="@+id/widget_cover"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:layout_alignParentStart="true"
+        android:layout_centerVertical="true"
+        android:scaleType="centerCrop"
+        android:contentDescription="@string/app_name" />
+
+    <!-- Top-Right Corner: Small Gold Audio Badge -->
+    <ImageView
+        android:id="@+id/widget_badge"
+        android:layout_width="18dp"
+        android:layout_height="18dp"
+        android:layout_alignParentEnd="true"
+        android:layout_alignParentTop="true"
+        android:src="@android:drawable/ic_lock_silent_mode_off"
+        android:tint="#D4AF37"
+        android:contentDescription="@null" />
+
+    <!-- Top-Middle: Book Title & Author -->
+    <LinearLayout
+        android:id="@+id/widget_text_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_toEndOf="@id/widget_cover"
+        android:layout_toStartOf="@id/widget_badge"
+        android:layout_alignParentTop="true"
+        android:layout_marginStart="14dp"
+        android:layout_marginEnd="8dp"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/widget_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Fablewood Audiobooks"
+            android:textColor="#F0F4F1"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:singleLine="true"
+            android:ellipsize="end" />
+
+        <TextView
+            android:id="@+id/widget_author"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:text="Tap to open library"
+            android:textColor="#B5C7BD"
+            android:textSize="13sp"
+            android:singleLine="true"
+            android:ellipsize="end" />
+    </LinearLayout>
+
+    <!-- Bottom-Middle: Rewind, Play/Pause, Fast-Forward Controls -->
+    <LinearLayout
+        android:id="@+id/widget_controls"
+        android:layout_width="match_parent"
+        android:layout_height="34dp"
+        android:layout_toEndOf="@id/widget_cover"
+        android:layout_alignParentBottom="true"
+        android:layout_marginStart="14dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:weightSum="3">
+
+        <ImageButton
+            android:id="@+id/widget_btn_rewind"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:background="@android:color/transparent"
+            android:src="@android:drawable/ic_media_rew"
+            android:tint="#E6D6A8"
+            android:scaleType="centerInside"
+            android:contentDescription="Rewind" />
+
+        <ImageButton
+            android:id="@+id/widget_btn_play_pause"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:background="@android:color/transparent"
+            android:src="@android:drawable/ic_media_play"
+            android:tint="#D4AF37"
+            android:scaleType="centerInside"
+            android:contentDescription="Play or Pause" />
+
+        <ImageButton
+            android:id="@+id/widget_btn_forward"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:background="@android:color/transparent"
+            android:src="@android:drawable/ic_media_ff"
+            android:tint="#E6D6A8"
+            android:scaleType="centerInside"
+            android:contentDescription="Fast Forward" />
+    </LinearLayout>
+
+</RelativeLayout>
+<!-- END OF FILE -->

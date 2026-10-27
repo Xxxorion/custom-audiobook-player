@@ -42,6 +42,21 @@
             </intent-filter>
         </service>
 
+        <receiver
+            android:name=".FablewoodWidgetProvider"
+            android:exported="true"
+            android:label="@string/app_header_title">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.example.audiobook.ACTION_WIDGET_PLAY_PAUSE" />
+                <action android:name="com.example.audiobook.ACTION_WIDGET_REWIND" />
+                <action android:name="com.example.audiobook.ACTION_WIDGET_FORWARD" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/fablewood_widget_info" />
+        </receiver>
+
     </application>
 
 </manifest>

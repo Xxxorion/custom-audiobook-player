@@ -62,6 +62,24 @@ class AudiobookPlaybackService : MediaLibraryService() {
                             applyVolumeBoost(true)
                         }
                     }
+
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        FablewoodWidgetProvider.updateAllWidgets(
+                            context = applicationContext,
+                            isPlayingOverride = isPlaying,
+                            titleOverride = mediaMetadata.title?.toString(),
+                            authorOverride = mediaMetadata.artist?.toString()
+                        )
+                    }
+
+                    override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+                        FablewoodWidgetProvider.updateAllWidgets(
+                            context = applicationContext,
+                            isPlayingOverride = isPlaying,
+                            titleOverride = mediaMetadata.title?.toString(),
+                            authorOverride = mediaMetadata.artist?.toString()
+                        )
+                    }
                 })
             }
 
@@ -246,6 +264,7 @@ class AudiobookPlaybackService : MediaLibraryService() {
     }
 
     override fun onDestroy() {
+        FablewoodWidgetProvider.updateAllWidgets(applicationContext, isPlayingOverride = false)
         serviceScope.cancel()
         releaseLoudnessEnhancer()
         mediaLibrarySession?.run {
@@ -265,9 +284,15 @@ fun buildBookMediaItems(book: Audiobook, artworkJpegBytes: ByteArray? = null): L
             .setArtist(book.author)
             .setAlbumTitle(book.series)
             .setDisplayTitle(track.name)
-        if (artworkJpegBytes != null) {
-            metaBuilder.setArtworkData(artworkJpegBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+
+        if (artworkJpegBytes != null && artworkJpegBytes.isNotEmpty()) {
+            try {
+                metaBuilder.setArtworkData(artworkJpegBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+            } catch (t: Throwable) {
+                Log.w("Fablewood", "Failed setting artwork data on MediaItem", t)
+            }
         }
+
         MediaItem.Builder()
             .setUri(track.uri)
             .setMediaId(track.uri.toString())
