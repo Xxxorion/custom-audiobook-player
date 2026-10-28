@@ -106,6 +106,46 @@ fun cleanAudiobookSearchQuery(rawTitle: String, rawAuthor: String = ""): String 
     return if (validAuthor) "$cleanedTitle $cleanedAuthor".trim() else cleanedTitle
 }
 
+// Automatically relabels duplicate, blank, or book-title-repeating chapters as "Chapter 1", "Chapter 2", etc.
+fun normalizeChapterTitles(rawChapters: List<Chapter>, bookTitle: String = ""): List<Chapter> {
+    if (rawChapters.isEmpty()) return listOf(Chapter("Chapter 1", 0L, 0L, 0))
+    val cleanBookTitle = bookTitle.trim()
+    val trimmedTitles = rawChapters.map { it.title.trim() }
+
+    val meaningfulTitles = trimmedTitles.filter {
+        it.isNotBlank() && !it.equals(cleanBookTitle, ignoreCase = true)
+    }
+    val uniqueMeaningfulCount = meaningfulTitles.map { it.lowercase(Locale.ROOT) }.distinct().size
+
+    // If all chapters have the same name, repeat the book title, or more than half are identical
+    val relabelAll = rawChapters.size > 1 && (
+        meaningfulTitles.isEmpty() ||
+            uniqueMeaningfulCount <= 1 ||
+            uniqueMeaningfulCount <= (rawChapters.size / 2)
+        )
+
+    if (relabelAll) {
+        return rawChapters.mapIndexed { index, chapter ->
+            chapter.copy(title = "Chapter ${index + 1}")
+        }
+    }
+
+    val titleCounts = trimmedTitles
+        .groupingBy { it.lowercase(Locale.ROOT) }
+        .eachCount()
+
+    return rawChapters.mapIndexed { index, chapter ->
+        val t = chapter.title.trim()
+        val isDuplicate = (titleCounts[t.lowercase(Locale.ROOT)] ?: 0) > 1
+        val isBookTitleOrBlank = t.isBlank() || (cleanBookTitle.isNotBlank() && t.equals(cleanBookTitle, ignoreCase = true))
+        if (isBookTitleOrBlank || isDuplicate) {
+            chapter.copy(title = "Chapter ${index + 1}")
+        } else {
+            chapter.copy(title = t)
+        }
+    }
+}
+
 // Pure functions exposed for JVM Unit Testing
 fun compareNatural(a: String, b: String): Int {
     var ia = 0
@@ -450,6 +490,24 @@ class AudiobookRepository(context: Context) {
         return list
     }
 
+    fun touchBookLastPlayed(bookId: String, timestampMs: Long = System.currentTimeMillis()) {
+        if (bookId.isEmpty()) return
+        prefs.edit().putString("last_book_id", bookId).apply()
+        synchronized(stateLock) {
+            val store = ensureStoreLoaded()
+            val progressObj = store.optJSONObject("progress") ?: JSONObject().also { store.put("progress", it) }
+            val entry = progressObj.optJSONObject(bookId) ?: JSONObject()
+            entry.put("lastPlayedMs", timestampMs)
+            progressObj.put(bookId, entry)
+        }
+        scheduleStoreFlush(immediate = false)
+    }
+
+    fun getBookLastPlayedTime(bookId: String): Long = synchronized(stateLock) {
+        val store = ensureStoreLoaded()
+        store.optJSONObject("progress")?.optJSONObject(bookId)?.optLong("lastPlayedMs", 0L) ?: 0L
+    }
+
     fun saveBookProgress(
         bookId: String,
         trackIndex: Int,
@@ -458,6 +516,7 @@ class AudiobookRepository(context: Context) {
         immediate: Boolean = true
     ) {
         if (bookId.isEmpty()) return
+        val now = System.currentTimeMillis()
         prefs.edit()
             .putString("last_book_id", bookId)
             .putLong("total_listen_ms", totalListenMs)
@@ -469,6 +528,7 @@ class AudiobookRepository(context: Context) {
             val entry = progressObj.optJSONObject(bookId) ?: JSONObject()
             entry.put("trackIndex", trackIndex.coerceAtLeast(0))
             entry.put("positionMs", positionMs.coerceAtLeast(0L))
+            entry.put("lastPlayedMs", now)
             progressObj.put(bookId, entry)
         }
         scheduleStoreFlush(immediate = immediate)
@@ -1161,7 +1221,7 @@ class AudiobookRepository(context: Context) {
                 }
             }
             if (embeddedChapters.isNotEmpty()) {
-                return@withContext embeddedChapters
+                return@withContext normalizeChapterTitles(embeddedChapters, book.title)
             }
         }
 
@@ -1194,8 +1254,7 @@ class AudiobookRepository(context: Context) {
             saveBookDurations(book.id, updatedDurations)
         }
 
-        if (chapters.isEmpty()) chapters.add(Chapter("Chapter 1", 0L, 0L, 0))
-        chapters
+        normalizeChapterTitles(chapters, book.title)
     }
 
     private fun extractM4bChapters(uri: Uri, trackIndex: Int = 0): List<Chapter> {
@@ -1628,7 +1687,6 @@ class AudiobookRepository(context: Context) {
         null
     }
 
-    // Multi-Engine Live Cover Search (Apple Books Square Audiobooks -> Google Books -> Open Library)
     suspend fun searchCoverCandidatesOnline(rawQuery: String): List<CoverSearchCandidate> = withContext(Dispatchers.IO) {
         val cleanQuery = cleanAudiobookSearchQuery(rawQuery)
         if (cleanQuery.isBlank()) return@withContext emptyList()
@@ -1636,7 +1694,6 @@ class AudiobookRepository(context: Context) {
         val candidates = mutableListOf<CoverSearchCandidate>()
         val seenUrls = mutableSetOf<String>()
 
-        // 1. Apple Books / iTunes Audiobook API (True square 600x600 audiobook covers)
         try {
             val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
             val itunesUrl = URL("https://itunes.apple.com/search?term=$encoded&media=audiobook&entity=audiobook&limit=6")
@@ -1673,7 +1730,6 @@ class AudiobookRepository(context: Context) {
             Log.w(TAG, "iTunes audiobook cover search failed for '$cleanQuery'", t)
         }
 
-        // 2. Google Books API
         if (candidates.size < 8) {
             try {
                 val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
@@ -1715,7 +1771,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // 3. Open Library API fallback
         if (candidates.size < 8) {
             try {
                 val encoded = URLEncoder.encode(cleanQuery, "UTF-8")

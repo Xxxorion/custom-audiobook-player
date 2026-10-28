@@ -81,6 +81,7 @@ class PlayerBinder(
     }
 
     fun playBook(book: Audiobook, trackIndex: Int, positionMs: Long, autoPlay: Boolean) {
+        viewModel.repository.touchBookLastPlayed(book.id)
         player.playWhenReady = autoPlay
         player.stop()
         player.clearMediaItems()
@@ -592,6 +593,7 @@ fun FablewoodAudiobookApp(
             player.pause()
         } else {
             requestNotificationPermissionIfNeeded()
+            activeBook?.let { viewModel.repository.touchBookLastPlayed(it.id) }
             player.play()
         }
     }
@@ -812,14 +814,51 @@ fun FablewoodAudiobookApp(
                 }
             ) { innerPadding ->
                 Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
-                    val displayedBooks = viewModel.books.filter {
-                        if (viewModel.searchQuery.isEmpty()) true
-                        else it.title.contains(viewModel.searchQuery, ignoreCase = true) || it.author.contains(viewModel.searchQuery, ignoreCase = true)
-                    }.let { list ->
-                        when (viewModel.sortBy) {
-                            "TITLE" -> list.sortedWith { a, b -> compareNatural(a.title, b.title) }
-                            "AUTHOR" -> list.sortedWith { a, b -> compareNatural(a.author, b.author) }
-                            else -> list
+                    // Always pin the currently active / last-played book to index 0 at the top of the bookshelf
+                    val displayedBooks = remember(
+                        viewModel.books,
+                        viewModel.searchQuery,
+                        viewModel.sortBy,
+                        viewModel.currentBookId,
+                        viewModel.progressRevision
+                    ) {
+                        val filtered = viewModel.books.filter {
+                            if (viewModel.searchQuery.isEmpty()) true
+                            else it.title.contains(viewModel.searchQuery, ignoreCase = true) ||
+                                it.author.contains(viewModel.searchQuery, ignoreCase = true)
+                        }
+
+                        val activeId = viewModel.currentBookId.ifEmpty {
+                            viewModel.repository.getLastBookId() ?: ""
+                        }
+
+                        val baseSorted = when (viewModel.sortBy) {
+                            "TITLE" -> filtered.sortedWith { a, b -> compareNatural(a.title, b.title) }
+                            "AUTHOR" -> filtered.sortedWith { a, b -> compareNatural(a.author, b.author) }
+                            else -> {
+                                filtered.sortedWith { a, b ->
+                                    val timeA = viewModel.repository.getBookLastPlayedTime(a.id)
+                                    val timeB = viewModel.repository.getBookLastPlayedTime(b.id)
+                                    if (timeA != timeB) {
+                                        timeB.compareTo(timeA)
+                                    } else {
+                                        val posA = viewModel.repository.getBookPosition(a.id)
+                                        val posB = viewModel.repository.getBookPosition(b.id)
+                                        if (posA != posB) {
+                                            posB.compareTo(posA)
+                                        } else {
+                                            0
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (activeId.isNotEmpty()) {
+                            val (pinned, rest) = baseSorted.partition { it.id == activeId }
+                            pinned + rest
+                        } else {
+                            baseSorted
                         }
                     }
 
@@ -866,6 +905,8 @@ fun FablewoodAudiobookApp(
                             onAutoScanDevice = { triggerAutoScanWithPermission() },
                             onChooseFolder = { folderPicker.launch(null) },
                             onSelectBook = { book ->
+                                viewModel.repository.touchBookLastPlayed(book.id)
+                                viewModel.progressRevision++
                                 if (book.id == viewModel.currentBookId && player.mediaItemCount > 0) {
                                     viewModel.isPlayerFullScreen = true
                                 } else {
