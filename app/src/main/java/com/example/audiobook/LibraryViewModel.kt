@@ -52,13 +52,18 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var completedBooksCount by mutableIntStateOf(repository.loadCompletedBookIds().size)
     var currentCoverArt by mutableStateOf<Bitmap?>(null)
 
-    // Revision counters so inactive shelf cards only reload when cover or saved progress changes
     var coverRevision by mutableIntStateOf(0)
     var progressRevision by mutableIntStateOf(0)
+
+    // Live Cover Search dialog state
+    var coverSearchCandidates by mutableStateOf<List<CoverSearchCandidate>>(emptyList())
+    var isSearchingCovers by mutableStateOf(false)
+    var isBatchFetchingCovers by mutableStateOf(false)
 
     private var chapterJob: Job? = null
     private var coverJob: Job? = null
     private var durationsJob: Job? = null
+    private var coverSearchJob: Job? = null
 
     fun selectBookMetadata(book: Audiobook, isDifferentBook: Boolean) {
         currentBookId = book.id
@@ -186,6 +191,28 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
         }
     }
 
+    fun searchOnlineCoverCandidates(query: String) {
+        coverSearchJob?.cancel()
+        isSearchingCovers = true
+        coverSearchCandidates = emptyList()
+        coverSearchJob = viewModelScope.launch {
+            val results = repository.searchCoverCandidatesOnline(query)
+            coverSearchCandidates = results
+            isSearchingCovers = false
+        }
+    }
+
+    fun selectOnlineCoverCandidate(bookId: String, candidate: CoverSearchCandidate, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            val bmp = repository.applyCoverSearchCandidate(bookId, candidate)
+            if (currentBookId == bookId) {
+                currentCoverArt = bmp
+            }
+            coverRevision++
+            onDone()
+        }
+    }
+
     fun searchOnlineCover(book: Audiobook, onResult: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
             val bmp = repository.fetchAndSaveOnlineCoverArt(book)
@@ -198,6 +225,30 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
             } else {
                 onResult(false)
             }
+        }
+    }
+
+    fun autoFillMissingCovers(onComplete: (Int) -> Unit = {}) {
+        if (isBatchFetchingCovers) return
+        isBatchFetchingCovers = true
+        viewModelScope.launch {
+            var updatedCount = 0
+            val snapshot = books.toList()
+            for (book in snapshot) {
+                val existing = repository.getOrFetchCoverArt(book)
+                if (existing == null) {
+                    val fetched = repository.fetchAndSaveOnlineCoverArt(book)
+                    if (fetched != null) {
+                        updatedCount++
+                        if (currentBookId == book.id) {
+                            currentCoverArt = fetched
+                        }
+                        coverRevision++
+                    }
+                }
+            }
+            isBatchFetchingCovers = false
+            onComplete(updatedCount)
         }
     }
 

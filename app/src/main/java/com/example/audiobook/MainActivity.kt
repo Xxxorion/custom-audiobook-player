@@ -15,6 +15,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -31,9 +32,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
@@ -48,6 +52,7 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.net.URLEncoder
 import java.util.Locale
 import kotlin.math.round
 
@@ -234,6 +239,8 @@ fun FablewoodAudiobookApp(
 
     var targetBookForCoverAction by remember { mutableStateOf<Audiobook?>(null) }
     var showCoverOptionsDialog by remember { mutableStateOf(false) }
+    var liveCoverSearchQuery by remember { mutableStateOf("") }
+
     var showViewDialog by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -333,7 +340,11 @@ fun FablewoodAudiobookApp(
     val customCoverLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { selectedUri ->
             targetBookForCoverAction?.let { book ->
-                viewModel.setCustomCover(book.id, selectedUri)
+                viewModel.setCustomCover(book.id, selectedUri) { success ->
+                    if (success) {
+                        Toast.makeText(context, "Custom cover saved!", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
         }
     }
@@ -452,7 +463,6 @@ fun FablewoodAudiobookApp(
                 }
             }
         } else {
-            // Default AUTO mode: automatically scan Downloads & Audiobooks if permission is granted, or ask once on first launch
             if (hasAudioReadPermission(context)) {
                 runAutoDeviceScan(explicitUserAction = false)
             } else if (viewModel.books.isEmpty()) {
@@ -615,6 +625,23 @@ fun FablewoodAudiobookApp(
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
                         folderPicker.launch(null)
+                    }
+                )
+                NavigationDrawerItem(
+                    icon = { Icon(Icons.Default.ImageSearch, contentDescription = null) },
+                    label = {
+                        Text(
+                            if (viewModel.isBatchFetchingCovers) "Finding Missing Covers..."
+                            else "Auto-Find Missing Covers"
+                        )
+                    },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        Toast.makeText(context, "Searching online for missing covers...", Toast.LENGTH_SHORT).show()
+                        viewModel.autoFillMissingCovers { count ->
+                            Toast.makeText(context, "Updated $count book cover(s)", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 )
                 NavigationDrawerItem(
@@ -859,7 +886,10 @@ fun FablewoodAudiobookApp(
                             },
                             onLongPressBook = { book ->
                                 targetBookForCoverAction = book
+                                val initialCleanQuery = cleanAudiobookSearchQuery(book.title, book.author)
+                                liveCoverSearchQuery = initialCleanQuery
                                 showCoverOptionsDialog = true
+                                viewModel.searchOnlineCoverCandidates(initialCleanQuery)
                             }
                         )
                     }
@@ -868,34 +898,160 @@ fun FablewoodAudiobookApp(
         }
     }
 
+    // Interactive Live Cover Picker Dialog (Apple Books Square + Google Books + Open Library + Device/Web)
     if (showCoverOptionsDialog && targetBookForCoverAction != null) {
         val targetBook = targetBookForCoverAction!!
         AlertDialog(
             onDismissRequest = { showCoverOptionsDialog = false },
             title = { Text(stringResource(R.string.cover_art_options)) },
             text = {
-                Column {
-                    TextButton(
-                        onClick = {
-                            showCoverOptionsDialog = false
-                            customCoverLauncher.launch("image/*")
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(stringResource(R.string.choose_image))
-                    }
-                    TextButton(
-                        onClick = {
-                            showCoverOptionsDialog = false
-                            Toast.makeText(context, "Searching Open Library...", Toast.LENGTH_SHORT).show()
-                            viewModel.searchOnlineCover(targetBook) { found ->
-                                val msg = if (found) "Cover updated" else "No cover found on Open Library"
-                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 440.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedTextField(
+                        value = liveCoverSearchQuery,
+                        onValueChange = { liveCoverSearchQuery = it },
+                        label = { Text("Search book title or author") },
+                        singleLine = true,
+                        trailingIcon = {
+                            IconButton(onClick = { viewModel.searchOnlineCoverCandidates(liveCoverSearchQuery) }) {
+                                Icon(Icons.Default.Search, contentDescription = "Search Covers", tint = MaterialTheme.colorScheme.primary)
                             }
                         },
                         modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(stringResource(R.string.search_open_library))
+                        OutlinedButton(
+                            onClick = {
+                                showCoverOptionsDialog = false
+                                customCoverLauncher.launch("image/*")
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Device Image", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                try {
+                                    val encoded = URLEncoder.encode("$liveCoverSearchQuery audiobook cover", "UTF-8")
+                                    val webIntent = Intent(
+                                        Intent.ACTION_VIEW,
+                                        Uri.parse("https://www.google.com/search?tbm=isch&q=$encoded")
+                                    )
+                                    context.startActivity(webIntent)
+                                } catch (t: Throwable) {
+                                    Log.w(TAG, "Failed launching web image search", t)
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Public, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Web Search", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+
+                    HorizontalDivider()
+
+                    if (viewModel.isSearchingCovers) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 28.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.height(10.dp))
+                                Text(
+                                    text = "Searching Apple Books, Google Books & Open Library...",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    } else if (viewModel.coverSearchCandidates.isEmpty()) {
+                        Text(
+                            text = "No covers found for \"$liveCoverSearchQuery\". Edit the title above and tap the search icon, or use Web Search.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp)
+                        )
+                    } else {
+                        Text(
+                            text = "Tap a cover to apply:",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+
+                        viewModel.coverSearchCandidates.chunked(2).forEach { rowItems ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                rowItems.forEach { candidate ->
+                                    Card(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clickable {
+                                                showCoverOptionsDialog = false
+                                                Toast.makeText(context, "Applying high-res cover...", Toast.LENGTH_SHORT).show()
+                                                viewModel.selectOnlineCoverCandidate(targetBook.id, candidate) {
+                                                    Toast.makeText(context, "Cover updated!", Toast.LENGTH_SHORT).show()
+                                                }
+                                            },
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(8.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Image(
+                                                bitmap = candidate.previewBitmap.asImageBitmap(),
+                                                contentDescription = candidate.title,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .aspectRatio(1f)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                            )
+                                            Spacer(Modifier.height(6.dp))
+                                            Text(
+                                                text = candidate.title,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = candidate.source,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
+                                if (rowItems.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
                     }
                 }
             },

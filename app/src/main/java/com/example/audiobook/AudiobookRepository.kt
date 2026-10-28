@@ -74,6 +74,38 @@ data class Bookmark(
     val timestampStr: String = SimpleDateFormat("MMM dd, HH:mm", Locale.getDefault()).format(Date())
 )
 
+data class CoverSearchCandidate(
+    val title: String,
+    val author: String,
+    val source: String,
+    val previewBitmap: Bitmap,
+    val fullResUrl: String
+)
+
+// Cleans messy audiobook filenames and strips "Unknown Author" before querying cover APIs
+fun cleanAudiobookSearchQuery(rawTitle: String, rawAuthor: String = ""): String {
+    var cleanedTitle = rawTitle
+        .replace('_', ' ')
+        .replace(Regex("\\[[^]]*]"), " ")
+        .replace(Regex("\\([^)]*\\)"), " ")
+        .replace(Regex("(?i)\\b(unabridged|abridged|audiobook|m4b|mp3|64kbps|128kbps|disc\\s*\\d+|part\\s*\\d+|cd\\s*\\d+|book\\s*\\d+)\\b"), " ")
+        .replace(Regex("^\\s*\\d+\\s*[-._]\\s*"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+    if (cleanedTitle.isBlank()) {
+        cleanedTitle = rawTitle.trim()
+    }
+
+    val cleanedAuthor = rawAuthor.trim()
+    val validAuthor = cleanedAuthor.isNotBlank() &&
+        !cleanedAuthor.equals("Unknown Author", ignoreCase = true) &&
+        !cleanedAuthor.equals("Unknown", ignoreCase = true) &&
+        !cleanedTitle.contains(cleanedAuthor, ignoreCase = true)
+
+    return if (validAuthor) "$cleanedTitle $cleanedAuthor".trim() else cleanedTitle
+}
+
 // Pure functions exposed for JVM Unit Testing
 fun compareNatural(a: String, b: String): Int {
     var ia = 0
@@ -209,7 +241,6 @@ class AudiobookRepository(context: Context) {
 
     companion object {
         private const val TAG = "Fablewood"
-        // 5-minute cutoff (300,000 ms) to filter out songs, ringtones, and short audio clips in Downloads
         const val MIN_AUDIOBOOK_DURATION_MS = 5 * 60 * 1000L
 
         private val SUPPORTED_EXTENSIONS = setOf(
@@ -642,7 +673,6 @@ class AudiobookRepository(context: Context) {
         scheduleStoreFlush(immediate = true)
     }
 
-    // Smart Device Auto-Scanner: Scans Downloads, Audiobooks, Books, & all .m4b files with a 5-minute cutoff
     private data class MediaStoreAudioEntry(
         val id: Long,
         val displayName: String,
@@ -766,7 +796,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // 1. Loose files in root of Downloads / Audiobooks: must be >= 5 minutes (or .m4b)
         val sortedLoose = looseEntries.sortedWith { a, b -> compareNatural(a.displayName, b.displayName) }
         for (file in sortedLoose) {
             if (file.extension == "m4b" || file.isAudiobookFlag || file.durationMs >= MIN_AUDIOBOOK_DURATION_MS) {
@@ -799,8 +828,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // 2. Subfolder groups (e.g., Download/Author/Book or Download/Book Title):
-        // Keep the full folder if total duration >= 5 minutes (preserving short Prologue tracks)
         val sortedGroupKeys = subfolderGroups.keys.sortedWith { a, b -> compareNatural(a, b) }
         for (folderKey in sortedGroupKeys) {
             val group = subfolderGroups[folderKey] ?: continue
@@ -878,7 +905,6 @@ class AudiobookRepository(context: Context) {
         return withoutFile.trimStart('/')
     }
 
-    // Manual DocumentsContract Tree Scanner (Custom Folder Picker)
     suspend fun scanFolderForAudiobooks(folderUri: Uri): List<Audiobook> = withContext(Dispatchers.IO) {
         val bookList = mutableListOf<Audiobook>()
         val rootDocId = DocumentsContract.getTreeDocumentId(folderUri)
@@ -1602,20 +1628,194 @@ class AudiobookRepository(context: Context) {
         null
     }
 
-    suspend fun fetchAndSaveOnlineCoverArt(book: Audiobook): Bitmap? = withContext(Dispatchers.IO) {
-        val onlineBmp = fetchOnlineCoverArt(book.title, book.author)
-        if (onlineBmp != null) {
-            saveBitmapToCache(book.id, onlineBmp)
-            CoverMemoryCache.cache.put(book.id, onlineBmp)
+    // Multi-Engine Live Cover Search (Apple Books Square Audiobooks -> Google Books -> Open Library)
+    suspend fun searchCoverCandidatesOnline(rawQuery: String): List<CoverSearchCandidate> = withContext(Dispatchers.IO) {
+        val cleanQuery = cleanAudiobookSearchQuery(rawQuery)
+        if (cleanQuery.isBlank()) return@withContext emptyList()
+
+        val candidates = mutableListOf<CoverSearchCandidate>()
+        val seenUrls = mutableSetOf<String>()
+
+        // 1. Apple Books / iTunes Audiobook API (True square 600x600 audiobook covers)
+        try {
+            val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+            val itunesUrl = URL("https://itunes.apple.com/search?term=$encoded&media=audiobook&entity=audiobook&limit=6")
+            val jsonText = readHttpText(itunesUrl)
+            if (jsonText != null) {
+                val results = JSONObject(jsonText).optJSONArray("results")
+                if (results != null) {
+                    for (i in 0 until results.length()) {
+                        if (candidates.size >= 8) break
+                        val item = results.getJSONObject(i)
+                        val art100 = item.optString("artworkUrl100", "")
+                        if (art100.isNotBlank()) {
+                            val previewUrl = art100.replace("100x100bb", "300x300bb")
+                            val fullUrl = art100.replace("100x100bb", "600x600bb")
+                            if (seenUrls.add(fullUrl)) {
+                                val bmp = downloadBitmapFromUrl(previewUrl, 240, 240)
+                                if (bmp != null) {
+                                    candidates.add(
+                                        CoverSearchCandidate(
+                                            title = item.optString("collectionName", cleanQuery),
+                                            author = item.optString("artistName", ""),
+                                            source = "Audiobook (Square)",
+                                            previewBitmap = bmp,
+                                            fullResUrl = fullUrl
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "iTunes audiobook cover search failed for '$cleanQuery'", t)
         }
-        onlineBmp
+
+        // 2. Google Books API
+        if (candidates.size < 8) {
+            try {
+                val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+                val gbooksUrl = URL("https://www.googleapis.com/books/v1/volumes?q=$encoded&maxResults=5")
+                val jsonText = readHttpText(gbooksUrl)
+                if (jsonText != null) {
+                    val items = JSONObject(jsonText).optJSONArray("items")
+                    if (items != null) {
+                        for (i in 0 until items.length()) {
+                            if (candidates.size >= 8) break
+                            val volInfo = items.getJSONObject(i).optJSONObject("volumeInfo") ?: continue
+                            val imageLinks = volInfo.optJSONObject("imageLinks") ?: continue
+                            val rawThumb = imageLinks.optString("thumbnail", imageLinks.optString("smallThumbnail", ""))
+                            if (rawThumb.isNotBlank()) {
+                                val httpsThumb = rawThumb.replace("http://", "https://")
+                                val highRes = httpsThumb.replace("zoom=1", "zoom=2")
+                                if (seenUrls.add(highRes)) {
+                                    val bmp = downloadBitmapFromUrl(httpsThumb, 240, 240)
+                                    if (bmp != null) {
+                                        val authorsArr = volInfo.optJSONArray("authors")
+                                        val firstAuthor = if (authorsArr != null && authorsArr.length() > 0) authorsArr.optString(0, "") else ""
+                                        candidates.add(
+                                            CoverSearchCandidate(
+                                                title = volInfo.optString("title", cleanQuery),
+                                                author = firstAuthor,
+                                                source = "Google Books",
+                                                previewBitmap = bmp,
+                                                fullResUrl = highRes
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Google Books cover search failed for '$cleanQuery'", t)
+            }
+        }
+
+        // 3. Open Library API fallback
+        if (candidates.size < 8) {
+            try {
+                val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+                val olUrl = URL("https://openlibrary.org/search.json?q=$encoded&limit=4")
+                val jsonText = readHttpText(olUrl)
+                if (jsonText != null) {
+                    val docs = JSONObject(jsonText).optJSONArray("docs")
+                    if (docs != null) {
+                        for (i in 0 until docs.length()) {
+                            if (candidates.size >= 8) break
+                            val doc = docs.getJSONObject(i)
+                            val coverI = doc.optInt("cover_i", -1)
+                            if (coverI != -1) {
+                                val mediumUrl = "https://covers.openlibrary.org/b/id/$coverI-M.jpg"
+                                val largeUrl = "https://covers.openlibrary.org/b/id/$coverI-L.jpg"
+                                if (seenUrls.add(largeUrl)) {
+                                    val bmp = downloadBitmapFromUrl(mediumUrl, 240, 240)
+                                    if (bmp != null) {
+                                        val authorArr = doc.optJSONArray("author_name")
+                                        val firstAuthor = if (authorArr != null && authorArr.length() > 0) authorArr.optString(0, "") else ""
+                                        candidates.add(
+                                            CoverSearchCandidate(
+                                                title = doc.optString("title", cleanQuery),
+                                                author = firstAuthor,
+                                                source = "Open Library",
+                                                previewBitmap = bmp,
+                                                fullResUrl = largeUrl
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Open Library cover search failed for '$cleanQuery'", t)
+            }
+        }
+
+        candidates
+    }
+
+    suspend fun applyCoverSearchCandidate(bookId: String, candidate: CoverSearchCandidate): Bitmap = withContext(Dispatchers.IO) {
+        val highResBmp = downloadBitmapFromUrl(candidate.fullResUrl, 500, 500) ?: candidate.previewBitmap
+        saveBitmapToCache(bookId, highResBmp)
+        CoverMemoryCache.cache.put(bookId, highResBmp)
+        highResBmp
+    }
+
+    suspend fun fetchAndSaveOnlineCoverArt(book: Audiobook): Bitmap? = withContext(Dispatchers.IO) {
+        val query = cleanAudiobookSearchQuery(book.title, book.author)
+        val candidates = searchCoverCandidatesOnline(query)
+        val best = candidates.firstOrNull() ?: return@withContext null
+        applyCoverSearchCandidate(book.id, best)
+    }
+
+    private fun readHttpText(url: URL): String? {
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            connectTimeout = 6000
+            readTimeout = 6000
+            setRequestProperty("User-Agent", "FablewoodAudiobooks/1.1")
+        }
+        return try {
+            if (conn.responseCode in 200..299) {
+                conn.inputStream.bufferedReader().use { it.readText() }
+            } else null
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun downloadBitmapFromUrl(urlStr: String, reqWidth: Int, reqHeight: Int): Bitmap? {
+        return try {
+            val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 6000
+                readTimeout = 6000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "FablewoodAudiobooks/1.1")
+            }
+            try {
+                if (conn.responseCode in 200..299) {
+                    conn.inputStream.use { stream ->
+                        decodeSampledBitmapFromStreamWithExif(stream, reqWidth, reqHeight)
+                    }
+                } else null
+            } finally {
+                conn.disconnect()
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed downloading cover bitmap from $urlStr", t)
+            null
+        }
     }
 
     suspend fun saveCustomCoverArt(bookId: String, uri: Uri): Bitmap? = withContext(Dispatchers.IO) {
         try {
             val stream = appContext.contentResolver.openInputStream(uri)
             if (stream != null) {
-                val bitmap = decodeSampledBitmapFromStreamWithExif(stream, 350, 350)
+                val bitmap = decodeSampledBitmapFromStreamWithExif(stream, 450, 450)
                 stream.close()
                 if (bitmap != null) {
                     saveBitmapToCache(bookId, bitmap)
@@ -1637,31 +1837,6 @@ class AudiobookRepository(context: Context) {
             out.toByteArray()
         } catch (t: Throwable) {
             Log.w(TAG, "Failed compressing cover art to JPEG", t)
-            null
-        }
-    }
-
-    private fun fetchOnlineCoverArt(title: String, author: String): Bitmap? {
-        return try {
-            val query = URLEncoder.encode("$title $author", "UTF-8")
-            val url = URL("https://openlibrary.org/search.json?q=$query&limit=1")
-            val conn = url.openConnection() as HttpURLConnection
-            conn.connectTimeout = 5000
-            conn.readTimeout = 5000
-            val jsonText = conn.inputStream.bufferedReader().use { it.readText() }
-            val docs = JSONObject(jsonText).optJSONArray("docs")
-            if (docs != null && docs.length() > 0) {
-                val coverI = docs.getJSONObject(0).optInt("cover_i", -1)
-                if (coverI != -1) {
-                    val imgUrl = URL("https://covers.openlibrary.org/b/id/$coverI-M.jpg")
-                    imgUrl.openStream().use { stream ->
-                        return decodeSampledBitmapFromStreamWithExif(stream, 350, 350)
-                    }
-                }
-            }
-            null
-        } catch (t: Throwable) {
-            Log.w(TAG, "Open Library cover search failed for '$title'", t)
             null
         }
     }
