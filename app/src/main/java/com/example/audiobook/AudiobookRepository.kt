@@ -1,5 +1,6 @@
 package com.example.audiobook
 
+import android.content.ContentUris
 import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Bitmap
@@ -9,7 +10,9 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.util.Log
 import android.util.LruCache
 import androidx.exifinterface.media.ExifInterface
@@ -206,10 +209,16 @@ class AudiobookRepository(context: Context) {
 
     companion object {
         private const val TAG = "Fablewood"
+        // 5-minute cutoff (300,000 ms) to filter out songs, ringtones, and short audio clips in Downloads
+        const val MIN_AUDIOBOOK_DURATION_MS = 5 * 60 * 1000L
+
         private val SUPPORTED_EXTENSIONS = setOf(
             "mp3", "m4a", "m4b", "m4p", "mp4", "aac", "ogg", "opus", "flac", "wav"
         )
         private val CONTAINER_EXTENSIONS = setOf("m4a", "m4b", "m4p", "mp4")
+        private val AUTO_SCAN_ROOT_FOLDERS = setOf(
+            "download", "downloads", "audiobooks", "audiobook", "books", "book", "audible"
+        )
         private val DISC_FOLDER_REGEX = Regex("^(disc|cd|part|disk)\\s*\\d+.*$", RegexOption.IGNORE_CASE)
 
         @Volatile
@@ -331,6 +340,14 @@ class AudiobookRepository(context: Context) {
     fun getPreferences(): SharedPreferences = prefs
     fun getSelectedFolderUri(): String? = prefs.getString("selected_folder", "")
     fun saveSelectedFolderUri(uriStr: String) = prefs.edit().putString("selected_folder", uriStr).apply()
+
+    fun getScanMode(): String {
+        val defaultMode = if (!getSelectedFolderUri().isNullOrEmpty()) "FOLDER" else "AUTO"
+        return prefs.getString("scan_mode", defaultMode) ?: defaultMode
+    }
+
+    fun saveScanMode(mode: String) = prefs.edit().putString("scan_mode", mode).apply()
+
     fun getLastBookId(): String? = prefs.getString("last_book_id", "")
 
     fun loadPlaybackPitch(): Float = prefs.getFloat("playback_pitch", 1.0f).coerceIn(0.75f, 1.25f)
@@ -625,7 +642,243 @@ class AudiobookRepository(context: Context) {
         scheduleStoreFlush(immediate = true)
     }
 
-    // PHASE 5: Fast DocumentsContract Tree Scanner
+    // Smart Device Auto-Scanner: Scans Downloads, Audiobooks, Books, & all .m4b files with a 5-minute cutoff
+    private data class MediaStoreAudioEntry(
+        val id: Long,
+        val displayName: String,
+        val title: String,
+        val album: String,
+        val artist: String,
+        val durationMs: Long,
+        val relativeSegments: List<String>,
+        val isAudiobookFlag: Boolean,
+        val uri: Uri
+    ) {
+        val extension: String get() = displayName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        val isContainer: Boolean get() = extension in CONTAINER_EXTENSIONS
+    }
+
+    suspend fun scanDeviceForAudiobooks(): List<Audiobook> = withContext(Dispatchers.IO) {
+        val entries = mutableListOf<MediaStoreAudioEntry>()
+        val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+
+        val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.TITLE,
+                MediaStore.Audio.Media.ALBUM,
+                MediaStore.Audio.Media.ARTIST,
+                MediaStore.Audio.Media.DURATION,
+                MediaStore.Audio.Media.RELATIVE_PATH,
+                MediaStore.Audio.Media.IS_AUDIOBOOK
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.TITLE,
+                MediaStore.Audio.Media.ALBUM,
+                MediaStore.Audio.Media.ARTIST,
+                MediaStore.Audio.Media.DURATION,
+                MediaStore.Audio.Media.DATA
+            )
+        }
+
+        try {
+            appContext.contentResolver.query(collection, projection, null, null, null)?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                val titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+                val albumCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+                val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+                val durCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                val relCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
+                } else -1
+                val isAbCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.Audio.Media.IS_AUDIOBOOK)
+                } else -1
+                @Suppress("DEPRECATION")
+                val dataCol = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
+                } else -1
+
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idCol)
+                    val displayName = cursor.getString(nameCol) ?: continue
+                    val ext = displayName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                    if (ext !in SUPPORTED_EXTENSIONS) continue
+
+                    val title = cursor.getString(titleCol)?.trim() ?: ""
+                    val album = cursor.getString(albumCol)?.trim() ?: ""
+                    val artist = cursor.getString(artistCol)?.trim() ?: ""
+                    val durationMs = cursor.getLong(durCol).coerceAtLeast(0L)
+                    val isAudiobookFlag = if (isAbCol != -1) cursor.getInt(isAbCol) != 0 else false
+
+                    val relPath = if (relCol != -1) {
+                        cursor.getString(relCol) ?: ""
+                    } else if (dataCol != -1) {
+                        val fullPath = cursor.getString(dataCol) ?: ""
+                        extractRelativeFolderFromLegacyPath(fullPath)
+                    } else ""
+
+                    val segments = relPath.replace('\\', '/').trim('/').split('/').filter { it.isNotBlank() }
+                    val topFolder = segments.firstOrNull()?.lowercase(Locale.ROOT) ?: ""
+
+                    val isEligibleLocation = ext == "m4b" ||
+                        isAudiobookFlag ||
+                        topFolder in AUTO_SCAN_ROOT_FOLDERS
+
+                    if (isEligibleLocation) {
+                        val contentUri = ContentUris.withAppendedId(collection, id)
+                        entries.add(
+                            MediaStoreAudioEntry(
+                                id = id,
+                                displayName = displayName,
+                                title = title,
+                                album = album,
+                                artist = artist,
+                                durationMs = durationMs,
+                                relativeSegments = segments,
+                                isAudiobookFlag = isAudiobookFlag,
+                                uri = contentUri
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "MediaStore device scan failed", t)
+        }
+
+        val books = mutableListOf<Audiobook>()
+        val looseEntries = mutableListOf<MediaStoreAudioEntry>()
+        val subfolderGroups = linkedMapOf<String, MutableList<MediaStoreAudioEntry>>()
+
+        for (entry in entries) {
+            if (entry.relativeSegments.size <= 1) {
+                looseEntries.add(entry)
+            } else {
+                val folderKey = entry.relativeSegments.joinToString("/")
+                subfolderGroups.getOrPut(folderKey) { mutableListOf() }.add(entry)
+            }
+        }
+
+        // 1. Loose files in root of Downloads / Audiobooks: must be >= 5 minutes (or .m4b)
+        val sortedLoose = looseEntries.sortedWith { a, b -> compareNatural(a.displayName, b.displayName) }
+        for (file in sortedLoose) {
+            if (file.extension == "m4b" || file.isAudiobookFlag || file.durationMs >= MIN_AUDIOBOOK_DURATION_MS) {
+                val cleanName = file.displayName.substringBeforeLast('.')
+                val fallbackTitle = when {
+                    !isGenericTitle(file.album) && !file.album.equals("Download", ignoreCase = true) -> file.album
+                    !isGenericTitle(file.title) -> file.title
+                    else -> cleanName
+                }
+                val fallbackAuthor = if (isValidMediaStoreArtist(file.artist)) file.artist else "Unknown Author"
+                val (resolvedTitle, resolvedAuthor) = extractEmbeddedBookMetadata(
+                    uri = file.uri,
+                    fallbackTitle = fallbackTitle,
+                    fallbackAuthor = fallbackAuthor,
+                    isSingleContainer = file.isContainer
+                )
+                val track = AudioTrack(name = resolvedTitle, uri = file.uri, isM4b = file.isContainer)
+                books.add(
+                    Audiobook(
+                        id = file.uri.toString(),
+                        title = resolvedTitle,
+                        author = resolvedAuthor,
+                        series = "",
+                        tracks = listOf(track)
+                    )
+                )
+                if (file.durationMs > 0L) {
+                    saveBookDurations(file.uri.toString(), listOf(file.durationMs))
+                }
+            }
+        }
+
+        // 2. Subfolder groups (e.g., Download/Author/Book or Download/Book Title):
+        // Keep the full folder if total duration >= 5 minutes (preserving short Prologue tracks)
+        val sortedGroupKeys = subfolderGroups.keys.sortedWith { a, b -> compareNatural(a, b) }
+        for (folderKey in sortedGroupKeys) {
+            val group = subfolderGroups[folderKey] ?: continue
+            val totalFolderDuration = group.sumOf { it.durationMs }
+            val hasM4bOrFlag = group.any { it.extension == "m4b" || it.isAudiobookFlag }
+
+            if (totalFolderDuration < MIN_AUDIOBOOK_DURATION_MS && !hasM4bOrFlag) {
+                continue
+            }
+
+            val sortedFiles = group.sortedWith { a, b -> compareNatural(a.displayName, b.displayName) }
+            val innerSegments = sortedFiles.first().relativeSegments.drop(1)
+            val (folderAuthor, folderSeries, folderBookTitle) = deriveHierarchyLabels(innerSegments)
+
+            val firstValidArtist = sortedFiles.firstOrNull { isValidMediaStoreArtist(it.artist) }?.artist
+            val effectiveFallbackAuthor = if (folderAuthor == "Unknown Author" && !firstValidArtist.isNullOrBlank()) {
+                firstValidArtist
+            } else {
+                folderAuthor
+            }
+
+            val tracks = sortedFiles.map { file ->
+                AudioTrack(
+                    name = file.displayName.substringBeforeLast('.'),
+                    uri = file.uri,
+                    isM4b = file.isContainer
+                )
+            }
+
+            val isSingleContainer = tracks.size == 1 && tracks.first().isM4b
+            val fallbackTitle = folderBookTitle.ifBlank { tracks.first().name }
+            val (resolvedTitle, resolvedAuthor) = extractEmbeddedBookMetadata(
+                uri = tracks.first().uri,
+                fallbackTitle = fallbackTitle,
+                fallbackAuthor = effectiveFallbackAuthor,
+                isSingleContainer = isSingleContainer
+            )
+
+            val bookId = if (isSingleContainer) tracks.first().uri.toString() else "folder:$folderKey"
+            books.add(
+                Audiobook(
+                    id = bookId,
+                    title = resolvedTitle,
+                    author = resolvedAuthor,
+                    series = folderSeries,
+                    tracks = tracks
+                )
+            )
+
+            val durations = sortedFiles.map { it.durationMs }
+            if (durations.all { it > 0L }) {
+                saveBookDurations(bookId, durations)
+            }
+        }
+
+        books
+    }
+
+    private fun isValidMediaStoreArtist(artist: String?): Boolean {
+        if (artist.isNullOrBlank()) return false
+        return !artist.equals("<unknown>", ignoreCase = true) &&
+            !artist.equals("unknown", ignoreCase = true)
+    }
+
+    private fun extractRelativeFolderFromLegacyPath(fullPath: String): String {
+        val normalized = fullPath.replace('\\', '/')
+        val withoutFile = normalized.substringBeforeLast('/', "")
+        val markers = listOf("/storage/emulated/0/", "/sdcard/", "/storage/self/primary/")
+        for (marker in markers) {
+            val idx = withoutFile.indexOf(marker, ignoreCase = true)
+            if (idx != -1) {
+                return withoutFile.substring(idx + marker.length)
+            }
+        }
+        return withoutFile.trimStart('/')
+    }
+
+    // Manual DocumentsContract Tree Scanner (Custom Folder Picker)
     suspend fun scanFolderForAudiobooks(folderUri: Uri): List<Audiobook> = withContext(Dispatchers.IO) {
         val bookList = mutableListOf<Audiobook>()
         val rootDocId = DocumentsContract.getTreeDocumentId(folderUri)
@@ -760,7 +1013,6 @@ class AudiobookRepository(context: Context) {
         }
     }
 
-    // Properly handles Author/Book, Author/Series/Book, and Author/Series/Book/Disc 1
     private fun deriveHierarchyLabels(segments: List<String>): Triple<String, String, String> {
         if (segments.isEmpty()) return Triple("Unknown Author", "", "")
         if (segments.size == 1) return Triple("Unknown Author", "", segments[0])
@@ -815,7 +1067,6 @@ class AudiobookRepository(context: Context) {
             if (!isGenericTitle(rawAlbum)) embeddedAlbum = rawAlbum
             if (!isGenericTitle(rawTitle)) embeddedTitle = rawTitle
 
-            // Prefer album-artist -> artist -> author
             embeddedAuthor = listOf(rawAlbumArtist, rawArtist, rawAuthor).firstOrNull { !it.isNullOrBlank() }
         } catch (t: Throwable) {
             Log.w(TAG, "Failed extracting metadata from $uri", t)
@@ -1318,7 +1569,6 @@ class AudiobookRepository(context: Context) {
         return File(coversDir, "${sha256Hex(bookId)}.png")
     }
 
-    // PHASE 4: Memory -> SHA-256 Disk (with legacy hashCode migration) -> Embedded Art ONLY
     suspend fun getOrFetchCoverArt(book: Audiobook): Bitmap? = withContext(Dispatchers.IO) {
         CoverMemoryCache.cache.get(book.id)?.let { return@withContext it }
 
@@ -1352,7 +1602,6 @@ class AudiobookRepository(context: Context) {
         null
     }
 
-    // Explicit user-triggered online cover search
     suspend fun fetchAndSaveOnlineCoverArt(book: Audiobook): Bitmap? = withContext(Dispatchers.IO) {
         val onlineBmp = fetchOnlineCoverArt(book.title, book.author)
         if (onlineBmp != null) {

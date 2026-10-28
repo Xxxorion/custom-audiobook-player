@@ -278,6 +278,7 @@ fun BookshelfContent(
     hasSelectedFolder: Boolean,
     viewMode: String,
     viewModel: LibraryViewModel,
+    onAutoScanDevice: () -> Unit,
     onChooseFolder: () -> Unit,
     onSelectBook: (Audiobook) -> Unit,
     onLongPressBook: (Audiobook) -> Unit
@@ -286,10 +287,10 @@ fun BookshelfContent(
         Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
-                    imageVector = Icons.Default.FolderOpen,
+                    imageVector = Icons.Default.LibraryMusic,
                     contentDescription = null,
                     modifier = Modifier.size(64.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = MaterialTheme.colorScheme.primary
                 )
                 Spacer(Modifier.height(16.dp))
                 Text(
@@ -302,8 +303,20 @@ fun BookshelfContent(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
                 )
-                Spacer(Modifier.height(16.dp))
-                Button(onClick = onChooseFolder) {
+                Spacer(Modifier.height(20.dp))
+                Button(
+                    onClick = onAutoScanDevice,
+                    modifier = Modifier.fillMaxWidth(0.85f)
+                ) {
+                    Icon(Icons.Default.LibraryMusic, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.scan_device_audiobooks))
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = onChooseFolder,
+                    modifier = Modifier.fillMaxWidth(0.85f)
+                ) {
                     Icon(Icons.Default.FolderOpen, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text(stringResource(R.string.choose_audiobook_folder))
@@ -355,7 +368,6 @@ fun BookshelfContent(
     }
 }
 
-// PHASE 3.13: Inactive cards do NOT key on currentPosition or duration, avoiding 1s full-shelf recomposition
 @Composable
 fun BookCardWrapper(
     book: Audiobook,
@@ -741,7 +753,6 @@ fun NowPlayingScreen(
 
                 Spacer(Modifier.height(6.dp))
 
-                // PHASE 1.6: Seek live on drag, persist only onValueChangeFinished
                 Slider(
                     value = activeSliderValue.coerceIn(0f, sliderDurationMs.toFloat()),
                     onValueChange = { newSliderVal ->

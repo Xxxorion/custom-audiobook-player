@@ -28,6 +28,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -206,6 +207,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private fun requiredAudioPermission(): String {
+    return if (Build.VERSION.SDK_INT >= 33) {
+        Manifest.permission.READ_MEDIA_AUDIO
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+}
+
+private fun hasAudioReadPermission(context: Context): Boolean {
+    return ContextCompat.checkSelfPermission(context, requiredAudioPermission()) == PackageManager.PERMISSION_GRANTED
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FablewoodAudiobookApp(
@@ -258,6 +271,61 @@ fun FablewoodAudiobookApp(
         }
     }
 
+    fun runAutoDeviceScan(explicitUserAction: Boolean) {
+        coroutineScope.launch {
+            try {
+                viewModel.repository.saveScanMode("AUTO")
+                viewModel.selectedFolderUri = "AUTO_SCAN"
+                val scannedBooks = viewModel.repository.scanDeviceForAudiobooks()
+                if (scannedBooks.isNotEmpty()) {
+                    viewModel.books = scannedBooks
+                    viewModel.repository.saveBooksCache(scannedBooks)
+                    val lastBookId = viewModel.repository.getLastBookId()
+                    if (viewModel.currentBookId.isEmpty() || scannedBooks.none { it.id == viewModel.currentBookId }) {
+                        val firstBook = scannedBooks.find { it.id == lastBookId } ?: scannedBooks.first()
+                        viewModel.selectBookMetadata(firstBook, isDifferentBook = true)
+                        val savedTrackIdx = viewModel.repository.getBookTrackIndex(firstBook.id)
+                        val savedPos = viewModel.repository.getBookPosition(firstBook.id)
+                        binder.playBook(firstBook, savedTrackIdx, savedPos, false)
+                    }
+                    FablewoodWidgetProvider.updateAllWidgets(context)
+                    if (explicitUserAction) {
+                        Toast.makeText(context, "Found ${scannedBooks.size} audiobook(s)", Toast.LENGTH_SHORT).show()
+                    }
+                } else if (explicitUserAction && viewModel.books.isEmpty()) {
+                    Toast.makeText(context, context.getString(R.string.no_supported_audio_files), Toast.LENGTH_SHORT).show()
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "Auto device scan failed", t)
+                if (explicitUserAction) {
+                    Toast.makeText(context, context.getString(R.string.folder_scan_failed), Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            runAutoDeviceScan(explicitUserAction = true)
+        } else {
+            Toast.makeText(context, context.getString(R.string.audio_permission_denied), Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun triggerAutoScanWithPermission() {
+        if (hasAudioReadPermission(context)) {
+            runAutoDeviceScan(explicitUserAction = true)
+        } else {
+            try {
+                audioPermissionLauncher.launch(requiredAudioPermission())
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not launch audio permission request", t)
+            }
+        }
+    }
+
     val activeBook = remember(viewModel.books, viewModel.currentBookId) {
         viewModel.books.find { it.id == viewModel.currentBookId }
     }
@@ -280,6 +348,7 @@ fun FablewoodAudiobookApp(
             }
             val uriStr = it.toString()
             viewModel.repository.saveSelectedFolderUri(uriStr)
+            viewModel.repository.saveScanMode("FOLDER")
             viewModel.selectedFolderUri = uriStr
 
             coroutineScope.launch {
@@ -294,6 +363,7 @@ fun FablewoodAudiobookApp(
                         val savedTrackIdx = viewModel.repository.getBookTrackIndex(selectedBook.id)
                         val savedPos = viewModel.repository.getBookPosition(selectedBook.id)
                         binder.playBook(selectedBook, savedTrackIdx, savedPos, false)
+                        FablewoodWidgetProvider.updateAllWidgets(context)
                     }
                 } catch (t: Throwable) {
                     Log.e(TAG, "Explicit folder scan threw an error", t)
@@ -325,33 +395,39 @@ fun FablewoodAudiobookApp(
         val bmp = viewModel.currentCoverArt ?: return@LaunchedEffect
         val jpegBytes = viewModel.repository.bitmapToJpegBytes(bmp)
         binder.updatePlayingArtwork(book, jpegBytes)
+        FablewoodWidgetProvider.updateAllWidgets(
+            context = context,
+            isPlayingOverride = viewModel.isPlaying,
+            titleOverride = book.title,
+            authorOverride = book.author
+        )
     }
 
     LaunchedEffect(Unit) {
-        requestNotificationPermissionIfNeeded()
+        val lastBookId = viewModel.repository.getLastBookId()
+        val initialBook = viewModel.books.find { b -> b.id == lastBookId } ?: viewModel.books.firstOrNull()
 
-        val savedUriStr = viewModel.repository.getSelectedFolderUri()
-        if (!savedUriStr.isNullOrEmpty()) {
-            viewModel.selectedFolderUri = savedUriStr
-            val lastBookId = viewModel.repository.getLastBookId()
-            val initialBook = viewModel.books.find { b -> b.id == lastBookId } ?: viewModel.books.firstOrNull()
-
-            if (initialBook != null && viewModel.currentBookId.isEmpty()) {
-                viewModel.selectBookMetadata(initialBook, isDifferentBook = true)
-                if (player.mediaItemCount > 0) {
-                    viewModel.isPlaying = player.isPlaying
-                    viewModel.currentTrackIndex = player.currentMediaItemIndex
-                    viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
-                    viewModel.duration = player.duration.coerceAtLeast(0L)
-                } else {
-                    val savedTrackIdx = viewModel.repository.getBookTrackIndex(initialBook.id)
-                    val savedPos = viewModel.repository.getBookPosition(initialBook.id)
-                    val lastPauseTime = viewModel.repository.getPreferences().getLong("last_pause_time", 0L)
-                    val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
-                    binder.playBook(initialBook, savedTrackIdx, rewindPos, false)
-                }
+        if (initialBook != null && viewModel.currentBookId.isEmpty()) {
+            viewModel.selectBookMetadata(initialBook, isDifferentBook = true)
+            if (player.mediaItemCount > 0) {
+                viewModel.isPlaying = player.isPlaying
+                viewModel.currentTrackIndex = player.currentMediaItemIndex
+                viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
+                viewModel.duration = player.duration.coerceAtLeast(0L)
+            } else {
+                val savedTrackIdx = viewModel.repository.getBookTrackIndex(initialBook.id)
+                val savedPos = viewModel.repository.getBookPosition(initialBook.id)
+                val lastPauseTime = viewModel.repository.getPreferences().getLong("last_pause_time", 0L)
+                val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
+                binder.playBook(initialBook, savedTrackIdx, rewindPos, false)
             }
+        }
 
+        val scanMode = viewModel.repository.getScanMode()
+        val savedUriStr = viewModel.repository.getSelectedFolderUri()
+
+        if (scanMode == "FOLDER" && !savedUriStr.isNullOrEmpty()) {
+            viewModel.selectedFolderUri = savedUriStr
             try {
                 val folderUri = Uri.parse(savedUriStr)
                 val scannedBooks = viewModel.repository.scanFolderForAudiobooks(folderUri)
@@ -374,6 +450,13 @@ fun FablewoodAudiobookApp(
                 if (viewModel.books.isNotEmpty()) {
                     Toast.makeText(context, context.getString(R.string.folder_refresh_failed), Toast.LENGTH_SHORT).show()
                 }
+            }
+        } else {
+            // Default AUTO mode: automatically scan Downloads & Audiobooks if permission is granted, or ask once on first launch
+            if (hasAudioReadPermission(context)) {
+                runAutoDeviceScan(explicitUserAction = false)
+            } else if (viewModel.books.isEmpty()) {
+                triggerAutoScanWithPermission()
             }
         }
     }
@@ -516,6 +599,15 @@ fun FablewoodAudiobookApp(
                     color = MaterialTheme.colorScheme.primary
                 )
                 HorizontalDivider()
+                NavigationDrawerItem(
+                    icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
+                    label = { Text(stringResource(R.string.scan_device_audiobooks)) },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        triggerAutoScanWithPermission()
+                    }
+                )
                 NavigationDrawerItem(
                     icon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
                     label = { Text(stringResource(R.string.select_audiobook_folder)) },
@@ -744,6 +836,7 @@ fun FablewoodAudiobookApp(
                             hasSelectedFolder = viewModel.selectedFolderUri.isNotEmpty(),
                             viewMode = viewModel.viewMode,
                             viewModel = viewModel,
+                            onAutoScanDevice = { triggerAutoScanWithPermission() },
                             onChooseFolder = { folderPicker.launch(null) },
                             onSelectBook = { book ->
                                 if (book.id == viewModel.currentBookId && player.mediaItemCount > 0) {

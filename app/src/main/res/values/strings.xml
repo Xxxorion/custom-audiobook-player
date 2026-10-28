@@ -3,15 +3,16 @@
     <color name="ic_launcher_background">#0C261B</color>
     <string name="app_name">Fablewood</string>
     <string name="app_header_title">Fablewood Audiobooks</string>
-    <string name="select_audiobook_folder">Select Audiobook Folder</string>
-    <string name="choose_audiobook_folder">Choose audiobook folder</string>
+    <string name="scan_device_audiobooks">Scan Device (Downloads &amp; Audiobooks)</string>
+    <string name="select_audiobook_folder">Select Custom Folder</string>
+    <string name="choose_audiobook_folder">Choose custom folder</string>
     <string name="audio_fx">Audio FX</string>
     <string name="settings">Settings</string>
     <string name="listening_stats">Listening Stats</string>
     <string name="car_mode">CAR MODE</string>
     <string name="drop_bookmark_pin">DROP BOOKMARK PIN</string>
-    <string name="no_folder_selected">No audiobook folder selected.</string>
-    <string name="no_supported_audio_files">This folder has no supported audio files.</string>
+    <string name="no_folder_selected">Scan your Downloads and Audiobooks folders automatically, or pick a custom folder.</string>
+    <string name="no_supported_audio_files">No audiobooks (5+ mins) found yet. Download an audiobook or choose a custom folder.</string>
     <string name="search_books_hint">Search books by title or author...</string>
     <string name="add_bookmark">Add Bookmark</string>
     <string name="bookmark_note_label">Note (Optional)</string>
@@ -47,5 +48,6 @@
     <string name="search_open_library">Search Open Library</string>
     <string name="folder_refresh_failed">Could not refresh audiobook folder. Showing cached library.</string>
     <string name="folder_scan_failed">Failed to scan selected folder.</string>
+    <string name="audio_permission_denied">Audio permission is required to auto-scan Downloads. You can still choose a custom folder.</string>
 </resources>
 <!-- END OF FILE -->
