@@ -476,7 +476,7 @@ fun EbookShelfContent(
                 )
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    text = "Scan your Downloads & Books folders for .epub and .pdf files, or import files directly.",
+                    text = "Scan your Downloads, Documents & Books folders for eBooks (.epub, .pdf, .azw3, .mobi, .cbz, .fb2, .docx, .txt & more), or import files directly.",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -497,7 +497,7 @@ fun EbookShelfContent(
                 ) {
                     Icon(Icons.Default.FileOpen, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Import .epub / .pdf File(s)")
+                    Text("Import eBook File(s)")
                 }
             }
         }
@@ -564,7 +564,8 @@ fun EbookCardWrapper(
         viewModel.repository.getEbookChapterIndex(ebook.id)
     }
     val progress = if (totalChaps > 0) ((currChap + 1).toFloat() / totalChaps).coerceIn(0.02f, 1f) else 0f
-    val unitLabel = if (ebook.format == "PDF") "Page" else "Chapter"
+    val isVisualPageFormat = ebook.format.uppercase(Locale.ROOT) in VISUAL_PAGE_EBOOK_FORMATS
+    val unitLabel = if (isVisualPageFormat) "Page" else "Chapter"
     val subtitle = if (totalChaps > 0) "$unitLabel ${currChap + 1} of $totalChaps" else "${ebook.format} eBook"
 
     if (viewMode == "GRID") {
@@ -677,7 +678,8 @@ fun EpubReaderScreen(
     onUpdateFontSize: (Float) -> Unit,
     onUpdateTheme: (String) -> Unit
 ) {
-    val isPdf = ebook.format == "PDF" || ebook.uri.toString().lowercase(Locale.ROOT).endsWith(".pdf")
+    val fmtUpper = ebook.format.uppercase(Locale.ROOT)
+    val isVisualPageFormat = fmtUpper in VISUAL_PAGE_EBOOK_FORMATS
 
     val bgColor = when (readerTheme) {
         "SEPIA" -> Color(0xFFF4ECD8)
@@ -700,15 +702,15 @@ fun EpubReaderScreen(
     val scrollState = rememberScrollState()
 
     val currentChapter = chapters.getOrNull(currentChapterIndex)
-    var renderedPdfBitmap by remember(ebook.id, currentChapterIndex) { mutableStateOf<Bitmap?>(null) }
-    var isRenderingPdfPage by remember(ebook.id, currentChapterIndex) { mutableStateOf(false) }
+    var renderedPageBitmap by remember(ebook.id, currentChapterIndex) { mutableStateOf<Bitmap?>(null) }
+    var isRenderingVisualPage by remember(ebook.id, currentChapterIndex) { mutableStateOf(false) }
 
-    LaunchedEffect(currentChapterIndex, ebook.id, isPdf) {
+    LaunchedEffect(currentChapterIndex, ebook.id, isVisualPageFormat) {
         scrollState.scrollTo(0)
-        if (isPdf) {
-            isRenderingPdfPage = true
-            renderedPdfBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex, 1400)
-            isRenderingPdfPage = false
+        if (isVisualPageFormat) {
+            isRenderingVisualPage = true
+            renderedPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex, 1400)
+            isRenderingVisualPage = false
         }
     }
 
@@ -760,7 +762,7 @@ fun EpubReaderScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = currentChapter?.title ?: if (isPdf) "Page ${currentChapterIndex + 1}" else "Loading...",
+                        text = currentChapter?.title ?: if (isVisualPageFormat) "Page ${currentChapterIndex + 1}" else "Loading...",
                         fontSize = 12.sp,
                         color = accentColor,
                         maxLines = 1,
@@ -781,11 +783,11 @@ fun EpubReaderScreen(
 
         HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
 
-        if (isLoading || (isPdf && isRenderingPdfPage)) {
+        if (isLoading || (isVisualPageFormat && isRenderingVisualPage)) {
             Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = accentColor)
             }
-        } else if (isPdf) {
+        } else if (isVisualPageFormat && renderedPageBitmap != null) {
             Column(
                 modifier = Modifier
                     .weight(1f)
@@ -794,24 +796,15 @@ fun EpubReaderScreen(
                     .padding(12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                if (renderedPdfBitmap != null) {
-                    Image(
-                        bitmap = renderedPdfBitmap!!.asImageBitmap(),
-                        contentDescription = "PDF Page ${currentChapterIndex + 1}",
-                        contentScale = ContentScale.FillWidth,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.White)
-                    )
-                } else {
-                    Text(
-                        text = "Unable to render PDF page. Please make sure file access permission is granted.",
-                        color = textColor,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(24.dp)
-                    )
-                }
+                Image(
+                    bitmap = renderedPageBitmap!!.asImageBitmap(),
+                    contentDescription = "Page ${currentChapterIndex + 1}",
+                    contentScale = ContentScale.FillWidth,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.White)
+                )
             }
         } else {
             Column(
@@ -842,7 +835,7 @@ fun EpubReaderScreen(
 
         HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
 
-        val navUnit = if (isPdf) "Page" else "Chapter"
+        val navUnit = if (isVisualPageFormat && renderedPageBitmap != null) "Page" else "Chapter"
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -878,7 +871,7 @@ fun EpubReaderScreen(
     }
 
     if (showTocDialog) {
-        val listHeader = if (isPdf) "Pages (${chapters.size})" else "Chapters (${chapters.size})"
+        val listHeader = if (isVisualPageFormat && renderedPageBitmap != null) "Pages (${chapters.size})" else "Chapters (${chapters.size})"
         AlertDialog(
             onDismissRequest = { showTocDialog = false },
             title = { Text(listHeader) },
@@ -902,7 +895,7 @@ fun EpubReaderScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = if (isPdf) chap.title else "${idx + 1}. ${chap.title}",
+                                text = if (isVisualPageFormat) chap.title else "${idx + 1}. ${chap.title}",
                                 fontWeight = if (isCurr) FontWeight.Bold else FontWeight.Normal,
                                 color = if (isCurr) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                             )
@@ -922,7 +915,7 @@ fun EpubReaderScreen(
             title = { Text("Reader Appearance") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    if (!isPdf) {
+                    if (!isVisualPageFormat || renderedPageBitmap == null) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,

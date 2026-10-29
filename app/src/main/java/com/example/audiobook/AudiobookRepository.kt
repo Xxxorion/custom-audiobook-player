@@ -1353,8 +1353,8 @@ class AudiobookRepository(context: Context) {
                     if ((typeFlag == '0' || typeFlag == '\u0000') && size > 0L && isImageFileName(name)) {
                         names.add(name)
                     }
-                    valpaddedSkip = ((size + 511L) / 512L) * 512L
-                    skipFully(stream, valpaddedSkip)
+                    val paddedSkip = ((size + 511L) / 512L) * 512L
+                    skipFully(stream, paddedSkip)
                 }
             }
         } catch (_: Throwable) {}
