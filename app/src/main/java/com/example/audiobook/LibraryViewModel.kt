@@ -3,6 +3,7 @@ package com.example.audiobook
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -15,6 +16,19 @@ import kotlinx.coroutines.launch
 class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var books by mutableStateOf<List<Audiobook>>(repository.loadBooksCache())
     var currentBookId by mutableStateOf("")
+
+    // Top-Center Shelf Toggle: "AUDIO" or "EBOOK"
+    var shelfMode by mutableStateOf(repository.getPreferences().getString("shelf_mode", "AUDIO") ?: "AUDIO")
+
+    // eBook Shelf & Reader State
+    var ebooks by mutableStateOf<List<Ebook>>(repository.loadEbooksCache())
+    var currentEbookId by mutableStateOf(repository.getLastEbookId() ?: "")
+    var currentEbookChapters by mutableStateOf<List<EbookChapter>>(emptyList())
+    var currentEbookChapterIndex by mutableIntStateOf(0)
+    var isLoadingEbook by mutableStateOf(false)
+    var isEbookReaderFullScreen by mutableStateOf(false)
+    var ebookFontSizeSp by mutableFloatStateOf(repository.getPreferences().getFloat("ebook_font_sp", 18f))
+    var ebookReaderTheme by mutableStateOf(repository.getPreferences().getString("ebook_reader_theme", "FOREST") ?: "FOREST")
 
     var isPlaying by mutableStateOf(false)
     var currentTrackIndex by mutableIntStateOf(0)
@@ -55,7 +69,6 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var coverRevision by mutableIntStateOf(0)
     var progressRevision by mutableIntStateOf(0)
 
-    // Live Cover Search dialog state
     var coverSearchCandidates by mutableStateOf<List<CoverSearchCandidate>>(emptyList())
     var isSearchingCovers by mutableStateOf(false)
     var isBatchFetchingCovers by mutableStateOf(false)
@@ -64,6 +77,51 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     private var coverJob: Job? = null
     private var durationsJob: Job? = null
     private var coverSearchJob: Job? = null
+    private var ebookLoadJob: Job? = null
+
+    fun updateShelfMode(mode: String) {
+        shelfMode = mode
+        repository.getPreferences().edit().putString("shelf_mode", mode).apply()
+    }
+
+    fun selectEbook(ebook: Ebook, openFullScreen: Boolean) {
+        currentEbookId = ebook.id
+        if (openFullScreen) {
+            isEbookReaderFullScreen = true
+        }
+        ebookLoadJob?.cancel()
+        isLoadingEbook = true
+        ebookLoadJob = viewModelScope.launch {
+            val loadedChapters = repository.loadEpubChapters(ebook)
+            currentEbookChapters = loadedChapters
+            val savedIdx = repository.getEbookChapterIndex(ebook.id).coerceIn(0, (loadedChapters.size - 1).coerceAtLeast(0))
+            currentEbookChapterIndex = savedIdx
+            repository.saveEbookProgress(ebook.id, savedIdx, loadedChapters.size)
+            isLoadingEbook = false
+            progressRevision++
+        }
+    }
+
+    fun goToEbookChapter(index: Int) {
+        if (currentEbookChapters.isEmpty()) return
+        val clamped = index.coerceIn(0, currentEbookChapters.lastIndex)
+        currentEbookChapterIndex = clamped
+        if (currentEbookId.isNotEmpty()) {
+            repository.saveEbookProgress(currentEbookId, clamped, currentEbookChapters.size)
+            progressRevision++
+        }
+    }
+
+    fun updateEbookFontSize(newSizeSp: Float) {
+        val clamped = newSizeSp.coerceIn(13f, 30f)
+        ebookFontSizeSp = clamped
+        repository.getPreferences().edit().putFloat("ebook_font_sp", clamped).apply()
+    }
+
+    fun updateEbookReaderTheme(theme: String) {
+        ebookReaderTheme = theme
+        repository.getPreferences().edit().putString("ebook_reader_theme", theme).apply()
+    }
 
     fun selectBookMetadata(book: Audiobook, isDifferentBook: Boolean) {
         currentBookId = book.id
