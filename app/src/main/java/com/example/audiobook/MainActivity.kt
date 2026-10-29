@@ -10,6 +10,8 @@ import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -362,13 +364,18 @@ class MainActivity : ComponentActivity() {
             }
             var extractedPalette by remember { mutableStateOf<ExtractedCoverPalette?>(null) }
 
-            LaunchedEffect(libraryViewModel.currentCoverArt, dynamicThemeEnabled) {
-                if (!dynamicThemeEnabled || libraryViewModel.currentCoverArt == null) {
+            val activeThemeBitmap = if (libraryViewModel.shelfMode == "EBOOK" && libraryViewModel.currentEbookCoverArt != null) {
+                libraryViewModel.currentEbookCoverArt
+            } else {
+                libraryViewModel.currentCoverArt
+            }
+
+            LaunchedEffect(activeThemeBitmap, dynamicThemeEnabled) {
+                if (!dynamicThemeEnabled || activeThemeBitmap == null) {
                     extractedPalette = null
                 } else {
-                    val bmp = libraryViewModel.currentCoverArt
                     extractedPalette = withContext(Dispatchers.Default) {
-                        extractCoverPaletteFromBitmap(bmp)
+                        extractCoverPaletteFromBitmap(activeThemeBitmap)
                     }
                 }
             }
@@ -424,6 +431,14 @@ private fun hasAudioReadPermission(context: Context): Boolean {
     return ContextCompat.checkSelfPermission(context, requiredAudioPermission()) == PackageManager.PERMISSION_GRANTED
 }
 
+private fun hasAllFilesAccess(): Boolean {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        Environment.isExternalStorageManager()
+    } else {
+        true
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FablewoodAudiobookApp(
@@ -439,10 +454,10 @@ fun FablewoodAudiobookApp(
     val coroutineScope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
-    // Unified Cover Art Target (Works for both Audiobooks & eBooks)
     var targetCoverItemId by remember { mutableStateOf("") }
     var showCoverOptionsDialog by remember { mutableStateOf(false) }
     var liveCoverSearchQuery by remember { mutableStateOf("") }
+    var showAllFilesPermissionPrompt by remember { mutableStateOf(false) }
 
     var showViewDialog by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
@@ -481,6 +496,54 @@ fun FablewoodAudiobookApp(
         }
     }
 
+    fun runEbookAutoScan(showToast: Boolean) {
+        coroutineScope.launch {
+            try {
+                val scannedEbooks = viewModel.repository.scanDeviceForEbooks()
+                if (scannedEbooks.isNotEmpty()) {
+                    viewModel.ebooks = scannedEbooks
+                    val lastEbId = viewModel.repository.getLastEbookId()
+                    if (viewModel.currentEbookId.isEmpty() || scannedEbooks.none { it.id == viewModel.currentEbookId }) {
+                        val firstEb = scannedEbooks.find { it.id == lastEbId } ?: scannedEbooks.first()
+                        viewModel.selectEbook(firstEb, openFullScreen = false)
+                    } else {
+                        val currEb = scannedEbooks.find { it.id == viewModel.currentEbookId }
+                        if (currEb != null && viewModel.currentEbookChapters.size <= 1) {
+                            viewModel.selectEbook(currEb, openFullScreen = false)
+                        }
+                    }
+                }
+                if (showToast) {
+                    Toast.makeText(context, "Found ${scannedEbooks.size} eBook(s)", Toast.LENGTH_SHORT).show()
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "eBook auto scan failed", t)
+            }
+        }
+    }
+
+    val manageStorageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        runEbookAutoScan(showToast = true)
+    }
+
+    fun launchAllFilesAccessSettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:${context.packageName}")
+                )
+                manageStorageLauncher.launch(intent)
+            } catch (_: Throwable) {
+                try {
+                    manageStorageLauncher.launch(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                } catch (_: Throwable) {}
+            }
+        }
+    }
+
     fun runAutoDeviceScan(explicitUserAction: Boolean) {
         coroutineScope.launch {
             try {
@@ -500,13 +563,17 @@ fun FablewoodAudiobookApp(
                     }
                     FablewoodWidgetProvider.updateAllWidgets(context)
                 }
+
                 val scannedEbooks = viewModel.repository.scanDeviceForEbooks()
                 if (scannedEbooks.isNotEmpty()) {
                     viewModel.ebooks = scannedEbooks
-                    if (viewModel.currentEbookId.isEmpty()) {
-                        viewModel.selectEbook(scannedEbooks.first(), openFullScreen = false)
+                    val lastEbId = viewModel.repository.getLastEbookId()
+                    if (viewModel.currentEbookId.isEmpty() || scannedEbooks.none { it.id == viewModel.currentEbookId }) {
+                        val firstEb = scannedEbooks.find { it.id == lastEbId } ?: scannedEbooks.first()
+                        viewModel.selectEbook(firstEb, openFullScreen = false)
                     }
                 }
+
                 if (explicitUserAction) {
                     Toast.makeText(
                         context,
@@ -871,16 +938,19 @@ fun FablewoodAudiobookApp(
                     selected = false,
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
+                        if (!hasAllFilesAccess()) {
+                            showAllFilesPermissionPrompt = true
+                        }
                         triggerAutoScanWithPermission()
                     }
                 )
                 NavigationDrawerItem(
                     icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
-                    label = { Text("Import .epub eBook(s)") },
+                    label = { Text("Import .epub / .pdf eBook(s)") },
                     selected = false,
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
-                        epubFilePicker.launch(arrayOf("application/epub+zip", "*/*"))
+                        epubFilePicker.launch(arrayOf("application/epub+zip", "application/pdf", "*/*"))
                     }
                 )
                 NavigationDrawerItem(
@@ -1039,13 +1109,14 @@ fun FablewoodAudiobookApp(
                                     shelfMode = viewModel.shelfMode,
                                     onSelectMode = { mode ->
                                         viewModel.updateShelfMode(mode)
-                                        if (mode == "EBOOK" && viewModel.ebooks.isEmpty()) {
-                                            coroutineScope.launch {
-                                                val found = viewModel.repository.scanDeviceForEbooks()
-                                                if (found.isNotEmpty()) {
-                                                    viewModel.ebooks = found
-                                                    viewModel.selectEbook(found.first(), openFullScreen = false)
-                                                }
+                                        if (mode == "EBOOK") {
+                                            if (!hasAllFilesAccess()) {
+                                                showAllFilesPermissionPrompt = true
+                                            }
+                                            runEbookAutoScan(showToast = false)
+                                        } else {
+                                            if (hasAudioReadPermission(context)) {
+                                                runAutoDeviceScan(explicitUserAction = false)
                                             }
                                         }
                                     }
@@ -1058,8 +1129,8 @@ fun FablewoodAudiobookApp(
                             },
                             actions = {
                                 if (viewModel.shelfMode == "EBOOK") {
-                                    IconButton(onClick = { epubFilePicker.launch(arrayOf("application/epub+zip", "*/*")) }) {
-                                        Icon(Icons.Default.FileOpen, contentDescription = "Import .epub", tint = MaterialTheme.colorScheme.primary)
+                                    IconButton(onClick = { epubFilePicker.launch(arrayOf("application/epub+zip", "application/pdf", "*/*")) }) {
+                                        Icon(Icons.Default.FileOpen, contentDescription = "Import .epub / .pdf", tint = MaterialTheme.colorScheme.primary)
                                     }
                                 }
                                 IconButton(onClick = {
@@ -1132,7 +1203,7 @@ fun FablewoodAudiobookApp(
                                 else it.title.contains(viewModel.searchQuery, ignoreCase = true) ||
                                     it.author.contains(viewModel.searchQuery, ignoreCase = true)
                             }
-                            val activeEbId = viewModel.currentEbookId
+                            val activeEbId = viewModel.currentEbookId.ifEmpty { viewModel.repository.getLastEbookId() ?: "" }
                             val baseSorted = when (viewModel.sortBy) {
                                 "TITLE" -> filtered.sortedWith { a, b -> compareNatural(a.title, b.title) }
                                 "AUTHOR" -> filtered.sortedWith { a, b -> compareNatural(a.author, b.author) }
@@ -1226,14 +1297,14 @@ fun FablewoodAudiobookApp(
                                     viewMode = viewModel.viewMode,
                                     viewModel = viewModel,
                                     onScanDeviceEbooks = {
-                                        coroutineScope.launch {
-                                            val scanned = viewModel.repository.scanDeviceForEbooks()
-                                            viewModel.ebooks = scanned
-                                            Toast.makeText(context, "Found ${scanned.size} .epub file(s)", Toast.LENGTH_SHORT).show()
+                                        if (!hasAllFilesAccess()) {
+                                            showAllFilesPermissionPrompt = true
+                                        } else {
+                                            runEbookAutoScan(showToast = true)
                                         }
                                     },
                                     onImportEpubFiles = {
-                                        epubFilePicker.launch(arrayOf("application/epub+zip", "*/*"))
+                                        epubFilePicker.launch(arrayOf("application/epub+zip", "application/pdf", "*/*"))
                                     },
                                     onSelectEbook = { ebook ->
                                         viewModel.selectEbook(ebook, openFullScreen = !isFoldableUnfolded)
@@ -1277,6 +1348,7 @@ fun FablewoodAudiobookApp(
                 viewModel.isEbookReaderFullScreen && activeEbook != null -> {
                     EpubReaderScreen(
                         ebook = activeEbook,
+                        repository = viewModel.repository,
                         chapters = viewModel.currentEbookChapters,
                         currentChapterIndex = viewModel.currentEbookChapterIndex,
                         isLoading = viewModel.isLoadingEbook,
@@ -1297,7 +1369,6 @@ fun FablewoodAudiobookApp(
                 }
 
                 isFoldableUnfolded -> {
-                    // Foldable 'Book Posture' Dual-Pane Layout: Left Page = Shelf, Right Page = Player or ePub Reader
                     Row(modifier = Modifier.fillMaxSize()) {
                         Box(modifier = Modifier.weight(0.46f).fillMaxHeight()) {
                             RenderShelfScaffold(
@@ -1312,6 +1383,7 @@ fun FablewoodAudiobookApp(
                                 if (activeEbook != null) {
                                     EpubReaderScreen(
                                         ebook = activeEbook,
+                                        repository = viewModel.repository,
                                         chapters = viewModel.currentEbookChapters,
                                         currentChapterIndex = viewModel.currentEbookChapterIndex,
                                         isLoading = viewModel.isLoadingEbook,
@@ -1328,7 +1400,7 @@ fun FablewoodAudiobookApp(
                                 } else {
                                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                         Text(
-                                            "Import or select an .epub on the left page to start reading.",
+                                            "Scan or select an .epub / .pdf on the left page to start reading.",
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
@@ -1345,6 +1417,33 @@ fun FablewoodAudiobookApp(
                 }
             }
         }
+    }
+
+    if (showAllFilesPermissionPrompt) {
+        AlertDialog(
+            onDismissRequest = { showAllFilesPermissionPrompt = false },
+            title = { Text("Enable Downloads eBook Auto-Scan") },
+            text = {
+                Text(
+                    "Android requires 'All Files Access' to automatically scan and open .epub and .pdf books inside your Downloads folder. Tap Allow to enable it once."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showAllFilesPermissionPrompt = false
+                        launchAllFilesAccessSettings()
+                    }
+                ) {
+                    Text("Allow")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAllFilesPermissionPrompt = false }) {
+                    Text("Not Now")
+                }
+            }
+        )
     }
 
     if (showCoverOptionsDialog && targetCoverItemId.isNotEmpty()) {
@@ -1703,7 +1802,7 @@ fun FablewoodAudiobookApp(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Dynamic Cover Theme", fontWeight = FontWeight.Bold)
                             Text(
-                                "Match UI colors to the active audiobook's cover art",
+                                "Match UI colors to the active book's cover art",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
