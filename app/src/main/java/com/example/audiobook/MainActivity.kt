@@ -5,6 +5,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -15,6 +17,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -50,13 +54,200 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.URLEncoder
 import java.util.Locale
 import kotlin.math.round
 
 private const val TAG = "Fablewood"
+
+data class ExtractedCoverPalette(
+    val dominantHue: Float,
+    val dominantSat: Float,
+    val accentHue: Float,
+    val accentSat: Float
+)
+
+fun extractCoverPaletteFromBitmap(bitmap: Bitmap?): ExtractedCoverPalette? {
+    if (bitmap == null || bitmap.width <= 0 || bitmap.height <= 0) return null
+    return try {
+        val scaled = Bitmap.createScaledBitmap(bitmap, 24, 24, true)
+        val pixels = IntArray(24 * 24)
+        scaled.getPixels(pixels, 0, 24, 0, 0, 24, 24)
+
+        val bucketCount = 36
+        val bucketWeights = FloatArray(bucketCount)
+        val bucketHueSum = FloatArray(bucketCount)
+        val bucketSatSum = FloatArray(bucketCount)
+        val bucketVibrancy = FloatArray(bucketCount)
+
+        val hsv = FloatArray(3)
+        for (px in pixels) {
+            val alpha = (px ushr 24) and 0xFF
+            if (alpha < 128) continue
+            AndroidColor.colorToHSV(px, hsv)
+            val h = hsv[0]
+            val s = hsv[1]
+            val v = hsv[2]
+
+            // Ignore near-black, washed-out white, and monochrome grey pixels
+            if (v < 0.14f || (v > 0.94f && s < 0.18f) || s < 0.14f) continue
+
+            val bucket = ((h / 10f).toInt()).coerceIn(0, bucketCount - 1)
+            val weight = s * v
+            bucketWeights[bucket] += weight
+            bucketHueSum[bucket] += h * weight
+            bucketSatSum[bucket] += s * weight
+            bucketVibrancy[bucket] += (s * s * v)
+        }
+
+        var domBucket = -1
+        var maxWeight = 0f
+        for (i in 0 until bucketCount) {
+            if (bucketWeights[i] > maxWeight) {
+                maxWeight = bucketWeights[i]
+                domBucket = i
+            }
+        }
+
+        if (domBucket == -1 || maxWeight <= 0f) return null
+
+        val domHue = (bucketHueSum[domBucket] / maxWeight).coerceIn(0f, 360f)
+        val domSat = (bucketSatSum[domBucket] / maxWeight).coerceIn(0.2f, 1f)
+
+        var accentBucket = domBucket
+        var maxVib = 0f
+        for (i in 0 until bucketCount) {
+            if (bucketWeights[i] <= 0f) continue
+            val avgH = bucketHueSum[i] / bucketWeights[i]
+            val hueDiff = kotlin.math.abs(avgH - domHue).let { if (it > 180f) 360f - it else it }
+            val distinctBonus = if (hueDiff > 25f) 1.35f else 1.0f
+            val score = bucketVibrancy[i] * distinctBonus
+            if (score > maxVib) {
+                maxVib = score
+                accentBucket = i
+            }
+        }
+
+        val accWeight = bucketWeights[accentBucket].coerceAtLeast(0.001f)
+        val accHue = (bucketHueSum[accentBucket] / accWeight).coerceIn(0f, 360f)
+        val accSat = (bucketSatSum[accentBucket] / accWeight).coerceIn(0.35f, 1f)
+
+        ExtractedCoverPalette(
+            dominantHue = domHue,
+            dominantSat = domSat,
+            accentHue = accHue,
+            accentSat = accSat
+        )
+    } catch (t: Throwable) {
+        Log.w(TAG, "Failed extracting palette from cover art", t)
+        null
+    }
+}
+
+private fun hsvColor(hue: Float, sat: Float, value: Float): Color {
+    val cleanHue = ((hue % 360f) + 360f) % 360f
+    val argb = AndroidColor.HSVToColor(
+        floatArrayOf(
+            cleanHue,
+            sat.coerceIn(0f, 1f),
+            value.coerceIn(0f, 1f)
+        )
+    )
+    return Color(argb)
+}
+
+fun buildDynamicColorScheme(palette: ExtractedCoverPalette?, isDarkTheme: Boolean): ColorScheme {
+    val defaultDark = darkColorScheme(
+        background = Color(0xFF0C1A14),
+        surface = Color(0xFF142B20),
+        surfaceVariant = Color(0xFF1E3F30),
+        onSurfaceVariant = Color(0xFFB5C7BD),
+        primary = Color(0xFFD4AF37),
+        onPrimary = Color.Black,
+        secondary = Color(0xFF2D5A27),
+        tertiary = Color(0xFF8B5A2B)
+    )
+    val defaultLight = lightColorScheme(
+        background = Color(0xFFF0F4F1),
+        surface = Color(0xFFFFFFFF),
+        surfaceVariant = Color(0xFFDCE6E0),
+        onSurfaceVariant = Color(0xFF44564C),
+        primary = Color(0xFFB58500),
+        onPrimary = Color.White,
+        secondary = Color(0xFF3E7A45),
+        tertiary = Color(0xFF8B5A2B)
+    )
+
+    if (palette == null) {
+        return if (isDarkTheme) defaultDark else defaultLight
+    }
+
+    return if (isDarkTheme) {
+        val bg = hsvColor(palette.dominantHue, (palette.dominantSat * 0.58f).coerceIn(0.22f, 0.52f), 0.12f)
+        val surf = hsvColor(palette.dominantHue, (palette.dominantSat * 0.52f).coerceIn(0.22f, 0.48f), 0.19f)
+        val surfVar = hsvColor(palette.dominantHue, (palette.dominantSat * 0.48f).coerceIn(0.24f, 0.50f), 0.28f)
+        val onSurfVar = hsvColor(palette.dominantHue, 0.14f, 0.82f)
+        val prim = hsvColor(palette.accentHue, palette.accentSat.coerceIn(0.50f, 0.82f), 0.92f)
+        val sec = hsvColor(palette.dominantHue, 0.45f, 0.42f)
+        val tert = hsvColor(palette.accentHue, 0.65f, 0.72f)
+
+        defaultDark.copy(
+            background = bg,
+            surface = surf,
+            surfaceVariant = surfVar,
+            onSurfaceVariant = onSurfVar,
+            primary = prim,
+            onPrimary = Color.Black,
+            secondary = sec,
+            tertiary = tert
+        )
+    } else {
+        val bg = hsvColor(palette.dominantHue, 0.09f, 0.96f)
+        val surf = Color(0xFFFFFFFF)
+        val surfVar = hsvColor(palette.dominantHue, 0.18f, 0.90f)
+        val onSurfVar = hsvColor(palette.dominantHue, 0.30f, 0.32f)
+        val prim = hsvColor(palette.accentHue, palette.accentSat.coerceIn(0.65f, 0.90f), 0.62f)
+        val sec = hsvColor(palette.dominantHue, 0.50f, 0.48f)
+        val tert = hsvColor(palette.accentHue, 0.60f, 0.55f)
+
+        defaultLight.copy(
+            background = bg,
+            surface = surf,
+            surfaceVariant = surfVar,
+            onSurfaceVariant = onSurfVar,
+            primary = prim,
+            onPrimary = Color.White,
+            secondary = sec,
+            tertiary = tert
+        )
+    }
+}
+
+@Composable
+fun rememberAnimatedColorScheme(target: ColorScheme): ColorScheme {
+    val spec = tween<Color>(durationMillis = 550)
+    val background by animateColorAsState(target.background, spec, label = "bg")
+    val surface by animateColorAsState(target.surface, spec, label = "surf")
+    val surfaceVariant by animateColorAsState(target.surfaceVariant, spec, label = "surfVar")
+    val onSurfaceVariant by animateColorAsState(target.onSurfaceVariant, spec, label = "onSurfVar")
+    val primary by animateColorAsState(target.primary, spec, label = "prim")
+    val secondary by animateColorAsState(target.secondary, spec, label = "sec")
+    val tertiary by animateColorAsState(target.tertiary, spec, label = "tert")
+
+    return target.copy(
+        background = background,
+        surface = surface,
+        surfaceVariant = surfaceVariant,
+        onSurfaceVariant = onSurfaceVariant,
+        primary = primary,
+        secondary = secondary,
+        tertiary = tertiary
+    )
+}
 
 class LibraryViewModelFactory(private val repository: AudiobookRepository) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -164,30 +355,34 @@ class MainActivity : ComponentActivity() {
                 onDispose { MediaController.releaseFuture(controllerFuture) }
             }
 
-            var isDarkTheme by remember { mutableStateOf(repository.getPreferences().getBoolean("is_dark_theme", true)) }
+            var isDarkTheme by remember {
+                mutableStateOf(repository.getPreferences().getBoolean("is_dark_theme", true))
+            }
+            var dynamicThemeEnabled by remember {
+                mutableStateOf(repository.getPreferences().getBoolean("dynamic_cover_theme", true))
+            }
+            var extractedPalette by remember { mutableStateOf<ExtractedCoverPalette?>(null) }
 
-            val darkColors = darkColorScheme(
-                background = Color(0xFF0C1A14),
-                surface = Color(0xFF142B20),
-                surfaceVariant = Color(0xFF1E3F30),
-                onSurfaceVariant = Color(0xFFB5C7BD),
-                primary = Color(0xFFD4AF37),
-                onPrimary = Color.Black,
-                secondary = Color(0xFF2D5A27),
-                tertiary = Color(0xFF8B5A2B)
-            )
-            val lightColors = lightColorScheme(
-                background = Color(0xFFF0F4F1),
-                surface = Color(0xFFFFFFFF),
-                surfaceVariant = Color(0xFFDCE6E0),
-                onSurfaceVariant = Color(0xFF44564C),
-                primary = Color(0xFFB58500),
-                onPrimary = Color.White,
-                secondary = Color(0xFF3E7A45),
-                tertiary = Color(0xFF8B5A2B)
-            )
+            LaunchedEffect(libraryViewModel.currentCoverArt, dynamicThemeEnabled) {
+                if (!dynamicThemeEnabled || libraryViewModel.currentCoverArt == null) {
+                    extractedPalette = null
+                } else {
+                    val bmp = libraryViewModel.currentCoverArt
+                    extractedPalette = withContext(Dispatchers.Default) {
+                        extractCoverPaletteFromBitmap(bmp)
+                    }
+                }
+            }
 
-            MaterialTheme(colorScheme = if (isDarkTheme) darkColors else lightColors) {
+            val targetColorScheme = remember(extractedPalette, isDarkTheme, dynamicThemeEnabled) {
+                buildDynamicColorScheme(
+                    palette = if (dynamicThemeEnabled) extractedPalette else null,
+                    isDarkTheme = isDarkTheme
+                )
+            }
+            val animatedColorScheme = rememberAnimatedColorScheme(targetColorScheme)
+
+            MaterialTheme(colorScheme = animatedColorScheme) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     if (controller != null) {
                         val binder = remember(controller) {
@@ -197,9 +392,14 @@ class MainActivity : ComponentActivity() {
                             binder = binder,
                             viewModel = libraryViewModel,
                             isDarkTheme = isDarkTheme,
+                            dynamicThemeEnabled = dynamicThemeEnabled,
                             onToggleTheme = {
                                 isDarkTheme = !isDarkTheme
                                 repository.getPreferences().edit().putBoolean("is_dark_theme", isDarkTheme).apply()
+                            },
+                            onToggleDynamicTheme = { enabled ->
+                                dynamicThemeEnabled = enabled
+                                repository.getPreferences().edit().putBoolean("dynamic_cover_theme", enabled).apply()
                             }
                         )
                     } else {
@@ -231,7 +431,9 @@ fun FablewoodAudiobookApp(
     binder: PlayerBinder,
     viewModel: LibraryViewModel,
     isDarkTheme: Boolean,
-    onToggleTheme: () -> Unit
+    dynamicThemeEnabled: Boolean,
+    onToggleTheme: () -> Unit,
+    onToggleDynamicTheme: (Boolean) -> Unit
 ) {
     val player = binder.player
     val context = LocalContext.current
@@ -814,7 +1016,6 @@ fun FablewoodAudiobookApp(
                 }
             ) { innerPadding ->
                 Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
-                    // Always pin the currently active / last-played book to index 0 at the top of the bookshelf
                     val displayedBooks = remember(
                         viewModel.books,
                         viewModel.searchQuery,
@@ -939,7 +1140,6 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // Interactive Live Cover Picker Dialog (Apple Books Square + Google Books + Open Library + Device/Web)
     if (showCoverOptionsDialog && targetBookForCoverAction != null) {
         val targetBook = targetBookForCoverAction!!
         AlertDialog(
@@ -1288,18 +1488,41 @@ fun FablewoodAudiobookApp(
             onDismissRequest = { showSettingsDialog = false },
             title = { Text(stringResource(R.string.settings)) },
             text = {
-                Column {
-                    Text(stringResource(R.string.skip_interval_label), fontWeight = FontWeight.Bold)
-                    Slider(
-                        value = viewModel.skipIntervalSeconds.toFloat(),
-                        onValueChange = {
-                            val newVal = round(it).toInt()
-                            viewModel.updateSkipInterval(newVal)
-                        },
-                        valueRange = 5f..60f,
-                        steps = 10
-                    )
-                    Text("${viewModel.skipIntervalSeconds}s", modifier = Modifier.align(Alignment.End))
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Dynamic Cover Theme", fontWeight = FontWeight.Bold)
+                            Text(
+                                "Match UI colors to the active audiobook's cover art",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = dynamicThemeEnabled,
+                            onCheckedChange = { onToggleDynamicTheme(it) }
+                        )
+                    }
+
+                    HorizontalDivider()
+
+                    Column {
+                        Text(stringResource(R.string.skip_interval_label), fontWeight = FontWeight.Bold)
+                        Slider(
+                            value = viewModel.skipIntervalSeconds.toFloat(),
+                            onValueChange = {
+                                val newVal = round(it).toInt()
+                                viewModel.updateSkipInterval(newVal)
+                            },
+                            valueRange = 5f..60f,
+                            steps = 10
+                        )
+                        Text("${viewModel.skipIntervalSeconds}s", modifier = Modifier.align(Alignment.End))
+                    }
                 }
             },
             confirmButton = { TextButton(onClick = { showSettingsDialog = false }) { Text(stringResource(R.string.close)) } }
