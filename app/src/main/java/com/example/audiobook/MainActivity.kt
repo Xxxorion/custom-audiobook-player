@@ -93,7 +93,6 @@ fun extractCoverPaletteFromBitmap(bitmap: Bitmap?): ExtractedCoverPalette? {
             val s = hsv[1]
             val v = hsv[2]
 
-            // Ignore near-black, washed-out white, and monochrome grey pixels
             if (v < 0.14f || (v > 0.94f && s < 0.18f) || s < 0.14f) continue
 
             val bucket = ((h / 10f).toInt()).coerceIn(0, bucketCount - 1)
@@ -440,7 +439,8 @@ fun FablewoodAudiobookApp(
     val coroutineScope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
-    var targetBookForCoverAction by remember { mutableStateOf<Audiobook?>(null) }
+    // Unified Cover Art Target (Works for both Audiobooks & eBooks)
+    var targetCoverItemId by remember { mutableStateOf("") }
     var showCoverOptionsDialog by remember { mutableStateOf(false) }
     var liveCoverSearchQuery by remember { mutableStateOf("") }
 
@@ -499,11 +499,20 @@ fun FablewoodAudiobookApp(
                         binder.playBook(firstBook, savedTrackIdx, savedPos, false)
                     }
                     FablewoodWidgetProvider.updateAllWidgets(context)
-                    if (explicitUserAction) {
-                        Toast.makeText(context, "Found ${scannedBooks.size} audiobook(s)", Toast.LENGTH_SHORT).show()
+                }
+                val scannedEbooks = viewModel.repository.scanDeviceForEbooks()
+                if (scannedEbooks.isNotEmpty()) {
+                    viewModel.ebooks = scannedEbooks
+                    if (viewModel.currentEbookId.isEmpty()) {
+                        viewModel.selectEbook(scannedEbooks.first(), openFullScreen = false)
                     }
-                } else if (explicitUserAction && viewModel.books.isEmpty()) {
-                    Toast.makeText(context, context.getString(R.string.no_supported_audio_files), Toast.LENGTH_SHORT).show()
+                }
+                if (explicitUserAction) {
+                    Toast.makeText(
+                        context,
+                        "Found ${scannedBooks.size} audiobook(s) & ${scannedEbooks.size} eBook(s)",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "Auto device scan failed", t)
@@ -536,14 +545,43 @@ fun FablewoodAudiobookApp(
         }
     }
 
+    val epubFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: Throwable) {}
+            }
+            coroutineScope.launch {
+                val updatedEbooks = viewModel.repository.importEpubUris(uris)
+                viewModel.ebooks = updatedEbooks
+                val newlyImported = updatedEbooks.find { it.uri == uris.first() } ?: updatedEbooks.firstOrNull()
+                if (newlyImported != null) {
+                    viewModel.updateShelfMode("EBOOK")
+                    viewModel.selectEbook(newlyImported, openFullScreen = true)
+                }
+                Toast.makeText(context, "Imported ${uris.size} eBook(s)", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     val activeBook = remember(viewModel.books, viewModel.currentBookId) {
         viewModel.books.find { it.id == viewModel.currentBookId }
     }
 
+    val activeEbook = remember(viewModel.ebooks, viewModel.currentEbookId) {
+        viewModel.ebooks.find { it.id == viewModel.currentEbookId } ?: viewModel.ebooks.firstOrNull()
+    }
+
     val customCoverLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { selectedUri ->
-            targetBookForCoverAction?.let { book ->
-                viewModel.setCustomCover(book.id, selectedUri) { success ->
+            if (targetCoverItemId.isNotEmpty()) {
+                viewModel.setCustomCover(targetCoverItemId, selectedUri) { success ->
                     if (success) {
                         Toast.makeText(context, "Custom cover saved!", Toast.LENGTH_SHORT).show()
                     }
@@ -579,6 +617,12 @@ fun FablewoodAudiobookApp(
                         binder.playBook(selectedBook, savedTrackIdx, savedPos, false)
                         FablewoodWidgetProvider.updateAllWidgets(context)
                     }
+
+                    val folderEbooks = viewModel.repository.scanFolderForEbooks(it)
+                    if (folderEbooks.isNotEmpty()) {
+                        viewModel.ebooks = folderEbooks
+                        viewModel.repository.saveEbooksCache(folderEbooks)
+                    }
                 } catch (t: Throwable) {
                     Log.e(TAG, "Explicit folder scan threw an error", t)
                     Toast.makeText(context, context.getString(R.string.folder_scan_failed), Toast.LENGTH_SHORT).show()
@@ -587,9 +631,12 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    BackHandler(enabled = viewModel.isCarModeActive || viewModel.isPlayerFullScreen) {
-        if (viewModel.isCarModeActive) viewModel.isCarModeActive = false
-        else viewModel.isPlayerFullScreen = false
+    BackHandler(enabled = viewModel.isCarModeActive || viewModel.isPlayerFullScreen || viewModel.isEbookReaderFullScreen) {
+        when {
+            viewModel.isCarModeActive -> viewModel.isCarModeActive = false
+            viewModel.isEbookReaderFullScreen -> viewModel.isEbookReaderFullScreen = false
+            else -> viewModel.isPlayerFullScreen = false
+        }
     }
 
     LaunchedEffect(viewModel.playbackSpeed, viewModel.playbackPitch) {
@@ -637,6 +684,12 @@ fun FablewoodAudiobookApp(
             }
         }
 
+        val lastEbookId = viewModel.repository.getLastEbookId()
+        val initialEbook = viewModel.ebooks.find { it.id == lastEbookId } ?: viewModel.ebooks.firstOrNull()
+        if (initialEbook != null && viewModel.currentEbookChapters.isEmpty()) {
+            viewModel.selectEbook(initialEbook, openFullScreen = false)
+        }
+
         val scanMode = viewModel.repository.getScanMode()
         val savedUriStr = viewModel.repository.getSelectedFolderUri()
 
@@ -655,15 +708,14 @@ fun FablewoodAudiobookApp(
                         val savedPos = viewModel.repository.getBookPosition(firstBook.id)
                         binder.playBook(firstBook, savedTrackIdx, savedPos, false)
                     }
-                } else if (viewModel.books.isNotEmpty()) {
-                    Log.w(TAG, "Launch folder refresh returned empty; preserving cached library")
-                    Toast.makeText(context, context.getString(R.string.folder_refresh_failed), Toast.LENGTH_SHORT).show()
+                }
+                val folderEbooks = viewModel.repository.scanFolderForEbooks(folderUri)
+                if (folderEbooks.isNotEmpty()) {
+                    viewModel.ebooks = folderEbooks
+                    viewModel.repository.saveEbooksCache(folderEbooks)
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "Launch folder refresh failed; preserving cached library", t)
-                if (viewModel.books.isNotEmpty()) {
-                    Toast.makeText(context, context.getString(R.string.folder_refresh_failed), Toast.LENGTH_SHORT).show()
-                }
             }
         } else {
             if (hasAudioReadPermission(context)) {
@@ -823,6 +875,15 @@ fun FablewoodAudiobookApp(
                     }
                 )
                 NavigationDrawerItem(
+                    icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
+                    label = { Text("Import .epub eBook(s)") },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        epubFilePicker.launch(arrayOf("application/epub+zip", "*/*"))
+                    }
+                )
+                NavigationDrawerItem(
                     icon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
                     label = { Text(stringResource(R.string.select_audiobook_folder)) },
                     selected = false,
@@ -878,270 +939,415 @@ fun FablewoodAudiobookApp(
             }
         }
     ) {
-        if (viewModel.isCarModeActive && activeBook != null) {
-            CarModeScreen(
-                book = activeBook,
-                chapterTitle = currentChapter?.title ?: getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex),
-                isPlaying = viewModel.isPlaying,
-                skipIntervalSeconds = viewModel.skipIntervalSeconds,
-                onPlayPause = togglePlayPause,
-                onQuickRewind = {
-                    val newPos = (player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)).coerceAtLeast(0L)
-                    binder.seekAndPersist(player.currentMediaItemIndex, newPos)
-                },
-                onQuickForward = {
-                    val maxDur = if (viewModel.duration > 0L) viewModel.duration else Long.MAX_VALUE
-                    val newPos = (player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)).coerceAtMost(maxDur)
-                    binder.seekAndPersist(player.currentMediaItemIndex, newPos)
-                },
-                onAddBookmark = { showAddBookmarkPrompt = true },
-                onExitCarMode = { viewModel.isCarModeActive = false }
-            )
-        } else if (viewModel.isPlayerFullScreen && activeBook != null) {
-            NowPlayingScreen(
-                book = activeBook,
-                coverArt = viewModel.currentCoverArt?.asImageBitmap(),
-                chapterTitle = currentChapter?.title ?: getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex),
-                isPlaying = viewModel.isPlaying,
-                currentPosition = viewModel.currentPosition,
-                duration = viewModel.duration,
-                bookPositionMs = totalBookReadMs,
-                bookDurationMs = totalBookDurationMs,
-                skipIntervalSeconds = viewModel.skipIntervalSeconds,
-                silenceTrimEnabled = viewModel.silenceTrimEnabled,
-                sleepTimerActive = viewModel.sleepTimerActive,
-                sleepTimeRemaining = viewModel.sleepTimeRemaining,
-                sleepEndAtChapter = viewModel.sleepEndAtChapter,
-                isDarkTheme = isDarkTheme,
-                playerVolume = viewModel.playerVolume,
-                playbackSpeed = viewModel.playbackSpeed,
-                onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
-                onBackToBookshelf = {
-                    viewModel.saveProgressNow(activeBook.id, player.currentMediaItemIndex, player.currentPosition)
-                    viewModel.isPlayerFullScreen = false
-                },
-                onPlayPause = togglePlayPause,
-                onSeekLive = { pos -> binder.seekLive(pos) },
-                onSeekFinished = { pos -> binder.seekAndPersist(player.currentMediaItemIndex, pos) },
-                onSkipPrevChapter = {
-                    val chapters = viewModel.chaptersList
-                    if (chapters.isNotEmpty()) {
-                        val currChap = chapters.getOrNull(currentChapterIndex)
-                        if (currChap != null && viewModel.currentPosition - currChap.startMs > 3000L) {
-                            binder.seekAndPersist(currChap.trackIndex, currChap.startMs)
-                        } else if (currentChapterIndex > 0) {
-                            val prevChap = chapters[currentChapterIndex - 1]
-                            binder.seekAndPersist(prevChap.trackIndex, prevChap.startMs)
-                        } else {
-                            binder.seekAndPersist(0, 0L)
-                        }
-                    } else {
-                        player.seekToPreviousMediaItem()
-                        viewModel.saveProgressNow(activeBook.id, player.currentMediaItemIndex, player.currentPosition)
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val isFoldableUnfolded = maxWidth >= 600.dp
+
+            @Composable
+            fun RenderNowPlaying(isEmbedded: Boolean) {
+                if (activeBook == null) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("Select an audiobook on the left page to begin listening.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                },
-                onSkipNextChapter = {
-                    val chapters = viewModel.chaptersList
-                    if (chapters.isNotEmpty() && currentChapterIndex + 1 < chapters.size) {
-                        val nextChap = chapters[currentChapterIndex + 1]
-                        binder.seekAndPersist(nextChap.trackIndex, nextChap.startMs)
-                    } else if (player.hasNextMediaItem()) {
-                        player.seekToNextMediaItem()
-                        viewModel.saveProgressNow(activeBook.id, player.currentMediaItemIndex, player.currentPosition)
-                    }
-                },
-                onQuickRewind = {
-                    val newPos = (player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)).coerceAtLeast(0L)
-                    binder.seekAndPersist(player.currentMediaItemIndex, newPos)
-                },
-                onQuickForward = {
-                    val maxDur = if (viewModel.duration > 0L) viewModel.duration else Long.MAX_VALUE
-                    val newPos = (player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)).coerceAtMost(maxDur)
-                    binder.seekAndPersist(player.currentMediaItemIndex, newPos)
-                },
-                onToggleSilenceTrim = {
-                    viewModel.setSilenceTrim(!viewModel.silenceTrimEnabled)
-                },
-                onOpenSleepMenu = { showSleepMenu = true },
-                onToggleTheme = onToggleTheme,
-                onOpenAudioFX = { showAudioFXDialog = true },
-                onOpenChapters = { showChaptersDialog = true },
-                onOpenBookmarks = { showBookmarksDialog = true },
-                onOpenSpeed = { showSpeedDialog = true },
-                onEnterCarMode = { viewModel.isCarModeActive = true },
-                onVolumeChange = { vol ->
-                    viewModel.playerVolume = vol
-                    player.volume = vol
-                },
-                chapterStartMs = currentChapter?.startMs ?: 0L,
-                chapterDurationMs = currentChapter?.durationMs ?: 0L
-            )
-        } else {
-            Scaffold(
-                topBar = {
-                    CenterAlignedTopAppBar(
-                        title = { Text(stringResource(R.string.app_header_title), fontWeight = FontWeight.Bold) },
-                        navigationIcon = {
-                            IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
-                                Icon(Icons.Default.Menu, contentDescription = "Menu")
-                            }
-                        },
-                        actions = {
-                            IconButton(onClick = {
-                                viewModel.isSearching = !viewModel.isSearching
-                                if (!viewModel.isSearching) viewModel.searchQuery = ""
-                            }) {
-                                Icon(Icons.Default.Search, contentDescription = "Search")
-                            }
-                            IconButton(onClick = { showViewDialog = true }) {
-                                Icon(if (viewModel.viewMode == "GRID") Icons.Default.GridView else Icons.Default.ViewList, contentDescription = stringResource(R.string.view_mode))
-                            }
-                            IconButton(onClick = { showSortDialog = true }) {
-                                Icon(Icons.Default.Sort, contentDescription = stringResource(R.string.sort_library_by))
-                            }
-                        }
-                    )
-                },
-                bottomBar = {
-                    if (activeBook != null) {
-                        MiniPlayerBar(
-                            book = activeBook,
-                            coverArt = viewModel.currentCoverArt?.asImageBitmap(),
-                            chapterTitle = currentChapter?.title ?: getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex),
-                            isPlaying = viewModel.isPlaying,
-                            onPlayPause = togglePlayPause,
-                            onOpenPlayer = { viewModel.isPlayerFullScreen = true }
-                        )
-                    }
+                    return
                 }
-            ) { innerPadding ->
-                Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
-                    val displayedBooks = remember(
-                        viewModel.books,
-                        viewModel.searchQuery,
-                        viewModel.sortBy,
-                        viewModel.currentBookId,
-                        viewModel.progressRevision
-                    ) {
-                        val filtered = viewModel.books.filter {
-                            if (viewModel.searchQuery.isEmpty()) true
-                            else it.title.contains(viewModel.searchQuery, ignoreCase = true) ||
-                                it.author.contains(viewModel.searchQuery, ignoreCase = true)
+                NowPlayingScreen(
+                    book = activeBook,
+                    coverArt = viewModel.currentCoverArt?.asImageBitmap(),
+                    chapterTitle = currentChapter?.title ?: getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex),
+                    isPlaying = viewModel.isPlaying,
+                    currentPosition = viewModel.currentPosition,
+                    duration = viewModel.duration,
+                    bookPositionMs = totalBookReadMs,
+                    bookDurationMs = totalBookDurationMs,
+                    skipIntervalSeconds = viewModel.skipIntervalSeconds,
+                    silenceTrimEnabled = viewModel.silenceTrimEnabled,
+                    sleepTimerActive = viewModel.sleepTimerActive,
+                    sleepTimeRemaining = viewModel.sleepTimeRemaining,
+                    sleepEndAtChapter = viewModel.sleepEndAtChapter,
+                    isDarkTheme = isDarkTheme,
+                    playerVolume = viewModel.playerVolume,
+                    playbackSpeed = viewModel.playbackSpeed,
+                    isEmbeddedPane = isEmbedded,
+                    onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                    onBackToBookshelf = {
+                        viewModel.saveProgressNow(activeBook.id, player.currentMediaItemIndex, player.currentPosition)
+                        viewModel.isPlayerFullScreen = !viewModel.isPlayerFullScreen
+                    },
+                    onPlayPause = togglePlayPause,
+                    onSeekLive = { pos -> binder.seekLive(pos) },
+                    onSeekFinished = { pos -> binder.seekAndPersist(player.currentMediaItemIndex, pos) },
+                    onSkipPrevChapter = {
+                        val chapters = viewModel.chaptersList
+                        if (chapters.isNotEmpty()) {
+                            val currChap = chapters.getOrNull(currentChapterIndex)
+                            if (currChap != null && viewModel.currentPosition - currChap.startMs > 3000L) {
+                                binder.seekAndPersist(currChap.trackIndex, currChap.startMs)
+                            } else if (currentChapterIndex > 0) {
+                                val prevChap = chapters[currentChapterIndex - 1]
+                                binder.seekAndPersist(prevChap.trackIndex, prevChap.startMs)
+                            } else {
+                                binder.seekAndPersist(0, 0L)
+                            }
+                        } else {
+                            player.seekToPreviousMediaItem()
+                            viewModel.saveProgressNow(activeBook.id, player.currentMediaItemIndex, player.currentPosition)
                         }
-
-                        val activeId = viewModel.currentBookId.ifEmpty {
-                            viewModel.repository.getLastBookId() ?: ""
+                    },
+                    onSkipNextChapter = {
+                        val chapters = viewModel.chaptersList
+                        if (chapters.isNotEmpty() && currentChapterIndex + 1 < chapters.size) {
+                            val nextChap = chapters[currentChapterIndex + 1]
+                            binder.seekAndPersist(nextChap.trackIndex, nextChap.startMs)
+                        } else if (player.hasNextMediaItem()) {
+                            player.seekToNextMediaItem()
+                            viewModel.saveProgressNow(activeBook.id, player.currentMediaItemIndex, player.currentPosition)
                         }
+                    },
+                    onQuickRewind = {
+                        val newPos = (player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)).coerceAtLeast(0L)
+                        binder.seekAndPersist(player.currentMediaItemIndex, newPos)
+                    },
+                    onQuickForward = {
+                        val maxDur = if (viewModel.duration > 0L) viewModel.duration else Long.MAX_VALUE
+                        val newPos = (player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)).coerceAtMost(maxDur)
+                        binder.seekAndPersist(player.currentMediaItemIndex, newPos)
+                    },
+                    onToggleSilenceTrim = { viewModel.setSilenceTrim(!viewModel.silenceTrimEnabled) },
+                    onOpenSleepMenu = { showSleepMenu = true },
+                    onToggleTheme = onToggleTheme,
+                    onOpenAudioFX = { showAudioFXDialog = true },
+                    onOpenChapters = { showChaptersDialog = true },
+                    onOpenBookmarks = { showBookmarksDialog = true },
+                    onOpenSpeed = { showSpeedDialog = true },
+                    onEnterCarMode = { viewModel.isCarModeActive = true },
+                    onVolumeChange = { vol ->
+                        viewModel.playerVolume = vol
+                        player.volume = vol
+                    },
+                    chapterStartMs = currentChapter?.startMs ?: 0L,
+                    chapterDurationMs = currentChapter?.durationMs ?: 0L
+                )
+            }
 
-                        val baseSorted = when (viewModel.sortBy) {
-                            "TITLE" -> filtered.sortedWith { a, b -> compareNatural(a.title, b.title) }
-                            "AUTHOR" -> filtered.sortedWith { a, b -> compareNatural(a.author, b.author) }
-                            else -> {
-                                filtered.sortedWith { a, b ->
-                                    val timeA = viewModel.repository.getBookLastPlayedTime(a.id)
-                                    val timeB = viewModel.repository.getBookLastPlayedTime(b.id)
-                                    if (timeA != timeB) {
-                                        timeB.compareTo(timeA)
-                                    } else {
-                                        val posA = viewModel.repository.getBookPosition(a.id)
-                                        val posB = viewModel.repository.getBookPosition(b.id)
-                                        if (posA != posB) {
-                                            posB.compareTo(posA)
-                                        } else {
-                                            0
+            @Composable
+            fun RenderShelfScaffold(showBottomMiniPlayer: Boolean) {
+                Scaffold(
+                    topBar = {
+                        CenterAlignedTopAppBar(
+                            title = {
+                                ShelfModeTogglePill(
+                                    shelfMode = viewModel.shelfMode,
+                                    onSelectMode = { mode ->
+                                        viewModel.updateShelfMode(mode)
+                                        if (mode == "EBOOK" && viewModel.ebooks.isEmpty()) {
+                                            coroutineScope.launch {
+                                                val found = viewModel.repository.scanDeviceForEbooks()
+                                                if (found.isNotEmpty()) {
+                                                    viewModel.ebooks = found
+                                                    viewModel.selectEbook(found.first(), openFullScreen = false)
+                                                }
+                                            }
                                         }
                                     }
+                                )
+                            },
+                            navigationIcon = {
+                                IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
+                                    Icon(Icons.Default.Menu, contentDescription = "Menu")
+                                }
+                            },
+                            actions = {
+                                if (viewModel.shelfMode == "EBOOK") {
+                                    IconButton(onClick = { epubFilePicker.launch(arrayOf("application/epub+zip", "*/*")) }) {
+                                        Icon(Icons.Default.FileOpen, contentDescription = "Import .epub", tint = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                                IconButton(onClick = {
+                                    viewModel.isSearching = !viewModel.isSearching
+                                    if (!viewModel.isSearching) viewModel.searchQuery = ""
+                                }) {
+                                    Icon(Icons.Default.Search, contentDescription = "Search")
+                                }
+                                IconButton(onClick = { showViewDialog = true }) {
+                                    Icon(if (viewModel.viewMode == "GRID") Icons.Default.GridView else Icons.Default.ViewList, contentDescription = stringResource(R.string.view_mode))
+                                }
+                                IconButton(onClick = { showSortDialog = true }) {
+                                    Icon(Icons.Default.Sort, contentDescription = stringResource(R.string.sort_library_by))
                                 }
                             }
-                        }
-
-                        if (activeId.isNotEmpty()) {
-                            val (pinned, rest) = baseSorted.partition { it.id == activeId }
-                            pinned + rest
-                        } else {
-                            baseSorted
+                        )
+                    },
+                    bottomBar = {
+                        if (showBottomMiniPlayer && activeBook != null) {
+                            MiniPlayerBar(
+                                book = activeBook,
+                                coverArt = viewModel.currentCoverArt?.asImageBitmap(),
+                                chapterTitle = currentChapter?.title ?: getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex),
+                                isPlaying = viewModel.isPlaying,
+                                onPlayPause = togglePlayPause,
+                                onOpenPlayer = { viewModel.isPlayerFullScreen = true }
+                            )
                         }
                     }
+                ) { innerPadding ->
+                    Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
+                        val displayedBooks = remember(
+                            viewModel.books,
+                            viewModel.searchQuery,
+                            viewModel.sortBy,
+                            viewModel.currentBookId,
+                            viewModel.progressRevision
+                        ) {
+                            val filtered = viewModel.books.filter {
+                                if (viewModel.searchQuery.isEmpty()) true
+                                else it.title.contains(viewModel.searchQuery, ignoreCase = true) ||
+                                    it.author.contains(viewModel.searchQuery, ignoreCase = true)
+                            }
+                            val activeId = viewModel.currentBookId.ifEmpty { viewModel.repository.getLastBookId() ?: "" }
+                            val baseSorted = when (viewModel.sortBy) {
+                                "TITLE" -> filtered.sortedWith { a, b -> compareNatural(a.title, b.title) }
+                                "AUTHOR" -> filtered.sortedWith { a, b -> compareNatural(a.author, b.author) }
+                                else -> filtered.sortedWith { a, b ->
+                                    val timeA = viewModel.repository.getBookLastPlayedTime(a.id)
+                                    val timeB = viewModel.repository.getBookLastPlayedTime(b.id)
+                                    if (timeA != timeB) timeB.compareTo(timeA)
+                                    else viewModel.repository.getBookPosition(b.id).compareTo(viewModel.repository.getBookPosition(a.id))
+                                }
+                            }
+                            if (activeId.isNotEmpty()) {
+                                val (pinned, rest) = baseSorted.partition { it.id == activeId }
+                                pinned + rest
+                            } else baseSorted
+                        }
 
-                    val activeProgressFraction = if (totalBookDurationMs > 0L) {
-                        (totalBookReadMs.toFloat() / totalBookDurationMs).coerceIn(0f, 1f)
-                    } else 0f
+                        val displayedEbooks = remember(
+                            viewModel.ebooks,
+                            viewModel.searchQuery,
+                            viewModel.sortBy,
+                            viewModel.currentEbookId,
+                            viewModel.progressRevision
+                        ) {
+                            val filtered = viewModel.ebooks.filter {
+                                if (viewModel.searchQuery.isEmpty()) true
+                                else it.title.contains(viewModel.searchQuery, ignoreCase = true) ||
+                                    it.author.contains(viewModel.searchQuery, ignoreCase = true)
+                            }
+                            val activeEbId = viewModel.currentEbookId
+                            val baseSorted = when (viewModel.sortBy) {
+                                "TITLE" -> filtered.sortedWith { a, b -> compareNatural(a.title, b.title) }
+                                "AUTHOR" -> filtered.sortedWith { a, b -> compareNatural(a.author, b.author) }
+                                else -> filtered.sortedWith { a, b ->
+                                    viewModel.repository.getEbookLastReadTime(b.id)
+                                        .compareTo(viewModel.repository.getEbookLastReadTime(a.id))
+                                }
+                            }
+                            if (activeEbId.isNotEmpty()) {
+                                val (pinned, rest) = baseSorted.partition { it.id == activeEbId }
+                                pinned + rest
+                            } else baseSorted
+                        }
 
-                    val activeSubtitleText = when {
-                        viewModel.chaptersList.size > 1 && totalBookDurationMs > 0L ->
-                            "${viewModel.chaptersList.size} chapters • ${formatTime(totalBookDurationMs)}"
-                        totalBookDurationMs > 0L -> formatTime(totalBookDurationMs)
-                        else -> ""
-                    }
+                        val activeProgressFraction = if (totalBookDurationMs > 0L) {
+                            (totalBookReadMs.toFloat() / totalBookDurationMs).coerceIn(0f, 1f)
+                        } else 0f
 
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        if (viewModel.isSearching || viewModel.searchQuery.isNotEmpty()) {
-                            OutlinedTextField(
-                                value = viewModel.searchQuery,
-                                onValueChange = { viewModel.searchQuery = it },
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                                placeholder = { Text(stringResource(R.string.search_books_hint)) },
-                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                                trailingIcon = {
-                                    IconButton(onClick = {
-                                        viewModel.searchQuery = ""
-                                        viewModel.isSearching = false
-                                    }) {
-                                        Icon(Icons.Default.Close, contentDescription = "Close Search")
+                        val activeSubtitleText = when {
+                            viewModel.chaptersList.size > 1 && totalBookDurationMs > 0L ->
+                                "${viewModel.chaptersList.size} chapters • ${formatTime(totalBookDurationMs)}"
+                            totalBookDurationMs > 0L -> formatTime(totalBookDurationMs)
+                            else -> ""
+                        }
+
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            if (viewModel.isSearching || viewModel.searchQuery.isNotEmpty()) {
+                                OutlinedTextField(
+                                    value = viewModel.searchQuery,
+                                    onValueChange = { viewModel.searchQuery = it },
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                                    placeholder = { Text(stringResource(R.string.search_books_hint)) },
+                                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                                    trailingIcon = {
+                                        IconButton(onClick = {
+                                            viewModel.searchQuery = ""
+                                            viewModel.isSearching = false
+                                        }) {
+                                            Icon(Icons.Default.Close, contentDescription = "Close Search")
+                                        }
+                                    },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                            }
+
+                            if (viewModel.shelfMode == "AUDIO") {
+                                BookshelfContent(
+                                    books = displayedBooks,
+                                    activeBookId = viewModel.currentBookId,
+                                    activeBookProgress = activeProgressFraction,
+                                    activeBookSubtitle = activeSubtitleText,
+                                    hasSelectedFolder = viewModel.selectedFolderUri.isNotEmpty(),
+                                    viewMode = viewModel.viewMode,
+                                    viewModel = viewModel,
+                                    onAutoScanDevice = { triggerAutoScanWithPermission() },
+                                    onChooseFolder = { folderPicker.launch(null) },
+                                    onSelectBook = { book ->
+                                        viewModel.repository.touchBookLastPlayed(book.id)
+                                        viewModel.progressRevision++
+                                        if (book.id == viewModel.currentBookId && player.mediaItemCount > 0) {
+                                            if (!isFoldableUnfolded) viewModel.isPlayerFullScreen = true
+                                        } else {
+                                            val snapshotPos = player.currentPosition
+                                            val snapshotIdx = player.currentMediaItemIndex
+                                            activeBook?.let { curr ->
+                                                viewModel.saveProgressNow(curr.id, snapshotIdx, snapshotPos)
+                                            }
+                                            player.playWhenReady = false
+                                            player.pause()
+
+                                            viewModel.selectBookMetadata(book, isDifferentBook = true)
+                                            val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
+                                            val savedPos = viewModel.repository.getBookPosition(book.id)
+                                            binder.playBook(book, savedTrackIdx, savedPos, false)
+                                            if (!isFoldableUnfolded) viewModel.isPlayerFullScreen = true
+                                        }
+                                    },
+                                    onLongPressBook = { book ->
+                                        targetCoverItemId = book.id
+                                        val initialCleanQuery = cleanAudiobookSearchQuery(book.title, book.author)
+                                        liveCoverSearchQuery = initialCleanQuery
+                                        showCoverOptionsDialog = true
+                                        viewModel.searchOnlineCoverCandidates(initialCleanQuery)
                                     }
-                                },
-                                singleLine = true,
-                                shape = RoundedCornerShape(12.dp)
+                                )
+                            } else {
+                                EbookShelfContent(
+                                    ebooks = displayedEbooks,
+                                    activeEbookId = viewModel.currentEbookId,
+                                    viewMode = viewModel.viewMode,
+                                    viewModel = viewModel,
+                                    onScanDeviceEbooks = {
+                                        coroutineScope.launch {
+                                            val scanned = viewModel.repository.scanDeviceForEbooks()
+                                            viewModel.ebooks = scanned
+                                            Toast.makeText(context, "Found ${scanned.size} .epub file(s)", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    onImportEpubFiles = {
+                                        epubFilePicker.launch(arrayOf("application/epub+zip", "*/*"))
+                                    },
+                                    onSelectEbook = { ebook ->
+                                        viewModel.selectEbook(ebook, openFullScreen = !isFoldableUnfolded)
+                                    },
+                                    onLongPressEbook = { ebook ->
+                                        targetCoverItemId = ebook.id
+                                        val initialCleanQuery = cleanAudiobookSearchQuery(ebook.title, ebook.author)
+                                        liveCoverSearchQuery = initialCleanQuery
+                                        showCoverOptionsDialog = true
+                                        viewModel.searchOnlineCoverCandidates(initialCleanQuery)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            when {
+                viewModel.isCarModeActive && activeBook != null -> {
+                    CarModeScreen(
+                        book = activeBook,
+                        chapterTitle = currentChapter?.title ?: getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex),
+                        isPlaying = viewModel.isPlaying,
+                        skipIntervalSeconds = viewModel.skipIntervalSeconds,
+                        onPlayPause = togglePlayPause,
+                        onQuickRewind = {
+                            val newPos = (player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)).coerceAtLeast(0L)
+                            binder.seekAndPersist(player.currentMediaItemIndex, newPos)
+                        },
+                        onQuickForward = {
+                            val maxDur = if (viewModel.duration > 0L) viewModel.duration else Long.MAX_VALUE
+                            val newPos = (player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)).coerceAtMost(maxDur)
+                            binder.seekAndPersist(player.currentMediaItemIndex, newPos)
+                        },
+                        onAddBookmark = { showAddBookmarkPrompt = true },
+                        onExitCarMode = { viewModel.isCarModeActive = false }
+                    )
+                }
+
+                viewModel.isEbookReaderFullScreen && activeEbook != null -> {
+                    EpubReaderScreen(
+                        ebook = activeEbook,
+                        chapters = viewModel.currentEbookChapters,
+                        currentChapterIndex = viewModel.currentEbookChapterIndex,
+                        isLoading = viewModel.isLoadingEbook,
+                        fontSizeSp = viewModel.ebookFontSizeSp,
+                        readerTheme = viewModel.ebookReaderTheme,
+                        isEmbeddedPane = false,
+                        isFullScreen = true,
+                        onToggleFullScreen = { viewModel.isEbookReaderFullScreen = false },
+                        onBackToShelf = { viewModel.isEbookReaderFullScreen = false },
+                        onSelectChapter = { idx -> viewModel.goToEbookChapter(idx) },
+                        onUpdateFontSize = { sp -> viewModel.updateEbookFontSize(sp) },
+                        onUpdateTheme = { th -> viewModel.updateEbookReaderTheme(th) }
+                    )
+                }
+
+                viewModel.isPlayerFullScreen && activeBook != null -> {
+                    RenderNowPlaying(isEmbedded = false)
+                }
+
+                isFoldableUnfolded -> {
+                    // Foldable 'Book Posture' Dual-Pane Layout: Left Page = Shelf, Right Page = Player or ePub Reader
+                    Row(modifier = Modifier.fillMaxSize()) {
+                        Box(modifier = Modifier.weight(0.46f).fillMaxHeight()) {
+                            RenderShelfScaffold(
+                                showBottomMiniPlayer = viewModel.shelfMode == "EBOOK" && activeBook != null
                             )
                         }
 
-                        BookshelfContent(
-                            books = displayedBooks,
-                            activeBookId = viewModel.currentBookId,
-                            activeBookProgress = activeProgressFraction,
-                            activeBookSubtitle = activeSubtitleText,
-                            hasSelectedFolder = viewModel.selectedFolderUri.isNotEmpty(),
-                            viewMode = viewModel.viewMode,
-                            viewModel = viewModel,
-                            onAutoScanDevice = { triggerAutoScanWithPermission() },
-                            onChooseFolder = { folderPicker.launch(null) },
-                            onSelectBook = { book ->
-                                viewModel.repository.touchBookLastPlayed(book.id)
-                                viewModel.progressRevision++
-                                if (book.id == viewModel.currentBookId && player.mediaItemCount > 0) {
-                                    viewModel.isPlayerFullScreen = true
-                                } else {
-                                    val snapshotPos = player.currentPosition
-                                    val snapshotIdx = player.currentMediaItemIndex
-                                    activeBook?.let { curr ->
-                                        viewModel.saveProgressNow(curr.id, snapshotIdx, snapshotPos)
-                                    }
-                                    player.playWhenReady = false
-                                    player.pause()
+                        FoldableSpineDivider()
 
-                                    viewModel.selectBookMetadata(book, isDifferentBook = true)
-                                    val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
-                                    val savedPos = viewModel.repository.getBookPosition(book.id)
-                                    binder.playBook(book, savedTrackIdx, savedPos, false)
-                                    viewModel.isPlayerFullScreen = true
+                        Box(modifier = Modifier.weight(0.54f).fillMaxHeight()) {
+                            if (viewModel.shelfMode == "EBOOK") {
+                                if (activeEbook != null) {
+                                    EpubReaderScreen(
+                                        ebook = activeEbook,
+                                        chapters = viewModel.currentEbookChapters,
+                                        currentChapterIndex = viewModel.currentEbookChapterIndex,
+                                        isLoading = viewModel.isLoadingEbook,
+                                        fontSizeSp = viewModel.ebookFontSizeSp,
+                                        readerTheme = viewModel.ebookReaderTheme,
+                                        isEmbeddedPane = true,
+                                        isFullScreen = false,
+                                        onToggleFullScreen = { viewModel.isEbookReaderFullScreen = true },
+                                        onBackToShelf = { viewModel.isEbookReaderFullScreen = false },
+                                        onSelectChapter = { idx -> viewModel.goToEbookChapter(idx) },
+                                        onUpdateFontSize = { sp -> viewModel.updateEbookFontSize(sp) },
+                                        onUpdateTheme = { th -> viewModel.updateEbookReaderTheme(th) }
+                                    )
+                                } else {
+                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Text(
+                                            "Import or select an .epub on the left page to start reading.",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
-                            },
-                            onLongPressBook = { book ->
-                                targetBookForCoverAction = book
-                                val initialCleanQuery = cleanAudiobookSearchQuery(book.title, book.author)
-                                liveCoverSearchQuery = initialCleanQuery
-                                showCoverOptionsDialog = true
-                                viewModel.searchOnlineCoverCandidates(initialCleanQuery)
+                            } else {
+                                RenderNowPlaying(isEmbedded = true)
                             }
-                        )
+                        }
                     }
+                }
+
+                else -> {
+                    RenderShelfScaffold(showBottomMiniPlayer = true)
                 }
             }
         }
     }
 
-    if (showCoverOptionsDialog && targetBookForCoverAction != null) {
-        val targetBook = targetBookForCoverAction!!
+    if (showCoverOptionsDialog && targetCoverItemId.isNotEmpty()) {
         AlertDialog(
             onDismissRequest = { showCoverOptionsDialog = false },
             title = { Text(stringResource(R.string.cover_art_options)) },
@@ -1185,7 +1391,7 @@ fun FablewoodAudiobookApp(
                         OutlinedButton(
                             onClick = {
                                 try {
-                                    val encoded = URLEncoder.encode("$liveCoverSearchQuery audiobook cover", "UTF-8")
+                                    val encoded = URLEncoder.encode("$liveCoverSearchQuery book cover", "UTF-8")
                                     val webIntent = Intent(
                                         Intent.ACTION_VIEW,
                                         Uri.parse("https://www.google.com/search?tbm=isch&q=$encoded")
@@ -1251,7 +1457,7 @@ fun FablewoodAudiobookApp(
                                             .clickable {
                                                 showCoverOptionsDialog = false
                                                 Toast.makeText(context, "Applying high-res cover...", Toast.LENGTH_SHORT).show()
-                                                viewModel.selectOnlineCoverCandidate(targetBook.id, candidate) {
+                                                viewModel.selectOnlineCoverCandidate(targetCoverItemId, candidate) {
                                                     Toast.makeText(context, "Cover updated!", Toast.LENGTH_SHORT).show()
                                                 }
                                             },
@@ -1536,8 +1742,9 @@ fun FablewoodAudiobookApp(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Total Listen Time: ${formatTime(viewModel.totalListenMs)}")
-                    Text("Completed Books: ${viewModel.completedBooksCount}")
-                    Text("Books in Library: ${viewModel.books.size}")
+                    Text("Completed Audiobooks: ${viewModel.completedBooksCount}")
+                    Text("Audiobooks in Library: ${viewModel.books.size}")
+                    Text("eBooks in Library: ${viewModel.ebooks.size}")
                 }
             },
             confirmButton = { TextButton(onClick = { showAnalyticsDialog = false }) { Text(stringResource(R.string.close)) } }
