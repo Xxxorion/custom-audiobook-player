@@ -5,17 +5,23 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color as AndroidColor
 import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
 import android.util.LruCache
+import androidx.core.text.HtmlCompat
 import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,12 +33,15 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserFactory
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.io.StringReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
@@ -65,7 +74,8 @@ data class Ebook(
     val id: String,
     val title: String,
     val author: String,
-    val uri: Uri
+    val uri: Uri,
+    val format: String = "EPUB" // "EPUB" or "PDF"
 )
 
 data class EbookChapter(
@@ -98,13 +108,45 @@ data class CoverSearchCandidate(
     val fullResUrl: String
 )
 
-fun cleanAudiobookSearchQuery(rawTitle: String, rawAuthor: String = ""): String {
-    var cleanedTitle = rawTitle
+// Extracts a clean Book Title and Author from messy downloaded eBook/Audiobook filenames
+fun parseCleanTitleAndAuthorFromFilename(rawFileName: String): Pair<String, String> {
+    var name = rawFileName
+        .substringAfterLast('/')
+        .replace(Regex("(?i)\\.(epub|pdf|m4b|mp3|m4a|mobi|azw3)$"), "")
+        .replace(Regex("(?i)^_?oceanofpdf\\.com_?"), "")
+        .replace(Regex("(?i)\\b(oceanofpdf\\.com|z-lib\\.org|z-library|annas-archive|pdfdrive|libgen)\\b"), " ")
         .replace('_', ' ')
         .replace(Regex("\\[[^]]*]"), " ")
         .replace(Regex("\\([^)]*\\)"), " ")
-        .replace(Regex("(?i)\\b(unabridged|abridged|audiobook|ebook|epub|m4b|mp3|64kbps|128kbps|disc\\s*\\d+|part\\s*\\d+|cd\\s*\\d+|book\\s*\\d+)\\b"), " ")
+        .replace(Regex("\\b97[89]\\d{10}\\b"), " ")
+        .replace(Regex("(?i)\\b(unabridged|abridged|audiobook|ebook|epub|pdf|retail|v\\d+(\\.\\d+)?|64kbps|128kbps|disc\\s*\\d+|part\\s*\\d+|cd\\s*\\d+)\\b"), " ")
         .replace(Regex("^\\s*\\d+\\s*[-._]\\s*"), " ")
+
+    // If dots are used as word separators (e.g., "Project.Hail.Mary.Andy.Weir"), convert dots to spaces
+    if (!name.contains(' ') && name.count { it == '.' } >= 2) {
+        name = name.replace('.', ' ')
+    }
+
+    name = name.replace(Regex("\\s+"), " ").trim()
+
+    if (name.contains(" - ")) {
+        val parts = name.split(" - ").map { it.trim() }.filter { it.isNotBlank() }
+        if (parts.size >= 2) {
+            val first = parts.first()
+            val last = parts.last()
+            return Pair(first, last)
+        }
+    }
+
+    return Pair(name.ifBlank { rawFileName.substringBeforeLast('.') }, "Unknown Author")
+}
+
+// Cleans messy audiobook & ebook filenames and strips "Unknown Author" before querying cover APIs
+fun cleanAudiobookSearchQuery(rawTitle: String, rawAuthor: String = ""): String {
+    val (parsedTitle, parsedAuthorFromTitle) = parseCleanTitleAndAuthorFromFilename(rawTitle)
+    var cleanedTitle = parsedTitle
+        .replace('.', ' ')
+        .replace(Regex("(?i)\\b(book\\s*\\d+|vol\\s*\\d+|volume\\s*\\d+)\\b"), " ")
         .replace(Regex("\\s+"), " ")
         .trim()
 
@@ -112,13 +154,18 @@ fun cleanAudiobookSearchQuery(rawTitle: String, rawAuthor: String = ""): String 
         cleanedTitle = rawTitle.trim()
     }
 
-    val cleanedAuthor = rawAuthor.trim()
-    val validAuthor = cleanedAuthor.isNotBlank() &&
-        !cleanedAuthor.equals("Unknown Author", ignoreCase = true) &&
-        !cleanedAuthor.equals("Unknown", ignoreCase = true) &&
-        !cleanedTitle.contains(cleanedAuthor, ignoreCase = true)
+    val candidateAuthor = if (rawAuthor.isNotBlank() && !rawAuthor.equals("Unknown Author", ignoreCase = true)) {
+        rawAuthor.trim()
+    } else {
+        parsedAuthorFromTitle.trim()
+    }
 
-    return if (validAuthor) "$cleanedTitle $cleanedAuthor".trim() else cleanedTitle
+    val validAuthor = candidateAuthor.isNotBlank() &&
+        !candidateAuthor.equals("Unknown Author", ignoreCase = true) &&
+        !candidateAuthor.equals("Unknown", ignoreCase = true) &&
+        !cleanedTitle.contains(candidateAuthor, ignoreCase = true)
+
+    return if (validAuthor) "$cleanedTitle $candidateAuthor".trim() else cleanedTitle
 }
 
 fun normalizeChapterTitles(rawChapters: List<Chapter>, bookTitle: String = ""): List<Chapter> {
@@ -298,9 +345,10 @@ class AudiobookRepository(context: Context) {
         private val SUPPORTED_EXTENSIONS = setOf(
             "mp3", "m4a", "m4b", "m4p", "mp4", "aac", "ogg", "opus", "flac", "wav"
         )
+        private val EBOOK_EXTENSIONS = setOf("epub", "pdf")
         private val CONTAINER_EXTENSIONS = setOf("m4a", "m4b", "m4p", "mp4")
         private val AUTO_SCAN_ROOT_FOLDERS = setOf(
-            "download", "downloads", "audiobooks", "audiobook", "books", "book", "audible", "documents"
+            "download", "downloads", "audiobooks", "audiobook", "books", "book", "audible", "documents", "ebooks", "ebook"
         )
         private val DISC_FOLDER_REGEX = Regex("^(disc|cd|part|disk)\\s*\\d+.*$", RegexOption.IGNORE_CASE)
 
@@ -517,6 +565,7 @@ class AudiobookRepository(context: Context) {
                         put("title", eb.title)
                         put("author", eb.author)
                         put("uri", eb.uri.toString())
+                        put("format", eb.format)
                     }
                 )
             }
@@ -535,12 +584,24 @@ class AudiobookRepository(context: Context) {
                     val obj = arr.getJSONObject(i)
                     val uriStr = obj.optString("uri", "")
                     if (uriStr.isNotBlank()) {
+                        val rawTitle = obj.optString("title", "Untitled eBook")
+                        val rawAuthor = obj.optString("author", "Unknown Author")
+                        val (cleanedTitle, cleanedAuthor) = if (rawTitle.contains('_') || rawTitle.endsWith(".epub", true) || rawTitle.endsWith(".pdf", true)) {
+                            parseCleanTitleAndAuthorFromFilename(rawTitle)
+                        } else {
+                            Pair(rawTitle, rawAuthor)
+                        }
+                        val format = obj.optString(
+                            "format",
+                            if (uriStr.lowercase(Locale.ROOT).endsWith(".pdf")) "PDF" else "EPUB"
+                        )
                         list.add(
                             Ebook(
                                 id = obj.optString("id", uriStr),
-                                title = obj.optString("title", "Untitled eBook"),
-                                author = obj.optString("author", "Unknown Author"),
-                                uri = Uri.parse(uriStr)
+                                title = cleanedTitle,
+                                author = if (rawAuthor != "Unknown Author") rawAuthor else cleanedAuthor,
+                                uri = Uri.parse(uriStr),
+                                format = format
                             )
                         )
                     }
@@ -550,6 +611,19 @@ class AudiobookRepository(context: Context) {
             }
         }
         return list
+    }
+
+    fun touchEbookLastRead(ebookId: String, timestampMs: Long = System.currentTimeMillis()) {
+        if (ebookId.isEmpty()) return
+        prefs.edit().putString("last_ebook_id", ebookId).apply()
+        synchronized(stateLock) {
+            val store = ensureStoreLoaded()
+            val ebProg = store.optJSONObject("ebookProgress") ?: JSONObject().also { store.put("ebookProgress", it) }
+            val entry = ebProg.optJSONObject(ebookId) ?: JSONObject()
+            entry.put("lastReadMs", timestampMs)
+            ebProg.put(ebookId, entry)
+        }
+        scheduleStoreFlush(immediate = false)
     }
 
     fun saveEbookProgress(ebookId: String, chapterIndex: Int, totalChapters: Int) {
@@ -826,18 +900,82 @@ class AudiobookRepository(context: Context) {
         scheduleStoreFlush(immediate = true)
     }
 
-    // Pure-Kotlin .epub Scanner, Importer & Parser
-    suspend fun scanDeviceForEbooks(): List<Ebook> = withContext(Dispatchers.IO) {
-        val existingByUri = loadEbooksCache().associateBy { it.uri.toString() }.toMutableMap()
+    // Unified Stream & FileDescriptor Openers (Works for file://, content://, and Downloads paths)
+    private fun openUriInputStream(uri: Uri): InputStream? {
+        return try {
+            if (uri.scheme == "file") {
+                val path = uri.path ?: return null
+                FileInputStream(File(path))
+            } else {
+                appContext.contentResolver.openInputStream(uri)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "openUriInputStream failed for $uri", t)
+            null
+        }
+    }
 
+    private fun openUriParcelFileDescriptor(uri: Uri): ParcelFileDescriptor? {
+        return try {
+            if (uri.scheme == "file") {
+                val path = uri.path ?: return null
+                ParcelFileDescriptor.open(File(path), ParcelFileDescriptor.MODE_READ_ONLY)
+            } else {
+                appContext.contentResolver.openFileDescriptor(uri, "r")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "openUriParcelFileDescriptor failed for $uri", t)
+            null
+        }
+    }
+
+    // Auto-Scanner for eBooks (.epub and .pdf) across Downloads, Documents, Books, MediaStore, and Custom Folders
+    suspend fun scanDeviceForEbooks(): List<Ebook> = withContext(Dispatchers.IO) {
+        val discovered = linkedMapOf<String, Ebook>()
+
+        // Preserve any previously imported SAF eBooks that are still readable
+        for (cached in loadEbooksCache()) {
+            if (openUriParcelFileDescriptor(cached.uri)?.use { true } == true) {
+                val key = "${cached.title.lowercase(Locale.ROOT)}|${cached.format}"
+                discovered[key] = cached
+            }
+        }
+
+        // 1. Direct filesystem scan of standard folders (Download, Documents, Books, Audiobooks, eBooks)
+        val rootDir = Environment.getExternalStorageDirectory()
+        val targetDirs = listOf(
+            File(rootDir, "Download"),
+            File(rootDir, "Downloads"),
+            File(rootDir, "Documents"),
+            File(rootDir, "Books"),
+            File(rootDir, "eBooks"),
+            File(rootDir, "Audiobooks")
+        )
+        for (dir in targetDirs) {
+            if (dir.exists() && dir.isDirectory && dir.canRead()) {
+                scanDirectoryRecursiveForEbooks(dir, 0, discovered)
+            }
+        }
+
+        // 2. MediaStore.Files query for .epub and .pdf
         try {
             val collection = MediaStore.Files.getContentUri("external")
-            val projection = arrayOf(
-                MediaStore.Files.FileColumns._ID,
-                MediaStore.Files.FileColumns.DISPLAY_NAME
-            )
-            val selection = "${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE ?"
-            val selectionArgs = arrayOf("%.epub")
+            val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                arrayOf(
+                    MediaStore.Files.FileColumns._ID,
+                    MediaStore.Files.FileColumns.DISPLAY_NAME,
+                    MediaStore.Files.FileColumns.RELATIVE_PATH
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                arrayOf(
+                    MediaStore.Files.FileColumns._ID,
+                    MediaStore.Files.FileColumns.DISPLAY_NAME,
+                    MediaStore.Files.FileColumns.DATA
+                )
+            }
+            val selection = "${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE ? OR ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE ?"
+            val selectionArgs = arrayOf("%.epub", "%.pdf")
 
             appContext.contentResolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
                 val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
@@ -845,40 +983,99 @@ class AudiobookRepository(context: Context) {
                 while (cursor.moveToNext()) {
                     val id = cursor.getLong(idCol)
                     val displayName = cursor.getString(nameCol) ?: continue
-                    if (!displayName.endsWith(".epub", ignoreCase = true)) continue
+                    val ext = displayName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                    if (ext !in EBOOK_EXTENSIONS) continue
+
                     val contentUri = ContentUris.withAppendedId(collection, id)
-                    val uriStr = contentUri.toString()
-                    if (!existingByUri.containsKey(uriStr)) {
-                        val fallbackTitle = displayName.substringBeforeLast('.')
-                        val (title, author) = extractEpubMetadataAndCover(contentUri, uriStr, fallbackTitle)
-                        existingByUri[uriStr] = Ebook(
-                            id = uriStr,
-                            title = title,
-                            author = author,
-                            uri = contentUri
-                        )
+                    // Verify stream is actually readable before adding
+                    val isReadable = openUriParcelFileDescriptor(contentUri)?.use { true } ?: false
+                    if (!isReadable) continue
+
+                    val ebook = buildEbookFromUri(contentUri, displayName)
+                    val dedupKey = "${ebook.title.lowercase(Locale.ROOT)}|${ebook.format}"
+                    if (!discovered.containsKey(dedupKey)) {
+                        discovered[dedupKey] = ebook
                     }
                 }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "MediaStore epub scan encountered non-fatal issue", t)
+            Log.w(TAG, "MediaStore ebook scan encountered non-fatal issue", t)
         }
 
+        // 3. Also scan user's selected custom folder if set
         val savedFolderStr = getSelectedFolderUri()
         if (!savedFolderStr.isNullOrEmpty() && savedFolderStr != "AUTO_SCAN") {
             try {
                 val folderEbooks = scanFolderForEbooks(Uri.parse(savedFolderStr))
                 for (eb in folderEbooks) {
-                    existingByUri[eb.uri.toString()] = eb
+                    val dedupKey = "${eb.title.lowercase(Locale.ROOT)}|${eb.format}"
+                    discovered[dedupKey] = eb
                 }
             } catch (t: Throwable) {
-                Log.w(TAG, "Custom folder epub scan failed", t)
+                Log.w(TAG, "Custom folder epub/pdf scan failed", t)
             }
         }
 
-        val finalEbooks = existingByUri.values.sortedWith { a, b -> compareNatural(a.title, b.title) }
+        val finalEbooks = discovered.values.sortedWith { a, b -> compareNatural(a.title, b.title) }
         saveEbooksCache(finalEbooks)
         finalEbooks
+    }
+
+    private fun scanDirectoryRecursiveForEbooks(
+        dir: File,
+        depth: Int,
+        discovered: LinkedHashMap<String, Ebook>
+    ) {
+        if (depth > 4) return
+        val files = dir.listFiles() ?: return
+        for (f in files) {
+            if (f.name.startsWith(".")) continue
+            if (f.isDirectory) {
+                scanDirectoryRecursiveForEbooks(f, depth + 1, discovered)
+            } else if (f.isFile && f.canRead()) {
+                val ext = f.extension.lowercase(Locale.ROOT)
+                if (ext in EBOOK_EXTENSIONS) {
+                    val fileUri = Uri.fromFile(f)
+                    val ebook = buildEbookFromUri(fileUri, f.name)
+                    val dedupKey = "${ebook.title.lowercase(Locale.ROOT)}|${ebook.format}"
+                    if (!discovered.containsKey(dedupKey)) {
+                        discovered[dedupKey] = ebook
+                    }
+                }
+            }
+        }
+    }
+
+    private fun buildEbookFromUri(uri: Uri, fileName: String): Ebook {
+        val ext = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        val format = if (ext == "pdf") "PDF" else "EPUB"
+        val (cleanFallbackTitle, cleanFallbackAuthor) = parseCleanTitleAndAuthorFromFilename(fileName)
+        val uriStr = uri.toString()
+
+        return if (format == "EPUB") {
+            val (title, author) = extractEpubMetadataAndCover(
+                uri = uri,
+                ebookId = uriStr,
+                fallbackTitle = cleanFallbackTitle,
+                fallbackAuthor = cleanFallbackAuthor
+            )
+            Ebook(
+                id = uriStr,
+                title = title,
+                author = author,
+                uri = uri,
+                format = "EPUB"
+            )
+        } else {
+            extractPdfCoverAndPageCount(uri, uriStr)
+            Ebook(
+                id = uriStr,
+                title = cleanFallbackTitle,
+                author = cleanFallbackAuthor,
+                uri = uri,
+                format = "PDF"
+            )
+        }
     }
 
     suspend fun scanFolderForEbooks(folderUri: Uri): List<Ebook> = withContext(Dispatchers.IO) {
@@ -893,17 +1090,8 @@ class AudiobookRepository(context: Context) {
         for (child in children) {
             if (child.isDirectory) {
                 traverseFolderForEbooks(treeUri, child.docId, ebookList)
-            } else if (child.extension == "epub") {
-                val fallbackTitle = child.name.substringBeforeLast('.')
-                val (title, author) = extractEpubMetadataAndCover(child.uri, child.uri.toString(), fallbackTitle)
-                ebookList.add(
-                    Ebook(
-                        id = child.uri.toString(),
-                        title = title,
-                        author = author,
-                        uri = child.uri
-                    )
-                )
+            } else if (child.extension in EBOOK_EXTENSIONS) {
+                ebookList.add(buildEbookFromUri(child.uri, child.name))
             }
         }
     }
@@ -912,35 +1100,89 @@ class AudiobookRepository(context: Context) {
         val existing = loadEbooksCache().associateBy { it.id }.toMutableMap()
         for (uri in uris) {
             val uriStr = uri.toString()
-            var displayName = "Imported eBook"
+            var displayName = uri.lastPathSegment?.substringAfterLast('/') ?: "Imported Book.epub"
             try {
                 appContext.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
                     if (c.moveToFirst()) {
-                        displayName = c.getString(0)?.substringBeforeLast('.') ?: displayName
+                        displayName = c.getString(0) ?: displayName
                     }
                 }
             } catch (_: Throwable) {}
 
-            val (title, author) = extractEpubMetadataAndCover(uri, uriStr, displayName)
-            existing[uriStr] = Ebook(
-                id = uriStr,
-                title = title,
-                author = author,
-                uri = uri
-            )
+            val ebook = buildEbookFromUri(uri, displayName)
+            existing[uriStr] = ebook
         }
         val merged = existing.values.toList()
         saveEbooksCache(merged)
         merged
     }
 
-    private fun extractEpubMetadataAndCover(uri: Uri, ebookId: String, fallbackTitle: String): Pair<String, String> {
+    // Native PDF Page Renderer & Cover Art Extractor
+    private fun extractPdfCoverAndPageCount(uri: Uri, ebookId: String) {
+        val coverFile = coverFileFor(ebookId)
+        try {
+            openUriParcelFileDescriptor(uri)?.use { pfd ->
+                PdfRenderer(pfd).use { renderer ->
+                    val count = renderer.pageCount
+                    if (count > 0) {
+                        val savedChap = getEbookChapterIndex(ebookId).coerceIn(0, count - 1)
+                        saveEbookProgress(ebookId, savedChap, count)
+                        if (!coverFile.exists()) {
+                            renderer.openPage(0).use { page ->
+                                val width = 360
+                                val height = ((width.toFloat() / page.width.coerceAtLeast(1)) * page.height).toInt().coerceIn(360, 640)
+                                val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                                val canvas = Canvas(bmp)
+                                canvas.drawColor(AndroidColor.WHITE)
+                                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                saveBitmapToCache(ebookId, bmp)
+                                CoverMemoryCache.cache.put(ebookId, bmp)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed extracting PDF cover/page count for $uri", t)
+        }
+    }
+
+    suspend fun renderPdfPageBitmap(ebook: Ebook, pageIndex: Int, targetWidthPx: Int = 1200): Bitmap? = withContext(Dispatchers.IO) {
+        try {
+            openUriParcelFileDescriptor(ebook.uri)?.use { pfd ->
+                PdfRenderer(pfd).use { renderer ->
+                    if (renderer.pageCount <= 0) return@withContext null
+                    val safeIdx = pageIndex.coerceIn(0, renderer.pageCount - 1)
+                    renderer.openPage(safeIdx).use { page ->
+                        val w = targetWidthPx.coerceIn(600, 2000)
+                        val h = ((w.toFloat() / page.width.coerceAtLeast(1)) * page.height).toInt().coerceAtLeast(600)
+                        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        val canvas = Canvas(bmp)
+                        canvas.drawColor(AndroidColor.WHITE)
+                        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        return@withContext bmp
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed rendering PDF page $pageIndex for ${ebook.title}", t)
+            null
+        }
+    }
+
+    // Namespace-Aware XmlPullParser EPUB Metadata, Cover & Chapter Extractor
+    private fun extractEpubMetadataAndCover(
+        uri: Uri,
+        ebookId: String,
+        fallbackTitle: String,
+        fallbackAuthor: String = "Unknown Author"
+    ): Pair<String, String> {
         var resolvedTitle = fallbackTitle
-        var resolvedAuthor = "Unknown Author"
+        var resolvedAuthor = fallbackAuthor
 
         try {
-            val entries = mutableMapOf<String, ByteArray>()
-            appContext.contentResolver.openInputStream(uri)?.use { rawStream ->
+            val entries = linkedMapOf<String, ByteArray>()
+            openUriInputStream(uri)?.use { rawStream ->
                 ZipInputStream(rawStream).use { zis ->
                     var entry = zis.nextEntry
                     while (entry != null) {
@@ -954,8 +1196,9 @@ class AudiobookRepository(context: Context) {
                                 lower.endsWith(".png") ||
                                 lower.endsWith(".webp")
                             ) {
-                                if (entry.size <= 4 * 1024 * 1024L) {
-                                    entries[name] = zis.readBytes()
+                                val bytes = readZipEntryBounded(zis, 6 * 1024 * 1024)
+                                if (bytes != null) {
+                                    entries[name] = bytes
                                 }
                             }
                         }
@@ -969,50 +1212,36 @@ class AudiobookRepository(context: Context) {
             if (opfEntry != null) {
                 val opfXml = String(opfEntry.value, Charsets.UTF_8)
                 val opfDir = opfEntry.key.substringBeforeLast('/', "")
+                val parsedMeta = parseOpfXmlWithPullParser(opfXml)
 
-                val titleMatch = Regex("<(?:dc:)?title[^>]*>(.*?)</(?:dc:)?title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-                    .find(opfXml)?.groupValues?.getOrNull(1)
-                if (!titleMatch.isNullOrBlank()) {
-                    resolvedTitle = decodeHtmlEntities(titleMatch.trim())
+                if (parsedMeta.title.isNotBlank() && !isGenericTitle(parsedMeta.title)) {
+                    resolvedTitle = parsedMeta.title
+                }
+                if (parsedMeta.author.isNotBlank() && !parsedMeta.author.equals("unknown", ignoreCase = true)) {
+                    resolvedAuthor = parsedMeta.author
                 }
 
-                val creatorMatch = Regex("<(?:dc:)?creator[^>]*>(.*?)</(?:dc:)?creator>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-                    .find(opfXml)?.groupValues?.getOrNull(1)
-                if (!creatorMatch.isNullOrBlank()) {
-                    resolvedAuthor = decodeHtmlEntities(creatorMatch.trim())
-                }
-
-                // Locate embedded cover art inside the epub zip
                 val coverFile = coverFileFor(ebookId)
                 if (!coverFile.exists()) {
                     var coverBytes: ByteArray? = null
-                    val itemTags = Regex("<item\\b[^>]*>", RegexOption.IGNORE_CASE).findAll(opfXml)
-                    for (match in itemTags) {
-                        val tag = match.value
-                        val href = Regex("href\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
-                            .find(tag)?.groupValues?.getOrNull(1) ?: continue
-                        val mediaType = Regex("media-type\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
-                            .find(tag)?.groupValues?.getOrNull(1) ?: ""
-                        if (mediaType.startsWith("image/", ignoreCase = true) &&
-                            (tag.contains("cover", ignoreCase = true) || href.contains("cover", ignoreCase = true))
-                        ) {
-                            val resolvedPath = resolveZipRelativePath(opfDir, href)
-                            coverBytes = entries[resolvedPath] ?: entries.entries.firstOrNull {
-                                it.key.equals(resolvedPath, ignoreCase = true) || it.key.endsWith(href, ignoreCase = true)
-                            }?.value
-                            if (coverBytes != null) break
-                        }
+                    if (parsedMeta.coverHref != null) {
+                        coverBytes = findZipEntryBytes(entries, opfDir, parsedMeta.coverHref)
                     }
-
                     if (coverBytes == null) {
                         coverBytes = entries.entries.firstOrNull {
                             val k = it.key.lowercase(Locale.ROOT)
-                            k.contains("cover") && (k.endsWith(".jpg") || k.endsWith(".jpeg") || k.endsWith(".png"))
+                            k.contains("cover") && (k.endsWith(".jpg") || k.endsWith(".jpeg") || k.endsWith(".png") || k.endsWith(".webp"))
+                        }?.value
+                    }
+                    if (coverBytes == null) {
+                        coverBytes = entries.entries.firstOrNull {
+                            val k = it.key.lowercase(Locale.ROOT)
+                            k.endsWith(".jpg") || k.endsWith(".jpeg") || k.endsWith(".png")
                         }?.value
                     }
 
                     if (coverBytes != null) {
-                        val bmp = decodeSampledBitmapFromStreamWithExif(ByteArrayInputStream(coverBytes), 350, 350)
+                        val bmp = decodeSampledBitmapFromStreamWithExif(ByteArrayInputStream(coverBytes), 380, 380)
                         if (bmp != null) {
                             saveBitmapToCache(ebookId, bmp)
                             CoverMemoryCache.cache.put(ebookId, bmp)
@@ -1027,27 +1256,232 @@ class AudiobookRepository(context: Context) {
         return Pair(resolvedTitle, resolvedAuthor)
     }
 
+    private data class ParsedOpfData(
+        val title: String,
+        val author: String,
+        val coverHref: String?,
+        val spineHrefs: List<String>
+    )
+
+    private fun parseOpfXmlWithPullParser(opfXml: String): ParsedOpfData {
+        var title = ""
+        var author = ""
+        var coverMetaId: String? = null
+        var coverHref: String? = null
+        val manifestById = linkedMapOf<String, String>()
+        val manifestMediaTypeById = linkedMapOf<String, String>()
+        val spineIdRefs = mutableListOf<String>()
+
+        try {
+            val factory = XmlPullParserFactory.newInstance().apply { isNamespaceAware = false }
+            val parser = factory.newPullParser()
+            parser.setInput(StringReader(opfXml))
+
+            var eventType = parser.eventType
+            var currentTag = ""
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                when (eventType) {
+                    XmlPullParser.START_TAG -> {
+                        val rawName = parser.name ?: ""
+                        val localName = rawName.substringAfterLast(':').lowercase(Locale.ROOT)
+                        currentTag = localName
+
+                        when (localName) {
+                            "meta" -> {
+                                val metaName = getXmlAttr(parser, "name")
+                                val metaContent = getXmlAttr(parser, "content")
+                                if (metaName.equals("cover", ignoreCase = true) && !metaContent.isNullOrBlank()) {
+                                    coverMetaId = metaContent.trim()
+                                }
+                            }
+                            "item" -> {
+                                val id = getXmlAttr(parser, "id")
+                                val href = getXmlAttr(parser, "href")
+                                val mediaType = getXmlAttr(parser, "media-type") ?: ""
+                                val properties = getXmlAttr(parser, "properties") ?: ""
+                                if (!id.isNullOrBlank() && !href.isNullOrBlank()) {
+                                    manifestById[id] = href
+                                    manifestMediaTypeById[id] = mediaType
+                                    if (properties.contains("cover-image", ignoreCase = true) ||
+                                        (mediaType.startsWith("image/", true) && (id.contains("cover", true) || href.contains("cover", true)))
+                                    ) {
+                                        if (coverHref == null) coverHref = href
+                                    }
+                                }
+                            }
+                            "itemref" -> {
+                                val idref = getXmlAttr(parser, "idref")
+                                if (!idref.isNullOrBlank()) {
+                                    spineIdRefs.add(idref.trim())
+                                }
+                            }
+                        }
+                    }
+                    XmlPullParser.TEXT -> {
+                        val text = parser.text?.trim() ?: ""
+                        if (text.isNotEmpty()) {
+                            if (currentTag == "title" && title.isEmpty()) {
+                                title = text
+                            } else if ((currentTag == "creator" || currentTag == "author") && author.isEmpty()) {
+                                author = text
+                            }
+                        }
+                    }
+                    XmlPullParser.END_TAG -> {
+                        currentTag = ""
+                    }
+                }
+                eventType = parser.next()
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "XmlPullParser OPF parse warning, falling back to regex", t)
+        }
+
+        if (coverHref == null && coverMetaId != null) {
+            coverHref = manifestById[coverMetaId]
+        }
+
+        val spineHrefs = mutableListOf<String>()
+        for (idref in spineIdRefs) {
+            val href = manifestById[idref]
+            val mime = manifestMediaTypeById[idref] ?: ""
+            if (href != null && !mime.startsWith("image/", ignoreCase = true) && !href.endsWith(".ncx", ignoreCase = true)) {
+                spineHrefs.add(href)
+            }
+        }
+
+        // If spine was empty, collect all HTML/XHTML manifest items in order
+        if (spineHrefs.isEmpty()) {
+            for ((id, href) in manifestById) {
+                val mime = manifestMediaTypeById[id] ?: ""
+                val lowerHref = href.substringBefore('#').lowercase(Locale.ROOT)
+                if (mime.contains("html", ignoreCase = true) ||
+                    lowerHref.endsWith(".xhtml") ||
+                    lowerHref.endsWith(".html") ||
+                    lowerHref.endsWith(".htm")
+                ) {
+                    spineHrefs.add(href)
+                }
+            }
+        }
+
+        return ParsedOpfData(
+            title = title,
+            author = author,
+            coverHref = coverHref,
+            spineHrefs = spineHrefs
+        )
+    }
+
+    private fun getXmlAttr(parser: XmlPullParser, attrName: String): String? {
+        for (i in 0 until parser.attributeCount) {
+            val name = parser.getAttributeName(i)?.substringAfterLast(':') ?: continue
+            if (name.equals(attrName, ignoreCase = true)) {
+                return parser.getAttributeValue(i)
+            }
+        }
+        return null
+    }
+
+    private fun readZipEntryBounded(zis: ZipInputStream, maxBytes: Int): ByteArray? {
+        return try {
+            val out = ByteArrayOutputStream()
+            val buf = ByteArray(8192)
+            var total = 0
+            while (true) {
+                val r = zis.read(buf)
+                if (r <= 0) break
+                total += r
+                if (total > maxBytes) return null
+                out.write(buf, 0, r)
+            }
+            out.toByteArray()
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun findZipEntryBytes(
+        zipMap: Map<String, ByteArray>,
+        opfDir: String,
+        rawHref: String
+    ): ByteArray? {
+        val cleanHref = rawHref.substringBefore('#').trim()
+        val decodedHref = try { URLDecoder.decode(cleanHref, "UTF-8") } catch (_: Throwable) { cleanHref }
+        val resolved = resolveZipRelativePath(opfDir, decodedHref)
+
+        zipMap[resolved]?.let { return it }
+        zipMap[decodedHref.trimStart('/')]?.let { return it }
+
+        zipMap.entries.firstOrNull {
+            it.key.equals(resolved, ignoreCase = true) ||
+                it.key.equals(decodedHref.trimStart('/'), ignoreCase = true)
+        }?.value?.let { return it }
+
+        val fileNameOnly = decodedHref.substringAfterLast('/')
+        if (fileNameOnly.isNotBlank()) {
+            zipMap.entries.firstOrNull {
+                it.key.equals(fileNameOnly, ignoreCase = true) ||
+                    it.key.endsWith("/$fileNameOnly", ignoreCase = true)
+            }?.value?.let { return it }
+        }
+        return null
+    }
+
     suspend fun getOrFetchEbookCoverArt(ebook: Ebook): Bitmap? = withContext(Dispatchers.IO) {
         CoverMemoryCache.cache.get(ebook.id)?.let { return@withContext it }
 
         val shaFile = coverFileFor(ebook.id)
         if (shaFile.exists()) {
-            val bmp = decodeSampledBitmapFromFile(shaFile.absolutePath, 350, 350)
+            val bmp = decodeSampledBitmapFromFile(shaFile.absolutePath, 380, 380)
             if (bmp != null) {
                 CoverMemoryCache.cache.put(ebook.id, bmp)
                 return@withContext bmp
             }
         }
 
-        extractEpubMetadataAndCover(ebook.uri, ebook.id, ebook.title)
+        if (ebook.format == "PDF") {
+            extractPdfCoverAndPageCount(ebook.uri, ebook.id)
+        } else {
+            extractEpubMetadataAndCover(ebook.uri, ebook.id, ebook.title, ebook.author)
+        }
         CoverMemoryCache.cache.get(ebook.id)
     }
 
     suspend fun loadEpubChapters(ebook: Ebook): List<EbookChapter> = withContext(Dispatchers.IO) {
+        // 1. Handle PDF files natively via PdfRenderer pages
+        if (ebook.format == "PDF" || ebook.uri.toString().lowercase(Locale.ROOT).endsWith(".pdf")) {
+            val pdfChapters = mutableListOf<EbookChapter>()
+            try {
+                openUriParcelFileDescriptor(ebook.uri)?.use { pfd ->
+                    PdfRenderer(pfd).use { renderer ->
+                        val count = renderer.pageCount
+                        for (i in 0 until count) {
+                            pdfChapters.add(
+                                EbookChapter(
+                                    index = i,
+                                    title = "Page ${i + 1} of $count",
+                                    bodyText = ""
+                                )
+                            )
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "Failed opening PDF ${ebook.title}", t)
+            }
+            if (pdfChapters.isNotEmpty()) {
+                val savedIdx = getEbookChapterIndex(ebook.id).coerceIn(0, pdfChapters.lastIndex)
+                saveEbookProgress(ebook.id, savedIdx, pdfChapters.size)
+                return@withContext pdfChapters
+            }
+        }
+
+        // 2. Handle .epub files via XmlPullParser + HtmlCompat
         val chapters = mutableListOf<EbookChapter>()
         try {
             val zipMap = linkedMapOf<String, ByteArray>()
-            appContext.contentResolver.openInputStream(ebook.uri)?.use { rawStream ->
+            openUriInputStream(ebook.uri)?.use { rawStream ->
                 ZipInputStream(rawStream).use { zis ->
                     var entry = zis.nextEntry
                     while (entry != null) {
@@ -1061,8 +1495,9 @@ class AudiobookRepository(context: Context) {
                                 lower.endsWith(".xml") ||
                                 lower.endsWith(".ncx")
                             ) {
-                                if (entry.size <= 3 * 1024 * 1024L) {
-                                    zipMap[cleanName] = zis.readBytes()
+                                val bytes = readZipEntryBounded(zis, 8 * 1024 * 1024)
+                                if (bytes != null && bytes.isNotEmpty()) {
+                                    zipMap[cleanName] = bytes
                                 }
                             }
                         }
@@ -1073,65 +1508,56 @@ class AudiobookRepository(context: Context) {
             }
 
             val opfEntry = zipMap.entries.firstOrNull { it.key.endsWith(".opf", ignoreCase = true) }
-            val orderedHtmlPaths = mutableListOf<String>()
-
             if (opfEntry != null) {
                 val opfXml = String(opfEntry.value, Charsets.UTF_8)
                 val opfDir = opfEntry.key.substringBeforeLast('/', "")
+                val parsedOpf = parseOpfXmlWithPullParser(opfXml)
 
-                val manifestMap = mutableMapOf<String, String>()
-                val itemMatches = Regex("<item\\b[^>]*>", RegexOption.IGNORE_CASE).findAll(opfXml)
-                for (m in itemMatches) {
-                    val tag = m.value
-                    val id = Regex("\\bid\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
-                        .find(tag)?.groupValues?.getOrNull(1) ?: continue
-                    val href = Regex("\\bhref\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
-                        .find(tag)?.groupValues?.getOrNull(1) ?: continue
-                    val mediaType = Regex("\\bmedia-type\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
-                        .find(tag)?.groupValues?.getOrNull(1) ?: ""
-                    if (mediaType.contains("html", ignoreCase = true) ||
-                        href.endsWith(".xhtml", ignoreCase = true) ||
-                        href.endsWith(".html", ignoreCase = true) ||
-                        href.endsWith(".htm", ignoreCase = true)
-                    ) {
-                        val decodedHref = try { URLDecoder.decode(href.substringBefore('#'), "UTF-8") } catch (_: Throwable) { href.substringBefore('#') }
-                        manifestMap[id] = resolveZipRelativePath(opfDir, decodedHref)
-                    }
-                }
-
-                val itemrefMatches = Regex("<itemref\\b[^>]*idref\\s*=\\s*[\"']([^\"']+)[\"'][^>]*>", RegexOption.IGNORE_CASE).findAll(opfXml)
-                for (m in itemrefMatches) {
-                    val idref = m.groupValues[1]
-                    val path = manifestMap[idref]
-                    if (path != null && !orderedHtmlPaths.contains(path)) {
-                        orderedHtmlPaths.add(path)
-                    }
-                }
-            }
-
-            if (orderedHtmlPaths.isEmpty()) {
-                orderedHtmlPaths.addAll(
-                    zipMap.keys.filter {
-                        val l = it.lowercase(Locale.ROOT)
-                        l.endsWith(".xhtml") || l.endsWith(".html") || l.endsWith(".htm")
-                    }.sortedWith { a, b -> compareNatural(a, b) }
-                )
-            }
-
-            var chapCounter = 1
-            for (path in orderedHtmlPaths) {
-                val bytes = zipMap[path] ?: zipMap.entries.firstOrNull { it.key.equals(path, ignoreCase = true) }?.value ?: continue
-                val rawHtml = String(bytes, Charsets.UTF_8)
-                val (extractedTitle, bodyText) = parseEpubHtmlToReadableText(rawHtml, chapCounter)
-                if (bodyText.length >= 40) {
-                    chapters.add(
-                        EbookChapter(
-                            index = chapters.size,
-                            title = extractedTitle,
-                            bodyText = bodyText
+                var chapCounter = 1
+                val usedBytesSet = mutableSetOf<ByteArray>()
+                for (href in parsedOpf.spineHrefs) {
+                    val htmlBytes = findZipEntryBytes(zipMap, opfDir, href) ?: continue
+                    if (!usedBytesSet.add(htmlBytes)) continue
+                    val rawHtml = String(htmlBytes, Charsets.UTF_8)
+                    val (extractedTitle, bodyText) = parseEpubHtmlToReadableText(rawHtml, chapCounter)
+                    if (bodyText.isNotBlank()) {
+                        chapters.add(
+                            EbookChapter(
+                                index = chapters.size,
+                                title = extractedTitle,
+                                bodyText = bodyText
+                            )
                         )
-                    )
-                    chapCounter++
+                        chapCounter++
+                    }
+                }
+            }
+
+            // Fallback: if OPF spine produced 0 chapters, scan all HTML/XHTML files in the ZIP
+            if (chapters.isEmpty()) {
+                val fallbackKeys = zipMap.keys.filter {
+                    val l = it.lowercase(Locale.ROOT)
+                    (l.endsWith(".xhtml") || l.endsWith(".html") || l.endsWith(".htm")) &&
+                        !l.endsWith("nav.xhtml") &&
+                        !l.endsWith("toc.xhtml") &&
+                        !l.endsWith("toc.html")
+                }.sortedWith { a, b -> compareNatural(a, b) }
+
+                var chapCounter = 1
+                for (key in fallbackKeys) {
+                    val bytes = zipMap[key] ?: continue
+                    val rawHtml = String(bytes, Charsets.UTF_8)
+                    val (extractedTitle, bodyText) = parseEpubHtmlToReadableText(rawHtml, chapCounter)
+                    if (bodyText.isNotBlank()) {
+                        chapters.add(
+                            EbookChapter(
+                                index = chapters.size,
+                                title = extractedTitle,
+                                bodyText = bodyText
+                            )
+                        )
+                        chapCounter++
+                    }
                 }
             }
         } catch (t: Throwable) {
@@ -1143,11 +1569,13 @@ class AudiobookRepository(context: Context) {
                 EbookChapter(
                     index = 0,
                     title = ebook.title,
-                    bodyText = "Could not extract text chapters from this ePub file. It may be DRM-protected or image-only."
+                    bodyText = "Unable to read this file from storage. Please grant 'All Files Access' when prompted or use the Import button in the top bar."
                 )
             )
+        } else {
+            val savedIdx = getEbookChapterIndex(ebook.id).coerceIn(0, chapters.lastIndex)
+            saveEbookProgress(ebook.id, savedIdx, chapters.size)
         }
-        saveEbookProgress(ebook.id, getEbookChapterIndex(ebook.id).coerceIn(0, chapters.lastIndex), chapters.size)
         chapters
     }
 
@@ -1172,30 +1600,30 @@ class AudiobookRepository(context: Context) {
         val titleTagMatch = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
             .find(html)?.groupValues?.getOrNull(1)
 
-        val rawTitle = (headingMatch ?: titleTagMatch ?: "")
-            .replace(Regex("<[^>]+>"), " ")
-            .replace(Regex("\\s+"), " ")
-            .let { decodeHtmlEntities(it).trim() }
+        val rawTitle = (headingMatch ?: titleTagMatch ?: "").let {
+            HtmlCompat.fromHtml(it, HtmlCompat.FROM_HTML_MODE_LEGACY).toString()
+                .replace(Regex("\\s+"), " ")
+                .trim()
+        }
 
-        val chapterTitle = if (rawTitle.isBlank() || rawTitle.equals("unknown", ignoreCase = true)) {
+        val chapterTitle = if (rawTitle.isBlank() ||
+            rawTitle.equals("unknown", ignoreCase = true) ||
+            rawTitle.equals("untitled", ignoreCase = true)
+        ) {
             "Chapter $fallbackNum"
         } else {
             rawTitle
         }
 
-        val bodyContent = Regex("<body[^>]*>(.*?)</body>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-            .find(html)?.groupValues?.getOrNull(1) ?: html
-
-        val cleaned = bodyContent
+        // Strip <head>, <style>, and <script> blocks before passing to HtmlCompat
+        val withoutHeadAndStyles = html
             .replace(Regex("<head[^>]*>.*?</head>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
             .replace(Regex("<style[^>]*>.*?</style>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
             .replace(Regex("<script[^>]*>.*?</script>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
-            .replace(Regex("(?i)<br\\s*/?>"), "\n")
-            .replace(Regex("(?i)</(p|div|h1|h2|h3|h4|h5|h6|li|blockquote|section|tr)>"), "\n\n")
-            .replace(Regex("<[^>]+>"), "")
 
-        val decoded = decodeHtmlEntities(cleaned)
-        val paragraphs = decoded
+        val spanned = HtmlCompat.fromHtml(withoutHeadAndStyles, HtmlCompat.FROM_HTML_MODE_LEGACY)
+        val paragraphs = spanned.toString()
+            .replace('\uFFFC', ' ') // remove object replacement characters from inline images
             .lines()
             .map { it.replace(Regex("[ \\t]+"), " ").trim() }
             .joinToString("\n")
@@ -1203,31 +1631,6 @@ class AudiobookRepository(context: Context) {
             .trim()
 
         return Pair(chapterTitle, paragraphs)
-    }
-
-    private fun decodeHtmlEntities(input: String): String {
-        return input
-            .replace("&nbsp;", " ")
-            .replace("&#160;", " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&#39;", "'")
-            .replace("&rsquo;", "’")
-            .replace("&lsquo;", "‘")
-            .replace("&#8217;", "’")
-            .replace("&#8216;", "‘")
-            .replace("&rdquo;", "”")
-            .replace("&ldquo;", "“")
-            .replace("&#8220;", "“")
-            .replace("&#8221;", "”")
-            .replace("&mdash;", "—")
-            .replace("&ndash;", "–")
-            .replace("&#8212;", "—")
-            .replace("&#8211;", "–")
-            .replace("&hellip;", "…")
     }
 
     private data class MediaStoreAudioEntry(
@@ -1356,13 +1759,13 @@ class AudiobookRepository(context: Context) {
         val sortedLoose = looseEntries.sortedWith { a, b -> compareNatural(a.displayName, b.displayName) }
         for (file in sortedLoose) {
             if (file.extension == "m4b" || file.isAudiobookFlag || file.durationMs >= MIN_AUDIOBOOK_DURATION_MS) {
-                val cleanName = file.displayName.substringBeforeLast('.')
+                val (cleanFileTitle, cleanFileAuthor) = parseCleanTitleAndAuthorFromFilename(file.displayName)
                 val fallbackTitle = when {
                     !isGenericTitle(file.album) && !file.album.equals("Download", ignoreCase = true) -> file.album
                     !isGenericTitle(file.title) -> file.title
-                    else -> cleanName
+                    else -> cleanFileTitle
                 }
-                val fallbackAuthor = if (isValidMediaStoreArtist(file.artist)) file.artist else "Unknown Author"
+                val fallbackAuthor = if (isValidMediaStoreArtist(file.artist)) file.artist else cleanFileAuthor
                 val (resolvedTitle, resolvedAuthor) = extractEmbeddedBookMetadata(
                     uri = file.uri,
                     fallbackTitle = fallbackTitle,
@@ -1758,7 +2161,7 @@ class AudiobookRepository(context: Context) {
         val chapters = mutableListOf<Chapter>()
 
         try {
-            appContext.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            openUriParcelFileDescriptor(uri)?.use { pfd ->
                 FileInputStream(pfd.fileDescriptor).use { fis ->
                     val parsed = parseMp4ChaptersFromChannel(fis.channel, trackIndex)
                     chapters.addAll(parsed)
@@ -2191,9 +2594,10 @@ class AudiobookRepository(context: Context) {
         val candidates = mutableListOf<CoverSearchCandidate>()
         val seenUrls = mutableSetOf<String>()
 
+        // 1. Apple Books Audiobook API (Square 600x600 covers)
         try {
             val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
-            val itunesUrl = URL("https://itunes.apple.com/search?term=$encoded&media=audiobook&entity=audiobook&limit=6")
+            val itunesUrl = URL("https://itunes.apple.com/search?term=$encoded&media=audiobook&entity=audiobook&limit=4")
             val jsonText = readHttpText(itunesUrl)
             if (jsonText != null) {
                 val results = JSONObject(jsonText).optJSONArray("results")
@@ -2212,7 +2616,7 @@ class AudiobookRepository(context: Context) {
                                         CoverSearchCandidate(
                                             title = item.optString("collectionName", cleanQuery),
                                             author = item.optString("artistName", ""),
-                                            source = "Audiobook (Square)",
+                                            source = "Apple Audiobook",
                                             previewBitmap = bmp,
                                             fullResUrl = fullUrl
                                         )
@@ -2227,10 +2631,50 @@ class AudiobookRepository(context: Context) {
             Log.w(TAG, "iTunes audiobook cover search failed for '$cleanQuery'", t)
         }
 
+        // 2. Apple Books eBook API (High-res eBook covers)
         if (candidates.size < 8) {
             try {
                 val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
-                val gbooksUrl = URL("https://www.googleapis.com/books/v1/volumes?q=$encoded&maxResults=5")
+                val ibooksUrl = URL("https://itunes.apple.com/search?term=$encoded&media=ebook&entity=ebook&limit=4")
+                val jsonText = readHttpText(ibooksUrl)
+                if (jsonText != null) {
+                    val results = JSONObject(jsonText).optJSONArray("results")
+                    if (results != null) {
+                        for (i in 0 until results.length()) {
+                            if (candidates.size >= 8) break
+                            val item = results.getJSONObject(i)
+                            val art100 = item.optString("artworkUrl100", "")
+                            if (art100.isNotBlank()) {
+                                val previewUrl = art100.replace("100x100bb", "300x300bb")
+                                val fullUrl = art100.replace("100x100bb", "600x600bb")
+                                if (seenUrls.add(fullUrl)) {
+                                    val bmp = downloadBitmapFromUrl(previewUrl, 240, 240)
+                                    if (bmp != null) {
+                                        candidates.add(
+                                            CoverSearchCandidate(
+                                                title = item.optString("trackName", cleanQuery),
+                                                author = item.optString("artistName", ""),
+                                                source = "Apple Books",
+                                                previewBitmap = bmp,
+                                                fullResUrl = fullUrl
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "iTunes ebook cover search failed for '$cleanQuery'", t)
+            }
+        }
+
+        // 3. Google Books API
+        if (candidates.size < 8) {
+            try {
+                val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+                val gbooksUrl = URL("https://www.googleapis.com/books/v1/volumes?q=$encoded&maxResults=4")
                 val jsonText = readHttpText(gbooksUrl)
                 if (jsonText != null) {
                     val items = JSONObject(jsonText).optJSONArray("items")
@@ -2268,6 +2712,7 @@ class AudiobookRepository(context: Context) {
             }
         }
 
+        // 4. Open Library API
         if (candidates.size < 8) {
             try {
                 val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
@@ -2325,11 +2770,18 @@ class AudiobookRepository(context: Context) {
         applyCoverSearchCandidate(book.id, best)
     }
 
+    suspend fun fetchAndSaveOnlineEbookCoverArt(ebook: Ebook): Bitmap? = withContext(Dispatchers.IO) {
+        val query = cleanAudiobookSearchQuery(ebook.title, ebook.author)
+        val candidates = searchCoverCandidatesOnline(query)
+        val best = candidates.firstOrNull() ?: return@withContext null
+        applyCoverSearchCandidate(ebook.id, best)
+    }
+
     private fun readHttpText(url: URL): String? {
         val conn = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 6000
             readTimeout = 6000
-            setRequestProperty("User-Agent", "FablewoodAudiobooks/1.1")
+            setRequestProperty("User-Agent", "FablewoodAudiobooks/1.2")
         }
         return try {
             if (conn.responseCode in 200..299) {
@@ -2346,7 +2798,7 @@ class AudiobookRepository(context: Context) {
                 connectTimeout = 6000
                 readTimeout = 6000
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "FablewoodAudiobooks/1.1")
+                setRequestProperty("User-Agent", "FablewoodAudiobooks/1.2")
             }
             try {
                 if (conn.responseCode in 200..299) {

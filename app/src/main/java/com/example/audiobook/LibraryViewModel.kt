@@ -20,7 +20,7 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     // Top-Center Shelf Toggle: "AUDIO" or "EBOOK"
     var shelfMode by mutableStateOf(repository.getPreferences().getString("shelf_mode", "AUDIO") ?: "AUDIO")
 
-    // eBook Shelf & Reader State
+    // eBook Shelf & Reader State (.epub & .pdf)
     var ebooks by mutableStateOf<List<Ebook>>(repository.loadEbooksCache())
     var currentEbookId by mutableStateOf(repository.getLastEbookId() ?: "")
     var currentEbookChapters by mutableStateOf<List<EbookChapter>>(emptyList())
@@ -65,6 +65,7 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
 
     var completedBooksCount by mutableIntStateOf(repository.loadCompletedBookIds().size)
     var currentCoverArt by mutableStateOf<Bitmap?>(null)
+    var currentEbookCoverArt by mutableStateOf<Bitmap?>(null)
 
     var coverRevision by mutableIntStateOf(0)
     var progressRevision by mutableIntStateOf(0)
@@ -86,12 +87,17 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
 
     fun selectEbook(ebook: Ebook, openFullScreen: Boolean) {
         currentEbookId = ebook.id
+        repository.touchEbookLastRead(ebook.id)
         if (openFullScreen) {
             isEbookReaderFullScreen = true
         }
         ebookLoadJob?.cancel()
         isLoadingEbook = true
         ebookLoadJob = viewModelScope.launch {
+            val cover = repository.getOrFetchEbookCoverArt(ebook)
+            if (currentEbookId == ebook.id) {
+                currentEbookCoverArt = cover
+            }
             val loadedChapters = repository.loadEpubChapters(ebook)
             currentEbookChapters = loadedChapters
             val savedIdx = repository.getEbookChapterIndex(ebook.id).coerceIn(0, (loadedChapters.size - 1).coerceAtLeast(0))
@@ -241,6 +247,9 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
                 if (currentBookId == bookId) {
                     currentCoverArt = bmp
                 }
+                if (currentEbookId == bookId) {
+                    currentEbookCoverArt = bmp
+                }
                 coverRevision++
                 onResult(true)
             } else {
@@ -265,6 +274,9 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
             val bmp = repository.applyCoverSearchCandidate(bookId, candidate)
             if (currentBookId == bookId) {
                 currentCoverArt = bmp
+            }
+            if (currentEbookId == bookId) {
+                currentEbookCoverArt = bmp
             }
             coverRevision++
             onDone()
@@ -291,8 +303,8 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
         isBatchFetchingCovers = true
         viewModelScope.launch {
             var updatedCount = 0
-            val snapshot = books.toList()
-            for (book in snapshot) {
+            val audioSnapshot = books.toList()
+            for (book in audioSnapshot) {
                 val existing = repository.getOrFetchCoverArt(book)
                 if (existing == null) {
                     val fetched = repository.fetchAndSaveOnlineCoverArt(book)
@@ -300,6 +312,20 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
                         updatedCount++
                         if (currentBookId == book.id) {
                             currentCoverArt = fetched
+                        }
+                        coverRevision++
+                    }
+                }
+            }
+            val ebookSnapshot = ebooks.toList()
+            for (ebook in ebookSnapshot) {
+                val existing = repository.getOrFetchEbookCoverArt(ebook)
+                if (existing == null) {
+                    val fetched = repository.fetchAndSaveOnlineEbookCoverArt(ebook)
+                    if (fetched != null) {
+                        updatedCount++
+                        if (currentEbookId == ebook.id) {
+                            currentEbookCoverArt = fetched
                         }
                         coverRevision++
                     }
