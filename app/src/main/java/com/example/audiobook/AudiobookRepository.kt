@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.util.Log
 import android.util.LruCache
 import androidx.exifinterface.media.ExifInterface
@@ -34,6 +35,7 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -43,6 +45,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.zip.ZipInputStream
 
 data class AudioTrack(
     val name: String,
@@ -56,6 +59,19 @@ data class Audiobook(
     val author: String,
     val series: String = "",
     val tracks: List<AudioTrack>
+)
+
+data class Ebook(
+    val id: String,
+    val title: String,
+    val author: String,
+    val uri: Uri
+)
+
+data class EbookChapter(
+    val index: Int,
+    val title: String,
+    val bodyText: String
 )
 
 data class Chapter(
@@ -82,13 +98,12 @@ data class CoverSearchCandidate(
     val fullResUrl: String
 )
 
-// Cleans messy audiobook filenames and strips "Unknown Author" before querying cover APIs
 fun cleanAudiobookSearchQuery(rawTitle: String, rawAuthor: String = ""): String {
     var cleanedTitle = rawTitle
         .replace('_', ' ')
         .replace(Regex("\\[[^]]*]"), " ")
         .replace(Regex("\\([^)]*\\)"), " ")
-        .replace(Regex("(?i)\\b(unabridged|abridged|audiobook|m4b|mp3|64kbps|128kbps|disc\\s*\\d+|part\\s*\\d+|cd\\s*\\d+|book\\s*\\d+)\\b"), " ")
+        .replace(Regex("(?i)\\b(unabridged|abridged|audiobook|ebook|epub|m4b|mp3|64kbps|128kbps|disc\\s*\\d+|part\\s*\\d+|cd\\s*\\d+|book\\s*\\d+)\\b"), " ")
         .replace(Regex("^\\s*\\d+\\s*[-._]\\s*"), " ")
         .replace(Regex("\\s+"), " ")
         .trim()
@@ -106,7 +121,6 @@ fun cleanAudiobookSearchQuery(rawTitle: String, rawAuthor: String = ""): String 
     return if (validAuthor) "$cleanedTitle $cleanedAuthor".trim() else cleanedTitle
 }
 
-// Automatically relabels duplicate, blank, or book-title-repeating chapters as "Chapter 1", "Chapter 2", etc.
 fun normalizeChapterTitles(rawChapters: List<Chapter>, bookTitle: String = ""): List<Chapter> {
     if (rawChapters.isEmpty()) return listOf(Chapter("Chapter 1", 0L, 0L, 0))
     val cleanBookTitle = bookTitle.trim()
@@ -117,7 +131,6 @@ fun normalizeChapterTitles(rawChapters: List<Chapter>, bookTitle: String = ""): 
     }
     val uniqueMeaningfulCount = meaningfulTitles.map { it.lowercase(Locale.ROOT) }.distinct().size
 
-    // If all chapters have the same name, repeat the book title, or more than half are identical
     val relabelAll = rawChapters.size > 1 && (
         meaningfulTitles.isEmpty() ||
             uniqueMeaningfulCount <= 1 ||
@@ -146,7 +159,6 @@ fun normalizeChapterTitles(rawChapters: List<Chapter>, bookTitle: String = ""): 
     }
 }
 
-// Pure functions exposed for JVM Unit Testing
 fun compareNatural(a: String, b: String): Int {
     var ia = 0
     var ib = 0
@@ -212,10 +224,10 @@ fun parseChplBytes(payload: ByteArray, trackIndex: Int = 0): List<Chapter> {
     if (payload.size < 5) return emptyList()
     val buf = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
     val version = buf.get().toInt() and 0xFF
-    buf.get(); buf.get(); buf.get() // 24-bit flags
+    buf.get(); buf.get(); buf.get()
     if (version == 1) {
         if (buf.remaining() < 4) return emptyList()
-        buf.int // skip 32-bit reserved
+        buf.int
     }
     if (buf.remaining() < 1) return emptyList()
     val count = buf.get().toInt() and 0xFF
@@ -288,7 +300,7 @@ class AudiobookRepository(context: Context) {
         )
         private val CONTAINER_EXTENSIONS = setOf("m4a", "m4b", "m4p", "mp4")
         private val AUTO_SCAN_ROOT_FOLDERS = setOf(
-            "download", "downloads", "audiobooks", "audiobook", "books", "book", "audible"
+            "download", "downloads", "audiobooks", "audiobook", "books", "book", "audible", "documents"
         )
         private val DISC_FOLDER_REGEX = Regex("^(disc|cd|part|disk)\\s*\\d+.*$", RegexOption.IGNORE_CASE)
 
@@ -341,6 +353,7 @@ class AudiobookRepository(context: Context) {
 
             val booksStr = sourcePrefs.getString("cached_books_list", "[]") ?: "[]"
             root.put("books", JSONArray(booksStr))
+            root.put("ebooks", JSONArray())
             val bmStr = sourcePrefs.getString("book_bookmarks_json", "{}") ?: "{}"
             root.put("bookmarks", JSONObject(bmStr))
             val compStr = sourcePrefs.getString("completed_books_set_json", "[]") ?: "[]"
@@ -368,6 +381,7 @@ class AudiobookRepository(context: Context) {
                 }
             }
             root.put("progress", progressObj)
+            root.put("ebookProgress", JSONObject())
             root.put("metaCache", JSONObject())
         } catch (t: Throwable) {
             Log.w(TAG, "Preference migration encountered non-fatal error", t)
@@ -420,6 +434,7 @@ class AudiobookRepository(context: Context) {
     fun saveScanMode(mode: String) = prefs.edit().putString("scan_mode", mode).apply()
 
     fun getLastBookId(): String? = prefs.getString("last_book_id", "")
+    fun getLastEbookId(): String? = prefs.getString("last_ebook_id", "")
 
     fun loadPlaybackPitch(): Float = prefs.getFloat("playback_pitch", 1.0f).coerceIn(0.75f, 1.25f)
     fun savePlaybackPitch(pitch: Float) = prefs.edit().putFloat("playback_pitch", pitch.coerceIn(0.75f, 1.25f)).apply()
@@ -488,6 +503,84 @@ class AudiobookRepository(context: Context) {
             }
         }
         return list
+    }
+
+    // eBook Persistence & Progress
+    fun saveEbooksCache(ebooks: List<Ebook>) {
+        synchronized(stateLock) {
+            val store = ensureStoreLoaded()
+            val arr = JSONArray()
+            for (eb in ebooks) {
+                arr.put(
+                    JSONObject().apply {
+                        put("id", eb.id)
+                        put("title", eb.title)
+                        put("author", eb.author)
+                        put("uri", eb.uri.toString())
+                    }
+                )
+            }
+            store.put("ebooks", arr)
+        }
+        scheduleStoreFlush(immediate = true)
+    }
+
+    fun loadEbooksCache(): List<Ebook> {
+        val list = mutableListOf<Ebook>()
+        synchronized(stateLock) {
+            try {
+                val store = ensureStoreLoaded()
+                val arr = store.optJSONArray("ebooks") ?: JSONArray()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val uriStr = obj.optString("uri", "")
+                    if (uriStr.isNotBlank()) {
+                        list.add(
+                            Ebook(
+                                id = obj.optString("id", uriStr),
+                                title = obj.optString("title", "Untitled eBook"),
+                                author = obj.optString("author", "Unknown Author"),
+                                uri = Uri.parse(uriStr)
+                            )
+                        )
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed loading cached ebooks", t)
+            }
+        }
+        return list
+    }
+
+    fun saveEbookProgress(ebookId: String, chapterIndex: Int, totalChapters: Int) {
+        if (ebookId.isEmpty()) return
+        val now = System.currentTimeMillis()
+        prefs.edit().putString("last_ebook_id", ebookId).apply()
+        synchronized(stateLock) {
+            val store = ensureStoreLoaded()
+            val ebProg = store.optJSONObject("ebookProgress") ?: JSONObject().also { store.put("ebookProgress", it) }
+            val entry = ebProg.optJSONObject(ebookId) ?: JSONObject()
+            entry.put("chapterIndex", chapterIndex.coerceAtLeast(0))
+            entry.put("totalChapters", totalChapters.coerceAtLeast(1))
+            entry.put("lastReadMs", now)
+            ebProg.put(ebookId, entry)
+        }
+        scheduleStoreFlush(immediate = false)
+    }
+
+    fun getEbookChapterIndex(ebookId: String): Int = synchronized(stateLock) {
+        val store = ensureStoreLoaded()
+        store.optJSONObject("ebookProgress")?.optJSONObject(ebookId)?.optInt("chapterIndex", 0) ?: 0
+    }
+
+    fun getEbookTotalChapters(ebookId: String): Int = synchronized(stateLock) {
+        val store = ensureStoreLoaded()
+        store.optJSONObject("ebookProgress")?.optJSONObject(ebookId)?.optInt("totalChapters", 0) ?: 0
+    }
+
+    fun getEbookLastReadTime(ebookId: String): Long = synchronized(stateLock) {
+        val store = ensureStoreLoaded()
+        store.optJSONObject("ebookProgress")?.optJSONObject(ebookId)?.optLong("lastReadMs", 0L) ?: 0L
     }
 
     fun touchBookLastPlayed(bookId: String, timestampMs: Long = System.currentTimeMillis()) {
@@ -731,6 +824,410 @@ class AudiobookRepository(context: Context) {
             }
         }
         scheduleStoreFlush(immediate = true)
+    }
+
+    // Pure-Kotlin .epub Scanner, Importer & Parser
+    suspend fun scanDeviceForEbooks(): List<Ebook> = withContext(Dispatchers.IO) {
+        val existingByUri = loadEbooksCache().associateBy { it.uri.toString() }.toMutableMap()
+
+        try {
+            val collection = MediaStore.Files.getContentUri("external")
+            val projection = arrayOf(
+                MediaStore.Files.FileColumns._ID,
+                MediaStore.Files.FileColumns.DISPLAY_NAME
+            )
+            val selection = "${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE ?"
+            val selectionArgs = arrayOf("%.epub")
+
+            appContext.contentResolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idCol)
+                    val displayName = cursor.getString(nameCol) ?: continue
+                    if (!displayName.endsWith(".epub", ignoreCase = true)) continue
+                    val contentUri = ContentUris.withAppendedId(collection, id)
+                    val uriStr = contentUri.toString()
+                    if (!existingByUri.containsKey(uriStr)) {
+                        val fallbackTitle = displayName.substringBeforeLast('.')
+                        val (title, author) = extractEpubMetadataAndCover(contentUri, uriStr, fallbackTitle)
+                        existingByUri[uriStr] = Ebook(
+                            id = uriStr,
+                            title = title,
+                            author = author,
+                            uri = contentUri
+                        )
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "MediaStore epub scan encountered non-fatal issue", t)
+        }
+
+        val savedFolderStr = getSelectedFolderUri()
+        if (!savedFolderStr.isNullOrEmpty() && savedFolderStr != "AUTO_SCAN") {
+            try {
+                val folderEbooks = scanFolderForEbooks(Uri.parse(savedFolderStr))
+                for (eb in folderEbooks) {
+                    existingByUri[eb.uri.toString()] = eb
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Custom folder epub scan failed", t)
+            }
+        }
+
+        val finalEbooks = existingByUri.values.sortedWith { a, b -> compareNatural(a.title, b.title) }
+        saveEbooksCache(finalEbooks)
+        finalEbooks
+    }
+
+    suspend fun scanFolderForEbooks(folderUri: Uri): List<Ebook> = withContext(Dispatchers.IO) {
+        val list = mutableListOf<Ebook>()
+        val rootDocId = DocumentsContract.getTreeDocumentId(folderUri)
+        traverseFolderForEbooks(folderUri, rootDocId, list)
+        list
+    }
+
+    private fun traverseFolderForEbooks(treeUri: Uri, currentDocId: String, ebookList: MutableList<Ebook>) {
+        val children = queryChildDocuments(treeUri, currentDocId)
+        for (child in children) {
+            if (child.isDirectory) {
+                traverseFolderForEbooks(treeUri, child.docId, ebookList)
+            } else if (child.extension == "epub") {
+                val fallbackTitle = child.name.substringBeforeLast('.')
+                val (title, author) = extractEpubMetadataAndCover(child.uri, child.uri.toString(), fallbackTitle)
+                ebookList.add(
+                    Ebook(
+                        id = child.uri.toString(),
+                        title = title,
+                        author = author,
+                        uri = child.uri
+                    )
+                )
+            }
+        }
+    }
+
+    suspend fun importEpubUris(uris: List<Uri>): List<Ebook> = withContext(Dispatchers.IO) {
+        val existing = loadEbooksCache().associateBy { it.id }.toMutableMap()
+        for (uri in uris) {
+            val uriStr = uri.toString()
+            var displayName = "Imported eBook"
+            try {
+                appContext.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) {
+                        displayName = c.getString(0)?.substringBeforeLast('.') ?: displayName
+                    }
+                }
+            } catch (_: Throwable) {}
+
+            val (title, author) = extractEpubMetadataAndCover(uri, uriStr, displayName)
+            existing[uriStr] = Ebook(
+                id = uriStr,
+                title = title,
+                author = author,
+                uri = uri
+            )
+        }
+        val merged = existing.values.toList()
+        saveEbooksCache(merged)
+        merged
+    }
+
+    private fun extractEpubMetadataAndCover(uri: Uri, ebookId: String, fallbackTitle: String): Pair<String, String> {
+        var resolvedTitle = fallbackTitle
+        var resolvedAuthor = "Unknown Author"
+
+        try {
+            val entries = mutableMapOf<String, ByteArray>()
+            appContext.contentResolver.openInputStream(uri)?.use { rawStream ->
+                ZipInputStream(rawStream).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        if (!entry.isDirectory) {
+                            val name = entry.name.replace('\\', '/').trimStart('/')
+                            val lower = name.lowercase(Locale.ROOT)
+                            if (lower.endsWith(".opf") ||
+                                lower == "meta-inf/container.xml" ||
+                                lower.endsWith(".jpg") ||
+                                lower.endsWith(".jpeg") ||
+                                lower.endsWith(".png") ||
+                                lower.endsWith(".webp")
+                            ) {
+                                if (entry.size <= 4 * 1024 * 1024L) {
+                                    entries[name] = zis.readBytes()
+                                }
+                            }
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+            }
+
+            val opfEntry = entries.entries.firstOrNull { it.key.endsWith(".opf", ignoreCase = true) }
+            if (opfEntry != null) {
+                val opfXml = String(opfEntry.value, Charsets.UTF_8)
+                val opfDir = opfEntry.key.substringBeforeLast('/', "")
+
+                val titleMatch = Regex("<(?:dc:)?title[^>]*>(.*?)</(?:dc:)?title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+                    .find(opfXml)?.groupValues?.getOrNull(1)
+                if (!titleMatch.isNullOrBlank()) {
+                    resolvedTitle = decodeHtmlEntities(titleMatch.trim())
+                }
+
+                val creatorMatch = Regex("<(?:dc:)?creator[^>]*>(.*?)</(?:dc:)?creator>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+                    .find(opfXml)?.groupValues?.getOrNull(1)
+                if (!creatorMatch.isNullOrBlank()) {
+                    resolvedAuthor = decodeHtmlEntities(creatorMatch.trim())
+                }
+
+                // Locate embedded cover art inside the epub zip
+                val coverFile = coverFileFor(ebookId)
+                if (!coverFile.exists()) {
+                    var coverBytes: ByteArray? = null
+                    val itemTags = Regex("<item\\b[^>]*>", RegexOption.IGNORE_CASE).findAll(opfXml)
+                    for (match in itemTags) {
+                        val tag = match.value
+                        val href = Regex("href\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                            .find(tag)?.groupValues?.getOrNull(1) ?: continue
+                        val mediaType = Regex("media-type\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                            .find(tag)?.groupValues?.getOrNull(1) ?: ""
+                        if (mediaType.startsWith("image/", ignoreCase = true) &&
+                            (tag.contains("cover", ignoreCase = true) || href.contains("cover", ignoreCase = true))
+                        ) {
+                            val resolvedPath = resolveZipRelativePath(opfDir, href)
+                            coverBytes = entries[resolvedPath] ?: entries.entries.firstOrNull {
+                                it.key.equals(resolvedPath, ignoreCase = true) || it.key.endsWith(href, ignoreCase = true)
+                            }?.value
+                            if (coverBytes != null) break
+                        }
+                    }
+
+                    if (coverBytes == null) {
+                        coverBytes = entries.entries.firstOrNull {
+                            val k = it.key.lowercase(Locale.ROOT)
+                            k.contains("cover") && (k.endsWith(".jpg") || k.endsWith(".jpeg") || k.endsWith(".png"))
+                        }?.value
+                    }
+
+                    if (coverBytes != null) {
+                        val bmp = decodeSampledBitmapFromStreamWithExif(ByteArrayInputStream(coverBytes), 350, 350)
+                        if (bmp != null) {
+                            saveBitmapToCache(ebookId, bmp)
+                            CoverMemoryCache.cache.put(ebookId, bmp)
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed extracting epub metadata for $uri", t)
+        }
+
+        return Pair(resolvedTitle, resolvedAuthor)
+    }
+
+    suspend fun getOrFetchEbookCoverArt(ebook: Ebook): Bitmap? = withContext(Dispatchers.IO) {
+        CoverMemoryCache.cache.get(ebook.id)?.let { return@withContext it }
+
+        val shaFile = coverFileFor(ebook.id)
+        if (shaFile.exists()) {
+            val bmp = decodeSampledBitmapFromFile(shaFile.absolutePath, 350, 350)
+            if (bmp != null) {
+                CoverMemoryCache.cache.put(ebook.id, bmp)
+                return@withContext bmp
+            }
+        }
+
+        extractEpubMetadataAndCover(ebook.uri, ebook.id, ebook.title)
+        CoverMemoryCache.cache.get(ebook.id)
+    }
+
+    suspend fun loadEpubChapters(ebook: Ebook): List<EbookChapter> = withContext(Dispatchers.IO) {
+        val chapters = mutableListOf<EbookChapter>()
+        try {
+            val zipMap = linkedMapOf<String, ByteArray>()
+            appContext.contentResolver.openInputStream(ebook.uri)?.use { rawStream ->
+                ZipInputStream(rawStream).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        if (!entry.isDirectory) {
+                            val cleanName = entry.name.replace('\\', '/').trimStart('/')
+                            val lower = cleanName.lowercase(Locale.ROOT)
+                            if (lower.endsWith(".opf") ||
+                                lower.endsWith(".xhtml") ||
+                                lower.endsWith(".html") ||
+                                lower.endsWith(".htm") ||
+                                lower.endsWith(".xml") ||
+                                lower.endsWith(".ncx")
+                            ) {
+                                if (entry.size <= 3 * 1024 * 1024L) {
+                                    zipMap[cleanName] = zis.readBytes()
+                                }
+                            }
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+            }
+
+            val opfEntry = zipMap.entries.firstOrNull { it.key.endsWith(".opf", ignoreCase = true) }
+            val orderedHtmlPaths = mutableListOf<String>()
+
+            if (opfEntry != null) {
+                val opfXml = String(opfEntry.value, Charsets.UTF_8)
+                val opfDir = opfEntry.key.substringBeforeLast('/', "")
+
+                val manifestMap = mutableMapOf<String, String>()
+                val itemMatches = Regex("<item\\b[^>]*>", RegexOption.IGNORE_CASE).findAll(opfXml)
+                for (m in itemMatches) {
+                    val tag = m.value
+                    val id = Regex("\\bid\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                        .find(tag)?.groupValues?.getOrNull(1) ?: continue
+                    val href = Regex("\\bhref\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                        .find(tag)?.groupValues?.getOrNull(1) ?: continue
+                    val mediaType = Regex("\\bmedia-type\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                        .find(tag)?.groupValues?.getOrNull(1) ?: ""
+                    if (mediaType.contains("html", ignoreCase = true) ||
+                        href.endsWith(".xhtml", ignoreCase = true) ||
+                        href.endsWith(".html", ignoreCase = true) ||
+                        href.endsWith(".htm", ignoreCase = true)
+                    ) {
+                        val decodedHref = try { URLDecoder.decode(href.substringBefore('#'), "UTF-8") } catch (_: Throwable) { href.substringBefore('#') }
+                        manifestMap[id] = resolveZipRelativePath(opfDir, decodedHref)
+                    }
+                }
+
+                val itemrefMatches = Regex("<itemref\\b[^>]*idref\\s*=\\s*[\"']([^\"']+)[\"'][^>]*>", RegexOption.IGNORE_CASE).findAll(opfXml)
+                for (m in itemrefMatches) {
+                    val idref = m.groupValues[1]
+                    val path = manifestMap[idref]
+                    if (path != null && !orderedHtmlPaths.contains(path)) {
+                        orderedHtmlPaths.add(path)
+                    }
+                }
+            }
+
+            if (orderedHtmlPaths.isEmpty()) {
+                orderedHtmlPaths.addAll(
+                    zipMap.keys.filter {
+                        val l = it.lowercase(Locale.ROOT)
+                        l.endsWith(".xhtml") || l.endsWith(".html") || l.endsWith(".htm")
+                    }.sortedWith { a, b -> compareNatural(a, b) }
+                )
+            }
+
+            var chapCounter = 1
+            for (path in orderedHtmlPaths) {
+                val bytes = zipMap[path] ?: zipMap.entries.firstOrNull { it.key.equals(path, ignoreCase = true) }?.value ?: continue
+                val rawHtml = String(bytes, Charsets.UTF_8)
+                val (extractedTitle, bodyText) = parseEpubHtmlToReadableText(rawHtml, chapCounter)
+                if (bodyText.length >= 40) {
+                    chapters.add(
+                        EbookChapter(
+                            index = chapters.size,
+                            title = extractedTitle,
+                            bodyText = bodyText
+                        )
+                    )
+                    chapCounter++
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed parsing epub chapters for ${ebook.title}", t)
+        }
+
+        if (chapters.isEmpty()) {
+            chapters.add(
+                EbookChapter(
+                    index = 0,
+                    title = ebook.title,
+                    bodyText = "Could not extract text chapters from this ePub file. It may be DRM-protected or image-only."
+                )
+            )
+        }
+        saveEbookProgress(ebook.id, getEbookChapterIndex(ebook.id).coerceIn(0, chapters.lastIndex), chapters.size)
+        chapters
+    }
+
+    private fun resolveZipRelativePath(baseDir: String, relativeHref: String): String {
+        val cleanHref = relativeHref.trimStart('/')
+        val combined = if (baseDir.isBlank()) cleanHref else "$baseDir/$cleanHref"
+        val parts = combined.split('/')
+        val stack = mutableListOf<String>()
+        for (p in parts) {
+            when (p) {
+                "", "." -> {}
+                ".." -> if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex)
+                else -> stack.add(p)
+            }
+        }
+        return stack.joinToString("/")
+    }
+
+    private fun parseEpubHtmlToReadableText(html: String, fallbackNum: Int): Pair<String, String> {
+        val headingMatch = Regex("<h[1-3][^>]*>(.*?)</h[1-3]>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .find(html)?.groupValues?.getOrNull(1)
+        val titleTagMatch = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .find(html)?.groupValues?.getOrNull(1)
+
+        val rawTitle = (headingMatch ?: titleTagMatch ?: "")
+            .replace(Regex("<[^>]+>"), " ")
+            .replace(Regex("\\s+"), " ")
+            .let { decodeHtmlEntities(it).trim() }
+
+        val chapterTitle = if (rawTitle.isBlank() || rawTitle.equals("unknown", ignoreCase = true)) {
+            "Chapter $fallbackNum"
+        } else {
+            rawTitle
+        }
+
+        val bodyContent = Regex("<body[^>]*>(.*?)</body>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .find(html)?.groupValues?.getOrNull(1) ?: html
+
+        val cleaned = bodyContent
+            .replace(Regex("<head[^>]*>.*?</head>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
+            .replace(Regex("<style[^>]*>.*?</style>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
+            .replace(Regex("<script[^>]*>.*?</script>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
+            .replace(Regex("(?i)<br\\s*/?>"), "\n")
+            .replace(Regex("(?i)</(p|div|h1|h2|h3|h4|h5|h6|li|blockquote|section|tr)>"), "\n\n")
+            .replace(Regex("<[^>]+>"), "")
+
+        val decoded = decodeHtmlEntities(cleaned)
+        val paragraphs = decoded
+            .lines()
+            .map { it.replace(Regex("[ \\t]+"), " ").trim() }
+            .joinToString("\n")
+            .replace(Regex("\\n{3,}"), "\n\n")
+            .trim()
+
+        return Pair(chapterTitle, paragraphs)
+    }
+
+    private fun decodeHtmlEntities(input: String): String {
+        return input
+            .replace("&nbsp;", " ")
+            .replace("&#160;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&#39;", "'")
+            .replace("&rsquo;", "’")
+            .replace("&lsquo;", "‘")
+            .replace("&#8217;", "’")
+            .replace("&#8216;", "‘")
+            .replace("&rdquo;", "”")
+            .replace("&ldquo;", "“")
+            .replace("&#8220;", "“")
+            .replace("&#8221;", "”")
+            .replace("&mdash;", "—")
+            .replace("&ndash;", "–")
+            .replace("&#8212;", "—")
+            .replace("&#8211;", "–")
+            .replace("&hellip;", "…")
     }
 
     private data class MediaStoreAudioEntry(
