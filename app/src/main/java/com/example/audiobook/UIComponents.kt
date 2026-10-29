@@ -1,6 +1,8 @@
 package com.example.audiobook
 
 import android.graphics.Bitmap
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -8,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -23,13 +26,18 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -38,8 +46,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import kotlin.math.abs
+import kotlin.math.sin
 
 fun formatTime(ms: Long): String {
     val totalSeconds = ms.coerceAtLeast(0L) / 1000L
@@ -53,6 +64,73 @@ fun formatTime(ms: Long): String {
     } else {
         String.format(Locale.US, "%02d:%02d", remainingMinutes, seconds)
     }
+}
+
+// Splits a chapter's body text into screen-fitted pages so every swipe turns a single page
+fun paginateChapterText(
+    bodyText: String,
+    charsPerLine: Int,
+    linesPerPage: Int
+): List<String> {
+    val clean = bodyText.trim()
+    if (clean.isEmpty()) return listOf("")
+
+    val safeCharsPerLine = charsPerLine.coerceIn(24, 90)
+    val safeLinesPerPage = linesPerPage.coerceIn(10, 48)
+
+    val pages = mutableListOf<String>()
+    val currentPage = StringBuilder()
+    var currentLines = 0
+
+    val paragraphs = clean.split(Regex("\\n\\s*\\n"))
+    for (para in paragraphs) {
+        val trimmedPara = para.trim()
+        if (trimmedPara.isEmpty()) continue
+
+        val words = trimmedPara.split(Regex("\\s+"))
+        val paraBuf = StringBuilder()
+        var lineChars = 0
+
+        for (word in words) {
+            val wordLen = word.length + if (lineChars > 0) 1 else 0
+            if (lineChars + wordLen > safeCharsPerLine) {
+                currentLines++
+                lineChars = word.length
+                if (currentLines >= safeLinesPerPage && paraBuf.isNotEmpty()) {
+                    if (currentPage.isNotEmpty()) currentPage.append("\n\n")
+                    currentPage.append(paraBuf.toString().trim())
+                    pages.add(currentPage.toString().trim())
+                    currentPage.clear()
+                    paraBuf.clear()
+                    currentLines = 1
+                }
+            } else {
+                lineChars += wordLen
+            }
+            if (paraBuf.isNotEmpty()) paraBuf.append(' ')
+            paraBuf.append(word)
+        }
+
+        if (paraBuf.isNotEmpty()) {
+            val addedLines = 1 + if (currentPage.isNotEmpty()) 1 else 0
+            if (currentLines + addedLines > safeLinesPerPage && currentPage.isNotEmpty()) {
+                pages.add(currentPage.toString().trim())
+                currentPage.clear()
+                currentPage.append(paraBuf.toString().trim())
+                currentLines = (paraBuf.length / safeCharsPerLine) + 1
+            } else {
+                if (currentPage.isNotEmpty()) currentPage.append("\n\n")
+                currentPage.append(paraBuf.toString().trim())
+                currentLines += addedLines
+            }
+        }
+    }
+
+    if (currentPage.isNotEmpty()) {
+        pages.add(currentPage.toString().trim())
+    }
+
+    return if (pages.isEmpty()) listOf(clean) else pages
 }
 
 @Composable
@@ -476,7 +554,7 @@ fun EbookShelfContent(
                 )
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    text = "Scan your Downloads, Documents & Books folders for eBooks (.epub, .pdf, .azw3, .mobi, .cbz, .fb2, .docx, .txt & more), or import files directly.",
+                    text = "Scan your Downloads & Books folders for eBooks (.epub, .azw3, .mobi, .pdf novels, .cbz & more), or import files directly.",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -565,7 +643,7 @@ fun EbookCardWrapper(
     }
     val progress = if (totalChaps > 0) ((currChap + 1).toFloat() / totalChaps).coerceIn(0.02f, 1f) else 0f
     val isVisualPageFormat = ebook.format.uppercase(Locale.ROOT) in VISUAL_PAGE_EBOOK_FORMATS
-    val unitLabel = if (isVisualPageFormat) "Page" else "Chapter"
+    val unitLabel = if (isVisualPageFormat) "Section" else "Chapter"
     val subtitle = if (totalChaps > 0) "$unitLabel ${currChap + 1} of $totalChaps" else "${ebook.format} eBook"
 
     if (viewMode == "GRID") {
@@ -676,15 +754,28 @@ fun EpubReaderScreen(
     onBackToShelf: () -> Unit,
     onSelectChapter: (Int) -> Unit,
     onUpdateFontSize: (Float) -> Unit,
-    onUpdateTheme: (String) -> Unit
+    onUpdateTheme: (String) -> Unit,
+    onReloadEbook: () -> Unit = {}
 ) {
     val fmtUpper = ebook.format.uppercase(Locale.ROOT)
-    val isVisualPageFormat = fmtUpper in VISUAL_PAGE_EBOOK_FORMATS
+    val currentChapter = chapters.getOrNull(currentChapterIndex)
+    // A chapter is rendered in Reflowed Text Mode whenever bodyText is non-blank (including reflowed PDFs!)
+    val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
 
     val bgColor = when (readerTheme) {
         "SEPIA" -> Color(0xFFF4ECD8)
         "LIGHT" -> Color(0xFFFAFAFA)
         else -> Color(0xFF0C1A14)
+    }
+    val curlBackMidColor = when (readerTheme) {
+        "SEPIA" -> Color(0xFFE4D5B7)
+        "LIGHT" -> Color(0xFFE8ECE9)
+        else -> Color(0xFF183327)
+    }
+    val curlBackHighlightColor = when (readerTheme) {
+        "SEPIA" -> Color(0xFFFBF6EC)
+        "LIGHT" -> Color(0xFFFFFFFF)
+        else -> Color(0xFF244938)
     }
     val textColor = when (readerTheme) {
         "SEPIA" -> Color(0xFF3B2F2F)
@@ -699,18 +790,35 @@ fun EpubReaderScreen(
 
     var showTocDialog by remember { mutableStateOf(false) }
     var showReaderSettings by remember { mutableStateOf(false) }
-    val scrollState = rememberScrollState()
+    var pdfOriginalPageMode by remember {
+        mutableStateOf(repository.getPreferences().getBoolean("pdf_original_page_mode", false))
+    }
 
-    val currentChapter = chapters.getOrNull(currentChapterIndex)
-    var renderedPageBitmap by remember(ebook.id, currentChapterIndex) { mutableStateOf<Bitmap?>(null) }
+    // Sub-page state within the current chapter for single-page turning
+    var subPageIndex by remember(ebook.id, currentChapterIndex) { mutableIntStateOf(0) }
+    var startAtLastSubPage by remember { mutableStateOf(false) }
+
+    var renderedPageBitmap by remember(ebook.id, currentChapterIndex, readerTheme) { mutableStateOf<Bitmap?>(null) }
+    var nextPageBitmap by remember(ebook.id, currentChapterIndex, readerTheme) { mutableStateOf<Bitmap?>(null) }
+    var prevPageBitmap by remember(ebook.id, currentChapterIndex, readerTheme) { mutableStateOf<Bitmap?>(null) }
     var isRenderingVisualPage by remember(ebook.id, currentChapterIndex) { mutableStateOf(false) }
 
-    LaunchedEffect(currentChapterIndex, ebook.id, isVisualPageFormat) {
-        scrollState.scrollTo(0)
-        if (isVisualPageFormat) {
+    val coroutineScope = rememberCoroutineScope()
+    // curlAnim: 0f = flat page, +0.01..+1f = curling forward (Next), -0.01..-1f = curling backward (Prev)
+    val curlAnim = remember { Animatable(0f) }
+
+    LaunchedEffect(currentChapterIndex, ebook.id, isVisualPageMode, readerTheme) {
+        if (isVisualPageMode) {
             isRenderingVisualPage = true
-            renderedPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex, 1400)
+            renderedPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex, 1400, readerTheme)
             isRenderingVisualPage = false
+            // Pre-render adjacent pages for smooth page-curl preview
+            if (currentChapterIndex + 1 < chapters.size) {
+                nextPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex + 1, 1200, readerTheme)
+            }
+            if (currentChapterIndex > 0) {
+                prevPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex - 1, 1200, readerTheme)
+            }
         }
     }
 
@@ -720,6 +828,7 @@ fun EpubReaderScreen(
             .background(bgColor)
             .let { if (!isEmbeddedPane) it.windowInsetsPadding(WindowInsets.systemBars) else it }
     ) {
+        // Top Reader Bar
         Surface(
             color = bgColor,
             tonalElevation = 2.dp,
@@ -762,7 +871,7 @@ fun EpubReaderScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = currentChapter?.title ?: if (isVisualPageFormat) "Page ${currentChapterIndex + 1}" else "Loading...",
+                        text = currentChapter?.title ?: if (isVisualPageMode) "Page ${currentChapterIndex + 1}" else "Loading...",
                         fontSize = 12.sp,
                         color = accentColor,
                         maxLines = 1,
@@ -783,95 +892,433 @@ fun EpubReaderScreen(
 
         HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
 
-        if (isLoading || (isVisualPageFormat && isRenderingVisualPage)) {
-            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = accentColor)
+        // Main Interactive 3D Page-Curl Reading Canvas
+        BoxWithConstraints(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(bgColor)
+        ) {
+            val availWidthDp = maxWidth.value
+            val availHeightDp = maxHeight.value
+
+            val charsPerLine = ((availWidthDp - 44f) / (fontSizeSp * 0.54f)).toInt().coerceIn(26, 85)
+            val lineHeightSp = fontSizeSp * 1.52f
+            val linesPerPage = ((availHeightDp - 52f) / (lineHeightSp * 1.05f)).toInt().coerceIn(10, 42)
+
+            val subPages = remember(currentChapter?.bodyText, charsPerLine, linesPerPage) {
+                if (isVisualPageMode) listOf("")
+                else paginateChapterText(currentChapter?.bodyText ?: "", charsPerLine, linesPerPage)
             }
-        } else if (isVisualPageFormat && renderedPageBitmap != null) {
+
+            LaunchedEffect(subPages.size, currentChapterIndex) {
+                if (startAtLastSubPage) {
+                    subPageIndex = subPages.lastIndex.coerceAtLeast(0)
+                    startAtLastSubPage = false
+                } else if (subPageIndex > subPages.lastIndex) {
+                    subPageIndex = subPages.lastIndex.coerceAtLeast(0)
+                }
+            }
+
+            val canGoNext = (subPageIndex + 1 < subPages.size) || (currentChapterIndex + 1 < chapters.size)
+            val canGoPrev = (subPageIndex > 0) || (currentChapterIndex > 0)
+
+            fun commitNextPage() {
+                if (subPageIndex + 1 < subPages.size) {
+                    subPageIndex++
+                } else if (currentChapterIndex + 1 < chapters.size) {
+                    startAtLastSubPage = false
+                    subPageIndex = 0
+                    onSelectChapter(currentChapterIndex + 1)
+                }
+            }
+
+            fun commitPrevPage() {
+                if (subPageIndex > 0) {
+                    subPageIndex--
+                } else if (currentChapterIndex > 0) {
+                    startAtLastSubPage = true
+                    onSelectChapter(currentChapterIndex - 1)
+                }
+            }
+
+            fun animatePageTurnForward() {
+                if (!canGoNext || curlAnim.isRunning) return
+                coroutineScope.launch {
+                    curlAnim.snapTo(0.04f)
+                    curlAnim.animateTo(1f, tween(durationMillis = 360))
+                    commitNextPage()
+                    curlAnim.snapTo(0f)
+                }
+            }
+
+            fun animatePageTurnBackward() {
+                if (!canGoPrev || curlAnim.isRunning) return
+                coroutineScope.launch {
+                    curlAnim.snapTo(-0.04f)
+                    curlAnim.animateTo(-1f, tween(durationMillis = 360))
+                    commitPrevPage()
+                    curlAnim.snapTo(0f)
+                }
+            }
+
+            val nextPreviewText = remember(subPageIndex, subPages, currentChapterIndex, chapters) {
+                if (subPageIndex + 1 < subPages.size) {
+                    subPages[subPageIndex + 1]
+                } else if (currentChapterIndex + 1 < chapters.size) {
+                    val nextChap = chapters[currentChapterIndex + 1]
+                    paginateChapterText(nextChap.bodyText, charsPerLine, linesPerPage).firstOrNull() ?: ""
+                } else ""
+            }
+
+            val prevPreviewText = remember(subPageIndex, subPages, currentChapterIndex, chapters) {
+                if (subPageIndex > 0) {
+                    subPages[subPageIndex - 1]
+                } else if (currentChapterIndex > 0) {
+                    val prevChap = chapters[currentChapterIndex - 1]
+                    paginateChapterText(prevChap.bodyText, charsPerLine, linesPerPage).lastOrNull() ?: ""
+                } else ""
+            }
+
+            @Composable
+            fun PageContentLayer(
+                pageText: String,
+                showChapterHeading: Boolean,
+                headingText: String,
+                visualBitmap: Bitmap?
+            ) {
+                if (isVisualPageMode) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(bgColor)
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (visualBitmap != null) {
+                            Image(
+                                bitmap = visualBitmap.asImageBitmap(),
+                                contentDescription = headingText,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(bgColor)
+                            .padding(horizontal = 22.dp, vertical = 16.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        if (showChapterHeading && headingText.isNotBlank()) {
+                            Text(
+                                text = headingText,
+                                fontSize = (fontSizeSp + 3f).sp,
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor,
+                                fontFamily = FontFamily.Serif
+                            )
+                            Spacer(Modifier.height(12.dp))
+                        }
+                        Text(
+                            text = pageText,
+                            fontSize = fontSizeSp.sp,
+                            lineHeight = lineHeightSp.sp,
+                            color = textColor,
+                            fontFamily = FontFamily.Serif
+                        )
+                    }
+                }
+            }
+
+            if (isLoading || (isVisualPageMode && isRenderingVisualPage && renderedPageBitmap == null)) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = accentColor)
+                }
+            } else {
+                val curlVal = curlAnim.value
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(currentChapterIndex, subPageIndex, subPages.size, chapters.size) {
+                            detectHorizontalDragGestures(
+                                onDragEnd = {
+                                    val c = curlAnim.value
+                                    coroutineScope.launch {
+                                        when {
+                                            c > 0.16f && canGoNext -> {
+                                                curlAnim.animateTo(1f, tween(240))
+                                                commitNextPage()
+                                                curlAnim.snapTo(0f)
+                                            }
+                                            c < -0.16f && canGoPrev -> {
+                                                curlAnim.animateTo(-1f, tween(240))
+                                                commitPrevPage()
+                                                curlAnim.snapTo(0f)
+                                            }
+                                            else -> {
+                                                curlAnim.animateTo(0f, tween(200))
+                                            }
+                                        }
+                                    }
+                                },
+                                onDragCancel = {
+                                    coroutineScope.launch { curlAnim.animateTo(0f, tween(200)) }
+                                },
+                                onHorizontalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                                    val delta = -dragAmount / (widthPx * 0.85f)
+                                    val target = (curlAnim.value + delta).coerceIn(
+                                        if (canGoPrev) -1f else 0f,
+                                        if (canGoNext) 1f else 0f
+                                    )
+                                    coroutineScope.launch { curlAnim.snapTo(target) }
+                                }
+                            )
+                        }
+                ) {
+                    // 1. Underneath Revealed Page (Next or Previous Page)
+                    if (curlVal > 0.005f) {
+                        val isNextNewChapter = subPageIndex + 1 >= subPages.size
+                        val nextHeading = if (isNextNewChapter && currentChapterIndex + 1 < chapters.size) {
+                            chapters[currentChapterIndex + 1].title
+                        } else ""
+                        PageContentLayer(
+                            pageText = nextPreviewText,
+                            showChapterHeading = isNextNewChapter,
+                            headingText = nextHeading,
+                            visualBitmap = nextPageBitmap ?: renderedPageBitmap
+                        )
+                    } else if (curlVal < -0.005f) {
+                        val isPrevFirstSubPage = subPageIndex == 1
+                        PageContentLayer(
+                            pageText = prevPreviewText,
+                            showChapterHeading = isPrevFirstSubPage,
+                            headingText = currentChapter?.title ?: "",
+                            visualBitmap = prevPageBitmap ?: renderedPageBitmap
+                        )
+                    }
+
+                    // 2. Top Active Page with 3D Curved Page-Curl Clip, Back-Flap & Cast Shadow
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .drawWithContent {
+                                val c = curlAnim.value
+                                if (abs(c) < 0.005f) {
+                                    drawContent()
+                                } else if (c > 0f) {
+                                    // Curling Forward (Right-to-Left): Current page peels back from the right
+                                    val progress = c.coerceIn(0f, 1f)
+                                    val w = size.width
+                                    val h = size.height
+                                    val spineX = w * (1f - progress)
+                                    val curveBow = sin(progress * Math.PI).toFloat() * (w * 0.085f)
+                                    val flapWidth = (w * 0.28f * sin(progress * Math.PI).toFloat()).coerceAtLeast(14f)
+                                    val flapRightX = (spineX + flapWidth).coerceAtMost(w)
+
+                                    val visiblePagePath = Path().apply {
+                                        moveTo(0f, 0f)
+                                        lineTo(spineX, 0f)
+                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, h)
+                                        lineTo(0f, h)
+                                        close()
+                                    }
+
+                                    clipPath(visiblePagePath, ClipOp.Intersect) {
+                                        this@drawWithContent.drawContent()
+                                    }
+
+                                    // Drop shadow cast onto the revealed next page underneath
+                                    val shadowEnd = (flapRightX + 54f).coerceAtMost(w)
+                                    if (shadowEnd > spineX) {
+                                        drawRect(
+                                            brush = Brush.horizontalGradient(
+                                                colors = listOf(
+                                                    Color.Black.copy(alpha = 0.42f * (1f - progress * 0.4f)),
+                                                    Color.Transparent
+                                                ),
+                                                startX = spineX,
+                                                endX = shadowEnd
+                                            ),
+                                            topLeft = Offset(spineX, 0f),
+                                            size = Size(shadowEnd - spineX, h)
+                                        )
+                                    }
+
+                                    // 3D Curved Paper Back-Flap (Bends at top and bottom like Google Play Books)
+                                    val verticalPinch = h * 0.035f * sin(progress * Math.PI).toFloat()
+                                    val backFlapPath = Path().apply {
+                                        moveTo(spineX, 0f)
+                                        quadraticBezierTo(
+                                            (spineX + flapRightX) * 0.5f,
+                                            verticalPinch,
+                                            flapRightX,
+                                            verticalPinch * 1.4f
+                                        )
+                                        quadraticBezierTo(
+                                            flapRightX - (curveBow * 0.6f),
+                                            h * 0.5f,
+                                            flapRightX,
+                                            h - (verticalPinch * 1.4f)
+                                        )
+                                        quadraticBezierTo(
+                                            (spineX + flapRightX) * 0.5f,
+                                            h - verticalPinch,
+                                            spineX,
+                                            h
+                                        )
+                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, 0f)
+                                        close()
+                                    }
+
+                                    drawPath(
+                                        path = backFlapPath,
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                curlBackHighlightColor,
+                                                curlBackMidColor,
+                                                Color.Black.copy(alpha = 0.25f)
+                                            ),
+                                            startX = (spineX - curveBow).coerceAtLeast(0f),
+                                            endX = flapRightX.coerceAtLeast(spineX + 1f)
+                                        )
+                                    )
+
+                                    // Specular highlight along the curved fold spine
+                                    val spineLine = Path().apply {
+                                        moveTo(spineX, 0f)
+                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, h)
+                                    }
+                                    drawPath(
+                                        path = spineLine,
+                                        color = accentColor.copy(alpha = 0.45f),
+                                        style = Stroke(width = 2.dp.toPx())
+                                    )
+                                } else {
+                                    // Curling Backward (Left-to-Right): Previous page uncurls from the left
+                                    val progress = abs(c).coerceIn(0f, 1f)
+                                    val w = size.width
+                                    val h = size.height
+                                    val spineX = w * progress
+                                    val curveBow = sin(progress * Math.PI).toFloat() * (w * 0.075f)
+                                    val flapWidth = (w * 0.24f * sin(progress * Math.PI).toFloat()).coerceAtLeast(12f)
+                                    val flapLeftX = (spineX - flapWidth).coerceAtLeast(0f)
+
+                                    val rightSidePath = Path().apply {
+                                        moveTo(spineX, 0f)
+                                        lineTo(w, 0f)
+                                        lineTo(w, h)
+                                        lineTo(spineX, h)
+                                        quadraticBezierTo(spineX + curveBow, h * 0.5f, spineX, 0f)
+                                        close()
+                                    }
+
+                                    clipPath(rightSidePath, ClipOp.Intersect) {
+                                        this@drawWithContent.drawContent()
+                                    }
+
+                                    val shadowEnd = (spineX + 48f).coerceAtMost(w)
+                                    drawRect(
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                Color.Black.copy(alpha = 0.38f),
+                                                Color.Transparent
+                                            ),
+                                            startX = spineX,
+                                            endX = shadowEnd.coerceAtLeast(spineX + 1f)
+                                        ),
+                                        topLeft = Offset(spineX, 0f),
+                                        size = Size((shadowEnd - spineX).coerceAtLeast(1f), h)
+                                    )
+
+                                    val backFlapPath = Path().apply {
+                                        moveTo(flapLeftX, 0f)
+                                        lineTo(spineX, 0f)
+                                        quadraticBezierTo(spineX + curveBow, h * 0.5f, spineX, h)
+                                        lineTo(flapLeftX, h)
+                                        close()
+                                    }
+                                    drawPath(
+                                        path = backFlapPath,
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                curlBackMidColor,
+                                                curlBackHighlightColor
+                                            ),
+                                            startX = flapLeftX,
+                                            endX = (spineX + curveBow).coerceAtLeast(flapLeftX + 1f)
+                                        )
+                                    )
+                                }
+                            }
+                    ) {
+                        val currSubPageText = subPages.getOrElse(subPageIndex) { "" }
+                        PageContentLayer(
+                            pageText = currSubPageText,
+                            showChapterHeading = subPageIndex == 0,
+                            headingText = currentChapter?.title ?: "",
+                            visualBitmap = renderedPageBitmap
+                        )
+                    }
+                }
+            }
+
+            // Bottom Page-Turn Bar inside BoxWithConstraints so Prev/Next buttons trigger the 3D Page-Curl!
             Column(
                 modifier = Modifier
-                    .weight(1f)
+                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .verticalScroll(scrollState)
-                    .padding(12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .background(bgColor.copy(alpha = 0.95f))
             ) {
-                Image(
-                    bitmap = renderedPageBitmap!!.asImageBitmap(),
-                    contentDescription = "Page ${currentChapterIndex + 1}",
-                    contentScale = ContentScale.FillWidth,
+                HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color.White)
-                )
-            }
-        } else {
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .verticalScroll(scrollState)
-                    .padding(horizontal = 24.dp, vertical = 20.dp)
-            ) {
-                Text(
-                    text = currentChapter?.title ?: "",
-                    fontSize = (fontSizeSp + 4f).sp,
-                    fontWeight = FontWeight.Bold,
-                    color = accentColor,
-                    fontFamily = FontFamily.Serif
-                )
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    text = currentChapter?.bodyText ?: "",
-                    fontSize = fontSizeSp.sp,
-                    lineHeight = (fontSizeSp * 1.55f).sp,
-                    color = textColor,
-                    fontFamily = FontFamily.Serif
-                )
-                Spacer(Modifier.height(36.dp))
-            }
-        }
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = { animatePageTurnBackward() },
+                        enabled = canGoPrev
+                    ) {
+                        Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
+                        Text("Prev", color = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
+                    }
 
-        HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
+                    val statusLabel = if (isVisualPageMode) {
+                        "Page ${currentChapterIndex + 1} of ${chapters.size}"
+                    } else if (subPages.size > 1) {
+                        "Ch ${currentChapterIndex + 1}/${chapters.size} • Page ${subPageIndex + 1}/${subPages.size}"
+                    } else {
+                        "Chapter ${currentChapterIndex + 1} of ${chapters.size}"
+                    }
 
-        val navUnit = if (isVisualPageFormat && renderedPageBitmap != null) "Page" else "Chapter"
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(
-                onClick = { onSelectChapter(currentChapterIndex - 1) },
-                enabled = currentChapterIndex > 0
-            ) {
-                Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = if (currentChapterIndex > 0) accentColor else textColor.copy(alpha = 0.3f))
-                Text("Prev", color = if (currentChapterIndex > 0) accentColor else textColor.copy(alpha = 0.3f))
-            }
+                    Text(
+                        text = statusLabel,
+                        fontSize = 12.sp,
+                        color = textColor.copy(alpha = 0.85f),
+                        modifier = Modifier.clickable { showTocDialog = true }
+                    )
 
-            Text(
-                text = if (chapters.isNotEmpty()) {
-                    "$navUnit ${currentChapterIndex + 1} of ${chapters.size} (${(((currentChapterIndex + 1).toFloat() / chapters.size) * 100).toInt()}%)"
-                } else "",
-                fontSize = 13.sp,
-                color = textColor.copy(alpha = 0.8f),
-                modifier = Modifier.clickable { showTocDialog = true }
-            )
-
-            TextButton(
-                onClick = { onSelectChapter(currentChapterIndex + 1) },
-                enabled = currentChapterIndex + 1 < chapters.size
-            ) {
-                Text("Next", color = if (currentChapterIndex + 1 < chapters.size) accentColor else textColor.copy(alpha = 0.3f))
-                Icon(Icons.Default.ChevronRight, contentDescription = null, tint = if (currentChapterIndex + 1 < chapters.size) accentColor else textColor.copy(alpha = 0.3f))
+                    TextButton(
+                        onClick = { animatePageTurnForward() },
+                        enabled = canGoNext
+                    ) {
+                        Text("Next", color = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
+                        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
+                    }
+                }
             }
         }
     }
 
     if (showTocDialog) {
-        val listHeader = if (isVisualPageFormat && renderedPageBitmap != null) "Pages (${chapters.size})" else "Chapters (${chapters.size})"
+        val listHeader = if (isVisualPageMode) "Pages (${chapters.size})" else "Chapters (${chapters.size})"
         AlertDialog(
             onDismissRequest = { showTocDialog = false },
             title = { Text(listHeader) },
@@ -888,6 +1335,7 @@ fun EpubReaderScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
+                                    subPageIndex = 0
                                     onSelectChapter(idx)
                                     showTocDialog = false
                                 }
@@ -895,7 +1343,7 @@ fun EpubReaderScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = if (isVisualPageFormat) chap.title else "${idx + 1}. ${chap.title}",
+                                text = if (isVisualPageMode) chap.title else "${idx + 1}. ${chap.title}",
                                 fontWeight = if (isCurr) FontWeight.Bold else FontWeight.Normal,
                                 color = if (isCurr) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                             )
@@ -915,16 +1363,14 @@ fun EpubReaderScreen(
             title = { Text("Reader Appearance") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    if (!isVisualPageFormat || renderedPageBitmap == null) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            OutlinedButton(onClick = { onUpdateFontSize(fontSizeSp - 2f) }) { Text("A-") }
-                            Text("${fontSizeSp.toInt()} pt", fontWeight = FontWeight.Bold)
-                            OutlinedButton(onClick = { onUpdateFontSize(fontSizeSp + 2f) }) { Text("A+") }
-                        }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(onClick = { onUpdateFontSize(fontSizeSp - 2f) }) { Text("A-") }
+                        Text("${fontSizeSp.toInt()} pt", fontWeight = FontWeight.Bold)
+                        OutlinedButton(onClick = { onUpdateFontSize(fontSizeSp + 2f) }) { Text("A+") }
                     }
 
                     Text("Reading Theme", fontWeight = FontWeight.Bold)
@@ -938,6 +1384,34 @@ fun EpubReaderScreen(
                                 onClick = { onUpdateTheme(key) },
                                 label = { Text(label) },
                                 modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
+                    if (fmtUpper == "PDF") {
+                        HorizontalDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Reflow PDF like ePub", fontWeight = FontWeight.Bold)
+                                Text(
+                                    "Extract text for adjustable font sizes, or switch off for auto-cropped page view",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = !pdfOriginalPageMode,
+                                onCheckedChange = { reflowEnabled ->
+                                    pdfOriginalPageMode = !reflowEnabled
+                                    repository.getPreferences().edit()
+                                        .putBoolean("pdf_original_page_mode", pdfOriginalPageMode)
+                                        .apply()
+                                    onReloadEbook()
+                                }
                             )
                         }
                     }
