@@ -45,6 +45,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -455,9 +456,18 @@ fun FablewoodAudiobookApp(
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
     var targetCoverItemId by remember { mutableStateOf("") }
+    var targetCoverBookTitle by remember { mutableStateOf("") }
+    var targetCoverBookAuthor by remember { mutableStateOf("") }
     var showCoverOptionsDialog by remember { mutableStateOf(false) }
     var liveCoverSearchQuery by remember { mutableStateOf("") }
     var showAllFilesPermissionPrompt by remember { mutableStateOf(false) }
+
+    // Phase 3: Discovery & Affiliate Store Sheet State
+    var showDiscoveryDialog by remember { mutableStateOf(false) }
+    var discoverySearchInput by remember { mutableStateOf("") }
+    var showStoreLinksDialog by remember { mutableStateOf(false) }
+    var storeLinksBookTitle by remember { mutableStateOf("") }
+    var storeLinksBookAuthor by remember { mutableStateOf("") }
 
     var showViewDialog by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
@@ -479,6 +489,28 @@ fun FablewoodAudiobookApp(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         Log.i(TAG, "POST_NOTIFICATIONS permission result: $granted")
+    }
+
+    fun openExternalUrl(url: String) {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            context.startActivity(intent)
+        } catch (t: Throwable) {
+            Toast.makeText(context, "Could not open browser link", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun openDiscoveryWithQuery(initialQuery: String = "") {
+        val clean = initialQuery.trim()
+        discoverySearchInput = clean
+        showDiscoveryDialog = true
+        viewModel.searchDiscoveryCatalog(clean)
+    }
+
+    fun openStoreSelectorForBook(title: String, author: String) {
+        storeLinksBookTitle = title
+        storeLinksBookAuthor = author
+        showStoreLinksDialog = true
     }
 
     fun requestNotificationPermissionIfNeeded() {
@@ -933,6 +965,15 @@ fun FablewoodAudiobookApp(
                 )
                 HorizontalDivider()
                 NavigationDrawerItem(
+                    icon = { Icon(Icons.Default.Explore, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                    label = { Text("Discover & Library Hub", fontWeight = FontWeight.Bold) },
+                    selected = false,
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        openDiscoveryWithQuery("")
+                    }
+                )
+                NavigationDrawerItem(
                     icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
                     label = { Text(stringResource(R.string.scan_device_audiobooks)) },
                     selected = false,
@@ -1128,6 +1169,13 @@ fun FablewoodAudiobookApp(
                                 }
                             },
                             actions = {
+                                IconButton(onClick = { openDiscoveryWithQuery("") }) {
+                                    Icon(
+                                        Icons.Default.Explore,
+                                        contentDescription = "Discover & Library Hub",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                                 if (viewModel.shelfMode == "EBOOK") {
                                     IconButton(onClick = { epubFilePicker.launch(arrayOf("*/*")) }) {
                                         Icon(Icons.Default.FileOpen, contentDescription = "Import eBook", tint = MaterialTheme.colorScheme.primary)
@@ -1284,6 +1332,8 @@ fun FablewoodAudiobookApp(
                                     },
                                     onLongPressBook = { book ->
                                         targetCoverItemId = book.id
+                                        targetCoverBookTitle = book.title
+                                        targetCoverBookAuthor = book.author
                                         val initialCleanQuery = cleanAudiobookSearchQuery(book.title, book.author)
                                         liveCoverSearchQuery = initialCleanQuery
                                         showCoverOptionsDialog = true
@@ -1311,6 +1361,8 @@ fun FablewoodAudiobookApp(
                                     },
                                     onLongPressEbook = { ebook ->
                                         targetCoverItemId = ebook.id
+                                        targetCoverBookTitle = ebook.title
+                                        targetCoverBookAuthor = ebook.author
                                         val initialCleanQuery = cleanAudiobookSearchQuery(ebook.title, ebook.author)
                                         liveCoverSearchQuery = initialCleanQuery
                                         showCoverOptionsDialog = true
@@ -1421,6 +1473,277 @@ fun FablewoodAudiobookApp(
         }
     }
 
+    // Phase 3: In-App Book Discovery & Library Hub Dialog
+    if (showDiscoveryDialog) {
+        AlertDialog(
+            onDismissRequest = { showDiscoveryDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Explore, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Discover Books & Library", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 480.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedTextField(
+                        value = discoverySearchInput,
+                        onValueChange = { discoverySearchInput = it },
+                        label = { Text("Search author, title, or genre") },
+                        singleLine = true,
+                        trailingIcon = {
+                            IconButton(onClick = { viewModel.searchDiscoveryCatalog(discoverySearchInput) }) {
+                                Icon(Icons.Default.Search, contentDescription = "Search", tint = MaterialTheme.colorScheme.primary)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    // Quick genre / free-download chips
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        val activeAuthor = activeBook?.author?.takeIf { !it.equals("Unknown Author", true) }
+                            ?: activeEbook?.author?.takeIf { !it.equals("Unknown Author", true) }
+                        if (activeAuthor != null) {
+                            AssistChip(
+                                onClick = {
+                                    discoverySearchInput = activeAuthor
+                                    viewModel.searchDiscoveryCatalog(activeAuthor)
+                                },
+                                label = { Text(activeAuthor, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        AssistChip(
+                            onClick = {
+                                discoverySearchInput = "Sci-Fi & Fantasy Bestsellers"
+                                viewModel.searchDiscoveryCatalog(discoverySearchInput)
+                            },
+                            label = { Text("Sci-Fi/Fantasy", maxLines = 1) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    HorizontalDivider()
+
+                    if (viewModel.isSearchingDiscovery) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.height(10.dp))
+                                Text(
+                                    "Searching Audiobooks & eBooks...",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    } else if (viewModel.discoveryBooks.isEmpty()) {
+                        Text(
+                            text = "Search any book title, author, or series above to check local library availability or compare audiobook & eBook stores.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp)
+                        )
+                    } else {
+                        viewModel.discoveryBooks.forEach { item ->
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Row(verticalAlignment = Alignment.Top) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(72.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .background(MaterialTheme.colorScheme.surface),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            if (item.coverBitmap != null) {
+                                                Image(
+                                                    bitmap = item.coverBitmap.asImageBitmap(),
+                                                    contentDescription = item.title,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize()
+                                                )
+                                            } else {
+                                                Icon(Icons.Default.MenuBook, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                            }
+                                        }
+
+                                        Spacer(Modifier.width(12.dp))
+
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = item.title,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = item.author,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(
+                                                text = item.description,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 3,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+
+                                    Spacer(Modifier.height(10.dp))
+
+                                    // Dual-Button UI Flow: Free Library Deep-Link + Multi-Store Affiliate Sheet
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                val libbyLink = AffiliateConfig.buildPartnerLinksForBook(item.title, item.author).first()
+                                                openExternalUrl(libbyLink.url)
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(Icons.Default.AccountBalance, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(5.dp))
+                                            Text("Libby (Free)", fontSize = 12.sp, maxLines = 1)
+                                        }
+
+                                        Button(
+                                            onClick = {
+                                                openStoreSelectorForBook(item.title, item.author)
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(Icons.Default.ShoppingBag, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(5.dp))
+                                            Text("Get / Buy", fontSize = 12.sp, maxLines = 1)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDiscoveryDialog = false }) {
+                    Text(stringResource(R.string.close))
+                }
+            }
+        )
+    }
+
+    // Phase 3: Multi-Retailer Affiliate & Library Store Selector Sheet
+    if (showStoreLinksDialog && storeLinksBookTitle.isNotEmpty()) {
+        val partnerLinks = remember(storeLinksBookTitle, storeLinksBookAuthor) {
+            AffiliateConfig.buildPartnerLinksForBook(storeLinksBookTitle, storeLinksBookAuthor)
+        }
+        AlertDialog(
+            onDismissRequest = { showStoreLinksDialog = false },
+            title = {
+                Column {
+                    Text("Borrow or Buy Book", fontWeight = FontWeight.Bold)
+                    Text(
+                        text = "$storeLinksBookTitle • $storeLinksBookAuthor",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 440.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    partnerLinks.forEach { option ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    showStoreLinksDialog = false
+                                    openExternalUrl(option.url)
+                                },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (option.isLibraryOrFree) {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                } else {
+                                    MaterialTheme.colorScheme.surface
+                                }
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text(
+                                        text = option.storeName,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp
+                                    )
+                                    Text(
+                                        text = option.subtitle,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primary,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = option.badgeText,
+                                        color = MaterialTheme.colorScheme.onPrimary,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showStoreLinksDialog = false }) {
+                    Text(stringResource(R.string.close))
+                }
+            }
+        )
+    }
+
     if (showAllFilesPermissionPrompt) {
         AlertDialog(
             onDismissRequest = { showAllFilesPermissionPrompt = false },
@@ -1460,6 +1783,41 @@ fun FablewoodAudiobookApp(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    // Phase 3: Quick Discovery & Store Action Row for any book on the shelf
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                showCoverOptionsDialog = false
+                                val authorQuery = if (targetCoverBookAuthor.isNotBlank() && !targetCoverBookAuthor.equals("Unknown Author", true)) {
+                                    targetCoverBookAuthor
+                                } else {
+                                    targetCoverBookTitle
+                                }
+                                openDiscoveryWithQuery(authorQuery)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Explore, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("More by Author", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+
+                        Button(
+                            onClick = {
+                                showCoverOptionsDialog = false
+                                openStoreSelectorForBook(targetCoverBookTitle, targetCoverBookAuthor)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.ShoppingBag, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("Library / Buy", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+
                     OutlinedButton(
                         onClick = {
                             val idToRemove = targetCoverItemId

@@ -111,6 +111,165 @@ data class CoverSearchCandidate(
     val fullResUrl: String
 )
 
+// Phase 3: Book Discovery & Affiliate Monetization Models
+data class DiscoveryBook(
+    val id: String,
+    val title: String,
+    val author: String,
+    val description: String,
+    val formatLabel: String, // "Audiobook" or "eBook"
+    val coverBitmap: Bitmap?,
+    val directStoreUrl: String = ""
+)
+
+data class StoreLinkOption(
+    val storeName: String,
+    val subtitle: String,
+    val badgeText: String,
+    val url: String,
+    val isLibraryOrFree: Boolean = false
+)
+
+/**
+ * Centralized Affiliate Partner Configuration.
+ * Paste your affiliate tracking IDs into the constants below as you join each program!
+ * When an ID is blank, Fablewood opens the clean direct store search URL automatically.
+ */
+object AffiliateConfig {
+    // 1. Amazon Associates / Audible Creator Tag (e.g., "fablewood-20")
+    const val AMAZON_ASSOCIATE_TAG = ""
+
+    // 2. Libro.fm Affiliate / Referral Code (DRM-Free .m4b Audiobooks - via Awin / ShareASale)
+    const val LIBRO_FM_AFFILIATE_ID = ""
+
+    // 3. Bookshop.org Affiliate ID (10% commission supporting local bookstores)
+    const val BOOKSHOP_ORG_AFFILIATE_ID = ""
+
+    // 4. Barnes & Noble (NOOK eBooks & Audiobooks - via CJ Affiliate)
+    const val BARNES_AND_NOBLE_AFFILIATE_ID = ""
+
+    // 5. Rakuten Kobo (eBooks & Audiobooks - via Rakuten Advertising)
+    const val KOBO_AFFILIATE_ID = ""
+
+    // 6. Audiobooks.com (via Impact / CJ)
+    const val AUDIOBOOKS_COM_AFFILIATE_ID = ""
+
+    // 7. Apple Books / iTunes Partner Token (Performance Partners)
+    const val APPLE_BOOKS_AFFILIATE_TOKEN = ""
+
+    fun buildPartnerLinksForBook(title: String, author: String): List<StoreLinkOption> {
+        val cleanSearch = cleanAudiobookSearchQuery(title, author)
+        val encodedQuery = try {
+            URLEncoder.encode(cleanSearch, "UTF-8")
+        } catch (_: Throwable) {
+            cleanSearch.replace(' ', '+')
+        }
+
+        // 1. Libby / OverDrive Local Library Deep-Link
+        val libbyUrl = "https://libbyapp.com/search/query-$encodedQuery/page-1"
+
+        // 2. Libro.fm (DRM-Free M4B Audiobooks that import directly into Fablewood!)
+        val libroBase = "https://libro.fm/search?q=$encodedQuery"
+        val libroUrl = if (LIBRO_FM_AFFILIATE_ID.isNotBlank()) {
+            "$libroBase&aff=$LIBRO_FM_AFFILIATE_ID"
+        } else libroBase
+
+        // 3. Audible / Amazon Audiobooks & Kindle
+        val amazonBase = "https://www.amazon.com/s?k=$encodedQuery&i=audible"
+        val amazonUrl = if (AMAZON_ASSOCIATE_TAG.isNotBlank()) {
+            "$amazonBase&tag=$AMAZON_ASSOCIATE_TAG"
+        } else amazonBase
+
+        // 4. Barnes & Noble (NOOK eBooks & B&N Audiobooks)
+        val bnBase = "https://www.barnesandnoble.com/s/$encodedQuery"
+        val bnUrl = if (BARNES_AND_NOBLE_AFFILIATE_ID.isNotBlank()) {
+            "$bnBase?aff=$BARNES_AND_NOBLE_AFFILIATE_ID"
+        } else bnBase
+
+        // 5. Bookshop.org (Indie Bookstores & eBooks)
+        val bookshopBase = "https://bookshop.org/beta-search?keywords=$encodedQuery"
+        val bookshopUrl = if (BOOKSHOP_ORG_AFFILIATE_ID.isNotBlank()) {
+            "$bookshopBase&a_aid=$BOOKSHOP_ORG_AFFILIATE_ID"
+        } else bookshopBase
+
+        // 6. Rakuten Kobo (eBooks & Audiobooks)
+        val koboBase = "https://www.kobo.com/us/en/search?query=$encodedQuery"
+        val koboUrl = if (KOBO_AFFILIATE_ID.isNotBlank()) {
+            "$koboBase&aff=$KOBO_AFFILIATE_ID"
+        } else koboBase
+
+        // 7. Audiobooks.com
+        val abComBase = "https://www.audiobooks.com/search/book/$encodedQuery"
+        val abComUrl = if (AUDIOBOOKS_COM_AFFILIATE_ID.isNotBlank()) {
+            "$abComBase?aff=$AUDIOBOOKS_COM_AFFILIATE_ID"
+        } else abComBase
+
+        // 8. Free Public Domain Downloads (Standard Ebooks & LibriVox)
+        val standardEbooksUrl = "https://standardebooks.org/ebooks?query=$encodedQuery"
+        val librivoxUrl = "https://librivox.org/search?q=$encodedQuery&search_form=advanced"
+
+        return listOf(
+            StoreLinkOption(
+                storeName = "Libby / Local Library",
+                subtitle = "Borrow for free with your local library card",
+                badgeText = "FREE LIBRARY",
+                url = libbyUrl,
+                isLibraryOrFree = true
+            ),
+            StoreLinkOption(
+                storeName = "Libro.fm",
+                subtitle = "Buy DRM-free .m4b audiobooks & import into Fablewood",
+                badgeText = "DRM-FREE M4B",
+                url = libroUrl
+            ),
+            StoreLinkOption(
+                storeName = "Amazon & Audible",
+                subtitle = "Audiobooks, Kindle eBooks & Print editions",
+                badgeText = "AUDIBLE / KINDLE",
+                url = amazonUrl
+            ),
+            StoreLinkOption(
+                storeName = "Barnes & Noble",
+                subtitle = "NOOK eBooks, B&N Audiobooks & Hardcovers",
+                badgeText = "B&N / NOOK",
+                url = bnUrl
+            ),
+            StoreLinkOption(
+                storeName = "Bookshop.org",
+                subtitle = "Supports local independent bookstores",
+                badgeText = "INDIE BOOKS",
+                url = bookshopUrl
+            ),
+            StoreLinkOption(
+                storeName = "Rakuten Kobo",
+                subtitle = "Global eBook & Audiobook store",
+                badgeText = "KOBO",
+                url = koboUrl
+            ),
+            StoreLinkOption(
+                storeName = "Audiobooks.com",
+                subtitle = "Instant audiobook streaming & downloads",
+                badgeText = "AUDIO",
+                url = abComUrl
+            ),
+            StoreLinkOption(
+                storeName = "Standard Ebooks (Free Download)",
+                subtitle = "Download free public-domain .epub & .azw3 classics",
+                badgeText = "FREE EPUB",
+                url = standardEbooksUrl,
+                isLibraryOrFree = true
+            ),
+            StoreLinkOption(
+                storeName = "LibriVox (Free Audiobooks)",
+                subtitle = "Download free public-domain .m4b / .mp3 audiobooks",
+                badgeText = "FREE AUDIO",
+                url = librivoxUrl,
+                isLibraryOrFree = true
+            )
+        )
+    }
+}
+
 // All 35 supported eBook, Comic, and Document extensions (available via manual Import)
 val ALL_SUPPORTED_EBOOK_EXTENSIONS = setOf(
     "epub", "pdf", "cbz", "cbr", "cb7", "cbt", "cba", "cbc",
@@ -120,14 +279,12 @@ val ALL_SUPPORTED_EBOOK_EXTENSIONS = setOf(
     "lrx", "rb", "tcr", "chm"
 )
 
-// Dedicated eBook/Comic formats that are always books when found in user folders
 val DEDICATED_EBOOK_EXTENSIONS = setOf(
     "epub", "mobi", "azw", "azw3", "kfx", "prc", "azw4", "tpz", "topaz",
     "fb2", "fbz", "ibooks", "lit", "pdb", "lrf", "lrs", "lrx", "rb", "tcr", "htmlz",
     "cbz", "cbr", "cb7", "cbt", "cba", "cbc", "djvu"
 )
 
-// Document formats that require strict book-length & filename filtering during Auto-Scan
 val DOCUMENT_EBOOK_EXTENSIONS = setOf(
     "pdf", "txt", "rtf", "doc", "docx", "html", "htm", "md", "chm"
 )
@@ -385,9 +542,7 @@ class AudiobookRepository(context: Context) {
     companion object {
         private const val TAG = "Fablewood"
         const val MIN_AUDIOBOOK_DURATION_MS = 5 * 60 * 1000L
-        // Minimum 25 pages for a PDF in Downloads to be treated as a book during Auto-Scan
         const val MIN_PDF_BOOK_PAGES_AUTO_SCAN = 25
-        // Minimum 100 KB for a TXT/DOC/RTF file in a Books folder during Auto-Scan
         const val MIN_TEXT_BOOK_BYTES_AUTO_SCAN = 100 * 1024L
 
         private val SUPPORTED_EXTENSIONS = setOf(
@@ -544,7 +699,6 @@ class AudiobookRepository(context: Context) {
     fun loadPlaybackPitch(): Float = prefs.getFloat("playback_pitch", 1.0f).coerceIn(0.75f, 1.25f)
     fun savePlaybackPitch(pitch: Float) = prefs.edit().putFloat("playback_pitch", pitch.coerceIn(0.75f, 1.25f)).apply()
 
-    // Hidden / Removed Book IDs so unwanted files never reappear during Auto-Scan
     fun loadHiddenBookIds(): Set<String> = synchronized(stateLock) {
         val set = mutableSetOf<String>()
         try {
@@ -1042,7 +1196,6 @@ class AudiobookRepository(context: Context) {
         }
     }
 
-    // Smart Qualification Check for Auto-Scanned eBooks (Prevents random PDFs and TXTs from cluttering shelf)
     private fun getPdfPageCountFast(uri: Uri): Int {
         return try {
             openUriParcelFileDescriptor(uri)?.use { pfd ->
@@ -1062,7 +1215,6 @@ class AudiobookRepository(context: Context) {
         val format = detectEbookFormatFromFileName(fileName) ?: return false
         val ext = format.lowercase(Locale.ROOT)
 
-        // Never auto-scan inside system, messaging, or receipt/temp folders
         if (folderSegments.any { it.lowercase(Locale.ROOT) in IGNORED_FOLDER_NAMES }) {
             return false
         }
@@ -1071,12 +1223,10 @@ class AudiobookRepository(context: Context) {
             it.lowercase(Locale.ROOT) in DEDICATED_BOOK_FOLDER_NAMES
         }
 
-        // 1. Dedicated eBook/Comic formats (.epub, .azw3, .mobi, .cbz, .fb2, etc.) are always real books
         if (ext in DEDICATED_EBOOK_EXTENSIONS || format == "FB2.ZIP") {
             return true
         }
 
-        // 2. Document formats (.pdf, .txt, .doc, .docx, .rtf, .html) must pass strict Book Qualification
         if (isLikelyNonBookDocumentName(fileName)) {
             return false
         }
@@ -1087,7 +1237,6 @@ class AudiobookRepository(context: Context) {
             return pages >= minPages
         }
 
-        // Plain text / Word / HTML files: only auto-scan if inside a dedicated Books/eBooks/Kindle folder and >= 100 KB
         if (ext in DOCUMENT_EBOOK_EXTENSIONS) {
             return isInDedicatedBookFolder && fileSizeBytes >= MIN_TEXT_BOOK_BYTES_AUTO_SCAN
         }
@@ -1095,12 +1244,10 @@ class AudiobookRepository(context: Context) {
         return false
     }
 
-    // Smart Auto-Scanner for eBooks (Filters out non-book PDFs and random text files)
     suspend fun scanDeviceForEbooks(): List<Ebook> = withContext(Dispatchers.IO) {
         val discovered = linkedMapOf<String, Ebook>()
         val hiddenIds = loadHiddenBookIds()
 
-        // Preserve manually imported SAF eBooks (and re-verify cached auto-scanned books against the filter)
         for (cached in loadEbooksCache()) {
             if (cached.id in hiddenIds) continue
             val isSafImport = cached.uri.scheme == "content" && cached.uri.authority?.contains("media") != true
@@ -1352,7 +1499,6 @@ class AudiobookRepository(context: Context) {
         merged
     }
 
-    // Pure-Kotlin PDF Reflowable Text Extractor + Smart Margin-Cropping & Theme-Tinting Page Renderer
     private fun extractReflowableTextFromPdf(uri: Uri, bookTitle: String): List<EbookChapter> {
         try {
             val rawBytes = readUriBytesBounded(uri, 28 * 1024 * 1024) ?: return emptyList()
@@ -1584,7 +1730,6 @@ class AudiobookRepository(context: Context) {
         return letterRatio >= 0.62f && spaceRatio in 0.11f..0.28f
     }
 
-    // Auto-Crops white margins and recolors PDF page bitmaps to match Forest / Sepia / Light theme!
     private fun cropAndThemePdfBitmap(source: Bitmap, readerTheme: String): Bitmap {
         val w = source.width
         val h = source.height
@@ -1606,7 +1751,6 @@ class AudiobookRepository(context: Context) {
                 val r = (px ushr 16) and 0xFF
                 val g = (px ushr 8) and 0xFF
                 val b = px and 0xFF
-                // Detect non-white ink pixels
                 if (r < 242 || g < 242 || b < 242) {
                     if (x < minX) minX = x
                     if (x > maxX) maxX = x
@@ -1629,12 +1773,12 @@ class AudiobookRepository(context: Context) {
         val bgRgb = when (readerTheme) {
             "SEPIA" -> intArrayOf(0xF4, 0xEC, 0xD8)
             "LIGHT" -> intArrayOf(0xFA, 0xFA, 0xFA)
-            else -> intArrayOf(0x0C, 0x1A, 0x14) // Forest Dark
+            else -> intArrayOf(0x06, 0x0E, 0x0A)
         }
         val fgRgb = when (readerTheme) {
             "SEPIA" -> intArrayOf(0x3B, 0x2F, 0x2F)
             "LIGHT" -> intArrayOf(0x1C, 0x24, 0x20)
-            else -> intArrayOf(0xE8, 0xF0, 0xEC) // Cream White on Forest Dark
+            else -> intArrayOf(0xE8, 0xF0, 0xEC)
         }
 
         val outPixels = IntArray(cropW * cropH)
@@ -1649,9 +1793,8 @@ class AudiobookRepository(context: Context) {
 
                 val maxChannel = maxOf(r, g, b)
                 val minChannel = minOf(r, g, b)
-                // If pixel is grayscale/monochrome (text & paper), blend smoothly between theme bgRgb and fgRgb
                 if (maxChannel - minChannel < 35) {
-                    val lum = (r * 77 + g * 150 + b * 29) ushr 8 // 0 (black ink) .. 255 (white paper)
+                    val lum = (r * 77 + g * 150 + b * 29) ushr 8
                     val nr = (fgRgb[0] * (255 - lum) + bgRgb[0] * lum) / 255
                     val ng = (fgRgb[1] * (255 - lum) + bgRgb[1] * lum) / 255
                     val nb = (fgRgb[2] * (255 - lum) + bgRgb[2] * lum) / 255
@@ -1667,7 +1810,6 @@ class AudiobookRepository(context: Context) {
         return output
     }
 
-    // Microsoft Word .docx OpenXML Parser
     private fun extractDocxMetadataAndCover(
         uri: Uri,
         ebookId: String,
@@ -1702,8 +1844,8 @@ class AudiobookRepository(context: Context) {
                                     if (imgBytes != null) {
                                         val bmp = decodeSampledBitmapFromStreamWithExif(ByteArrayInputStream(imgBytes), 380, 380)
                                         if (bmp != null) {
-                            saveBitmapToCache(ebookId, bmp)
-                            CoverMemoryCache.cache.put(ebookId, bmp)
+                                            saveBitmapToCache(ebookId, bmp)
+                                            CoverMemoryCache.cache.put(ebookId, bmp)
                                         }
                                     }
                                 }
@@ -1787,7 +1929,6 @@ class AudiobookRepository(context: Context) {
         return emptyList()
     }
 
-    // Comic Book Archive (.cbz, .cbt, .cbc, and ZIP-based .cbr) Page & Cover Engine
     private fun isImageFileName(name: String): Boolean {
         val lower = name.lowercase(Locale.ROOT)
         if (lower.contains("__macosx") || lower.substringAfterLast('/').startsWith(".")) return false
@@ -2054,7 +2195,6 @@ class AudiobookRepository(context: Context) {
         }
     }
 
-    // Psion .tcr Dictionary Decompressor & Legacy Binary Text Stream Extractor
     private fun parseTcrChapters(uri: Uri, bookTitle: String): List<EbookChapter> {
         val bytes = readUriBytesBounded(uri, 16 * 1024 * 1024) ?: return emptyList()
         if (bytes.size < 12) return emptyList()
@@ -2168,7 +2308,6 @@ class AudiobookRepository(context: Context) {
         return listOf(EbookChapter(index = 0, title = bookTitle, bodyText = explanation))
     }
 
-    // Pure-Kotlin Kindle (.azw3, .azw, .mobi, .prc, .kf8, .pdb) PalmDOC / MOBI / EXTH Parser
     private data class MobiHeaderSection(
         val recordIndex: Int,
         val compression: Int,
@@ -2522,7 +2661,6 @@ class AudiobookRepository(context: Context) {
         return chapters
     }
 
-    // Pure-Kotlin FictionBook (.fb2, .fbz, .fb2.zip) XML & Plain Text Parsers
     private fun readFb2XmlString(uri: Uri, isZipped: Boolean): String? {
         return try {
             if (isZipped) {
@@ -2718,7 +2856,6 @@ class AudiobookRepository(context: Context) {
         return result
     }
 
-    // Namespace-Aware XmlPullParser EPUB / iBooks / HTMLZ Metadata, Cover & Chapter Extractor
     private fun extractEpubMetadataAndCover(
         uri: Uri,
         ebookId: String,
@@ -3004,8 +3141,6 @@ class AudiobookRepository(context: Context) {
         val fmt = ebook.format.uppercase(Locale.ROOT)
         val extLower = fmt.lowercase(Locale.ROOT)
 
-        // 1. PDF & Kindle Print Replica (.azw4):
-        // Try extracting reflowable text chapters first (for continuity with ePub), then fall back to Auto-Cropped Theme Pages
         if (fmt == "PDF" || fmt == "AZW4") {
             val preferOriginalPdfPages = prefs.getBoolean("pdf_original_page_mode", false)
             if (!preferOriginalPdfPages && fmt == "PDF") {
@@ -3044,7 +3179,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // 2. Comic Book Archives (.cbz, .cbt, .cbc, and ZIP-based .cbr)
         if (extLower in COMIC_EXTENSIONS) {
             val names = if (extLower == "cbt") listTarImageEntryNames(ebook.uri) else listZipImageEntryNames(ebook.uri)
             if (names.isNotEmpty()) {
@@ -3057,7 +3191,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // 3. Microsoft Word .docx
         if (fmt == "DOCX") {
             val docxChaps = parseDocxChapters(ebook.uri, ebook.title)
             if (docxChaps.isNotEmpty()) {
@@ -3067,7 +3200,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // 4. Psion .tcr Dictionary Compressed eBooks
         if (fmt == "TCR") {
             val tcrChaps = parseTcrChapters(ebook.uri, ebook.title)
             if (tcrChaps.isNotEmpty()) {
@@ -3077,7 +3209,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // 5. Kindle / Mobipocket / PalmDOC (.azw3, .azw, .mobi, .prc, .kf8, .pdb)
         if (extLower in KINDLE_EXTENSIONS) {
             val kindleChapters = parseKindleChapters(ebook.uri, ebook.title)
             if (kindleChapters.isNotEmpty()) {
@@ -3087,7 +3218,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // 6. FictionBook (.fb2, .fbz, .fb2.zip)
         if (fmt in setOf("FB2", "FBZ", "FB2.ZIP")) {
             val fb2Chapters = parseFb2Chapters(ebook.uri, ebook.title, isZipped = fmt != "FB2")
             if (fb2Chapters.isNotEmpty()) {
@@ -3097,7 +3227,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // 7. Plain Text / Markdown / RTF / HTML / Sony LRS (.txt, .md, .rtf, .html, .htm, .lrs)
         if (fmt in setOf("TXT", "MD", "RTF", "HTML", "HTM", "LRS")) {
             val textChapters = parsePlainTextOrHtmlChapters(ebook.uri, fmt, ebook.title)
             if (textChapters.isNotEmpty()) {
@@ -3107,7 +3236,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // 8. ZIP-Based eBook Containers (.epub, .ibooks, .htmlz)
         val chapters = mutableListOf<EbookChapter>()
         try {
             val zipMap = linkedMapOf<String, ByteArray>()
@@ -4213,6 +4341,104 @@ class AudiobookRepository(context: Context) {
         null
     }
 
+    // Phase 3: Live Book Discovery Search Engine (Apple Audiobooks + Apple Books + Google Books)
+    suspend fun searchDiscoveryBooksOnline(rawQuery: String): List<DiscoveryBook> = withContext(Dispatchers.IO) {
+        val cleanQuery = cleanAudiobookSearchQuery(rawQuery).ifBlank { "bestselling fantasy sci-fi" }
+        val resultsList = mutableListOf<DiscoveryBook>()
+        val seenKeys = mutableSetOf<String>()
+
+        // 1. Apple Books Audiobook Catalog
+        try {
+            val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+            val itunesUrl = URL("https://itunes.apple.com/search?term=$encoded&media=audiobook&entity=audiobook&limit=6")
+            val jsonText = readHttpText(itunesUrl)
+            if (jsonText != null) {
+                val results = JSONObject(jsonText).optJSONArray("results")
+                if (results != null) {
+                    for (i in 0 until results.length()) {
+                        if (resultsList.size >= 10) break
+                        val item = results.getJSONObject(i)
+                        val title = item.optString("collectionName", "").trim()
+                        val author = item.optString("artistName", "Unknown Author").trim()
+                        if (title.isBlank()) continue
+                        val key = "${title.lowercase(Locale.ROOT)}|${author.lowercase(Locale.ROOT)}"
+                        if (!seenKeys.add(key)) continue
+
+                        val rawDesc = item.optString("description", "")
+                            .let { HtmlCompat.fromHtml(it, HtmlCompat.FROM_HTML_MODE_LEGACY).toString().trim() }
+                        val art100 = item.optString("artworkUrl100", "")
+                        val previewUrl = if (art100.isNotBlank()) art100.replace("100x100bb", "300x300bb") else ""
+                        val bmp = if (previewUrl.isNotBlank()) downloadBitmapFromUrl(previewUrl, 220, 220) else null
+
+                        resultsList.add(
+                            DiscoveryBook(
+                                id = "itunes_ab_${item.optLong("collectionId", i.toLong())}",
+                                title = title,
+                                author = author,
+                                description = rawDesc.ifBlank { "Unabridged audiobook edition by $author." },
+                                formatLabel = "Audiobook",
+                                coverBitmap = bmp,
+                                directStoreUrl = item.optString("collectionViewUrl", "")
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Discovery audiobook search failed for '$cleanQuery'", t)
+        }
+
+        // 2. Google Books Catalog
+        if (resultsList.size < 10) {
+            try {
+                val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+                val gbooksUrl = URL("https://www.googleapis.com/books/v1/volumes?q=$encoded&maxResults=6")
+                val jsonText = readHttpText(gbooksUrl)
+                if (jsonText != null) {
+                    val items = JSONObject(jsonText).optJSONArray("items")
+                    if (items != null) {
+                        for (i in 0 until items.length()) {
+                            if (resultsList.size >= 10) break
+                            val itemObj = items.getJSONObject(i)
+                            val volInfo = itemObj.optJSONObject("volumeInfo") ?: continue
+                            val title = volInfo.optString("title", "").trim()
+                            if (title.isBlank()) continue
+                            val authorsArr = volInfo.optJSONArray("authors")
+                            val author = if (authorsArr != null && authorsArr.length() > 0) {
+                                authorsArr.optString(0, "Unknown Author")
+                            } else "Unknown Author"
+
+                            val key = "${title.lowercase(Locale.ROOT)}|${author.lowercase(Locale.ROOT)}"
+                            if (!seenKeys.add(key)) continue
+
+                            val desc = volInfo.optString("description", "").trim()
+                            val imageLinks = volInfo.optJSONObject("imageLinks")
+                            val thumb = imageLinks?.optString("thumbnail", imageLinks.optString("smallThumbnail", ""))
+                                ?.replace("http://", "https://") ?: ""
+                            val bmp = if (thumb.isNotBlank()) downloadBitmapFromUrl(thumb, 220, 220) else null
+
+                            resultsList.add(
+                                DiscoveryBook(
+                                    id = "gbooks_${itemObj.optString("id", i.toString())}",
+                                    title = title,
+                                    author = author,
+                                    description = desc.ifBlank { "eBook & print edition by $author." },
+                                    formatLabel = "eBook & Audio",
+                                    coverBitmap = bmp,
+                                    directStoreUrl = volInfo.optString("infoLink", "")
+                                )
+                            )
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Discovery Google Books search failed for '$cleanQuery'", t)
+            }
+        }
+
+        resultsList
+    }
+
     suspend fun searchCoverCandidatesOnline(rawQuery: String): List<CoverSearchCandidate> = withContext(Dispatchers.IO) {
         val cleanQuery = cleanAudiobookSearchQuery(rawQuery)
         if (cleanQuery.isBlank()) return@withContext emptyList()
@@ -4403,7 +4629,7 @@ class AudiobookRepository(context: Context) {
         val conn = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 6000
             readTimeout = 6000
-            setRequestProperty("User-Agent", "FablewoodAudiobooks/1.5")
+            setRequestProperty("User-Agent", "FablewoodAudiobooks/1.6")
         }
         return try {
             if (conn.responseCode in 200..299) {
@@ -4420,7 +4646,7 @@ class AudiobookRepository(context: Context) {
                 connectTimeout = 6000
                 readTimeout = 6000
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "FablewoodAudiobooks/1.5")
+                setRequestProperty("User-Agent", "FablewoodAudiobooks/1.6")
             }
             try {
                 if (conn.responseCode in 200..299) {
