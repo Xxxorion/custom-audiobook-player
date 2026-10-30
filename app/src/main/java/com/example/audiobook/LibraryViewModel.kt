@@ -20,7 +20,7 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     // Top-Center Shelf Toggle: "AUDIO" or "EBOOK"
     var shelfMode by mutableStateOf(repository.getPreferences().getString("shelf_mode", "AUDIO") ?: "AUDIO")
 
-    // eBook Shelf & Reader State (.epub & .pdf)
+    // eBook Shelf & Reader State
     var ebooks by mutableStateOf<List<Ebook>>(repository.loadEbooksCache())
     var currentEbookId by mutableStateOf(repository.getLastEbookId() ?: "")
     var currentEbookChapters by mutableStateOf<List<EbookChapter>>(emptyList())
@@ -29,6 +29,11 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var isEbookReaderFullScreen by mutableStateOf(false)
     var ebookFontSizeSp by mutableFloatStateOf(repository.getPreferences().getFloat("ebook_font_sp", 18f))
     var ebookReaderTheme by mutableStateOf(repository.getPreferences().getString("ebook_reader_theme", "FOREST") ?: "FOREST")
+
+    // Phase 3: Book Discovery & Affiliate Hub State
+    var discoveryQuery by mutableStateOf("")
+    var discoveryBooks by mutableStateOf<List<DiscoveryBook>>(emptyList())
+    var isSearchingDiscovery by mutableStateOf(false)
 
     var isPlaying by mutableStateOf(false)
     var currentTrackIndex by mutableIntStateOf(0)
@@ -79,6 +84,27 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     private var durationsJob: Job? = null
     private var coverSearchJob: Job? = null
     private var ebookLoadJob: Job? = null
+    private var discoveryJob: Job? = null
+
+    fun searchDiscoveryCatalog(query: String) {
+        val effectiveQuery = query.trim().ifBlank {
+            val activeAuthor = books.find { it.id == currentBookId }?.author
+                ?: ebooks.find { it.id == currentEbookId }?.author
+                ?: ""
+            if (activeAuthor.isNotBlank() && !activeAuthor.equals("Unknown Author", ignoreCase = true)) {
+                activeAuthor
+            } else {
+                "New York Times Bestseller Fiction"
+            }
+        }
+        discoveryQuery = effectiveQuery
+        discoveryJob?.cancel()
+        isSearchingDiscovery = true
+        discoveryJob = viewModelScope.launch {
+            discoveryBooks = repository.searchDiscoveryBooksOnline(effectiveQuery)
+            isSearchingDiscovery = false
+        }
+    }
 
     fun updateShelfMode(mode: String) {
         shelfMode = mode
