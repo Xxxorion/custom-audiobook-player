@@ -1,7 +1,18 @@
 package com.example.audiobook
 
 import android.graphics.Bitmap
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.LinearGradient
+import android.graphics.Matrix as AndroidMatrix
+import android.graphics.Paint as AndroidPaint
+import android.graphics.Path as AndroidPath
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -10,7 +21,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -26,21 +38,21 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -49,7 +61,11 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sin
 
 fun formatTime(ms: Long): String {
@@ -76,7 +92,7 @@ fun paginateChapterText(
     if (clean.isEmpty()) return listOf("")
 
     val safeCharsPerLine = charsPerLine.coerceIn(24, 90)
-    val safeLinesPerPage = linesPerPage.coerceIn(10, 48)
+    val safeLinesPerPage = linesPerPage.coerceIn(8, 46)
 
     val pages = mutableListOf<String>()
     val currentPage = StringBuilder()
@@ -131,6 +147,273 @@ fun paginateChapterText(
     }
 
     return if (pages.isEmpty()) listOf(clean) else pages
+}
+
+// Renders a book page (either reflowed serif text or visual PDF/Comic bitmap) onto a hardware-ready Bitmap
+// so drawBitmapMesh can physically bend and warp the text and paper in 3D space.
+private fun renderBookPageToBitmap(
+    widthPx: Int,
+    heightPx: Int,
+    bgColorArgb: Int,
+    textColorArgb: Int,
+    accentColorArgb: Int,
+    headingText: String,
+    showHeading: Boolean,
+    bodyText: String,
+    fontSizePx: Float,
+    visualBitmap: Bitmap?,
+    pageFooterLabel: String
+): Bitmap {
+    val w = widthPx.coerceAtLeast(64)
+    val h = heightPx.coerceAtLeast(64)
+    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    val canvas = AndroidCanvas(bmp)
+    canvas.drawColor(bgColorArgb)
+
+    val padH = (w * 0.068f).coerceAtLeast(28f)
+    val padTop = (h * 0.045f).coerceAtLeast(24f)
+    val padBottom = (h * 0.065f).coerceAtLeast(36f)
+    val contentWidth = (w - (padH * 2f)).toInt().coerceAtLeast(40)
+
+    if (visualBitmap != null && bodyText.isBlank()) {
+        val availH = (h - padTop - padBottom).coerceAtLeast(40f)
+        val scale = min(contentWidth.toFloat() / visualBitmap.width.coerceAtLeast(1), availH / visualBitmap.height.coerceAtLeast(1))
+        val drawW = visualBitmap.width * scale
+        val drawH = visualBitmap.height * scale
+        val left = (w - drawW) * 0.5f
+        val top = padTop + (availH - drawH) * 0.5f
+        val matrix = AndroidMatrix().apply {
+            postScale(scale, scale)
+            postTranslate(left, top)
+        }
+        val paint = AndroidPaint(AndroidPaint.FILTER_BITMAP_FLAG or AndroidPaint.ANTI_ALIAS_FLAG)
+        canvas.drawBitmap(visualBitmap, matrix, paint)
+    } else {
+        var currentY = padTop
+        val serifBold = Typeface.create(Typeface.SERIF, Typeface.BOLD)
+        val serifRegular = Typeface.create(Typeface.SERIF, Typeface.NORMAL)
+
+        if (showHeading && headingText.isNotBlank()) {
+            val headingPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+                color = accentColorArgb
+                textSize = fontSizePx * 1.32f
+                typeface = serifBold
+            }
+            val headingLayout = StaticLayout.Builder
+                .obtain(headingText, 0, headingText.length, headingPaint, contentWidth)
+                .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                .setLineSpacing(0f, 1.15f)
+                .setIncludePad(false)
+                .build()
+
+            canvas.save()
+            canvas.translate(padH, currentY)
+            headingLayout.draw(canvas)
+            canvas.restore()
+            currentY += headingLayout.height + (fontSizePx * 1.1f)
+        }
+
+        if (bodyText.isNotBlank()) {
+            val bodyPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+                color = textColorArgb
+                textSize = fontSizePx
+                typeface = serifRegular
+            }
+            val bodyLayout = StaticLayout.Builder
+                .obtain(bodyText, 0, bodyText.length, bodyPaint, contentWidth)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setLineSpacing(0f, 1.44f)
+                .setIncludePad(false)
+                .build()
+
+            val maxBodyHeight = (h - padBottom - currentY).toInt().coerceAtLeast(20)
+            canvas.save()
+            canvas.clipRect(padH, currentY, padH + contentWidth, currentY + maxBodyHeight)
+            canvas.translate(padH, currentY)
+            bodyLayout.draw(canvas)
+            canvas.restore()
+        }
+    }
+
+    // Subtle bottom page number footer matching Google Play Books
+    if (pageFooterLabel.isNotBlank()) {
+        val footerPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+            color = textColorArgb
+            alpha = 150
+            textSize = (fontSizePx * 0.68f).coerceIn(22f, 34f)
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+        canvas.drawText(pageFooterLabel, padH, h - (padBottom * 0.35f), footerPaint)
+    }
+
+    return bmp
+}
+
+// Draws a 3D cylindrically-warped page mesh using Android's native drawBitmapMesh.
+// This physically bends the lines of text, foreshortens letters around the cylinder curve,
+// and renders the translucent backside of the curled page with mirrored bleed-through text.
+private fun draw3DCurledPageMesh(
+    nativeCanvas: AndroidCanvas,
+    pageBitmap: Bitmap,
+    width: Float,
+    height: Float,
+    curlProgress: Float, // 0f = flat, 1f = fully peeled to the left
+    touchYNorm: Float,   // 0f = top, 0.5f = center, 1f = bottom
+    bgColorArgb: Int
+) {
+    val p = curlProgress.coerceIn(0f, 1f)
+    if (p <= 0.002f) {
+        nativeCanvas.drawBitmap(pageBitmap, 0f, 0f, null)
+        return
+    }
+
+    val meshW = 28
+    val meshH = 22
+    val vertCount = (meshW + 1) * (meshH + 1)
+    val frontVerts = FloatArray(vertCount * 2)
+    val frontColors = IntArray(vertCount)
+    val backVerts = FloatArray(vertCount * 2)
+    val backColors = IntArray(vertCount)
+
+    // Cylinder radius & fold spine position driven by the finger's X and Y coordinates
+    val radius = (width * (0.14f + 0.10f * sin(p * PI).toFloat())).coerceAtLeast(32f)
+    val baseFoldX = width * (1f - p * 1.08f)
+    // Finger vertical tilt: dragging near the bottom or top tilts the fold axis naturally
+    val tiltFactor = (touchYNorm - 0.5f) * 0.28f * sin(p * PI).toFloat()
+
+    var maxTurnedX = baseFoldX
+    var minSpineX = baseFoldX
+
+    var idx = 0
+    for (iy in 0..meshH) {
+        val yn = iy.toFloat() / meshH.toFloat()
+        val y0 = yn * height
+        // Curved fold line that bows inward and tilts with finger Y
+        val archBow = sin(yn * PI).toFloat() * (width * 0.045f * sin(p * PI).toFloat())
+        val localFoldX = baseFoldX + ((yn - 0.5f) * width * tiltFactor) - archBow
+        if (localFoldX < minSpineX) minSpineX = localFoldX
+
+        for (ix in 0..meshW) {
+            val xn = ix.toFloat() / meshW.toFloat()
+            val x0 = xn * width
+
+            if (x0 <= localFoldX) {
+                // Flat uncurled portion of the page on the left
+                frontVerts[idx * 2] = x0
+                frontVerts[idx * 2 + 1] = y0
+                frontColors[idx] = 0xFFFFFFFF.toInt()
+
+                // Collapse back-flap vertices to the spine so only curled portion renders in Pass 2
+                backVerts[idx * 2] = localFoldX
+                backVerts[idx * 2 + 1] = y0
+                backColors[idx] = 0x00FFFFFF
+            } else {
+                val dist = x0 - localFoldX
+                val theta = dist / radius
+
+                // 1. Front-facing curve (0 .. 90 degrees): text compresses & bends in 3D perspective
+                val frontTheta = theta.coerceAtMost((PI * 0.5).toFloat())
+                val fx = localFoldX + radius * sin(frontTheta)
+                val fz = radius * (1f - cos(frontTheta))
+                // 3D perspective vertical bend: pulls text lines inward toward the vanish point as z rises
+                val perspectiveScale = 1f + (fz / (width * 1.45f)) * 0.26f
+                val anchorY = height * touchYNorm.coerceIn(0.2f, 0.8f)
+                val fy = anchorY + (y0 - anchorY) / perspectiveScale - (fz * 0.11f * (yn - 0.5f))
+
+                frontVerts[idx * 2] = fx
+                frontVerts[idx * 2 + 1] = fy
+
+                // Shade the curving front text as it rolls into the crease
+                val shade = (1f - 0.34f * sin(frontTheta)).coerceIn(0.55f, 1f)
+                val channel = (shade * 255).toInt().coerceIn(0, 255)
+                frontColors[idx] = (0xFF shl 24) or (channel shl 16) or (channel shl 8) or channel
+
+                // 2. Backside of the curled sheet (90 .. 180+ degrees): rolls back over the page
+                if (theta > (PI * 0.5).toFloat()) {
+                    val backTheta = theta.coerceAtMost(PI.toFloat() * 1.12f)
+                    val bx = localFoldX + radius * sin(backTheta)
+                    val bz = radius * (1f - cos(backTheta))
+                    val bScale = 1f + (bz / (width * 1.25f)) * 0.34f
+                    val by = anchorY + (y0 - anchorY) / bScale - (bz * 0.14f * (yn - 0.5f))
+
+                    backVerts[idx * 2] = bx
+                    backVerts[idx * 2 + 1] = by
+                    if (bx + radius > maxTurnedX) maxTurnedX = bx + radius
+
+                    // Cylindrical lighting across the back of the peeled page
+                    val backLight = (0.72f + 0.28f * sin(backTheta - (PI * 0.5).toFloat())).coerceIn(0.55f, 1f)
+                    val bChan = (backLight * 255).toInt().coerceIn(0, 255)
+                    backColors[idx] = (0xFF shl 24) or (bChan shl 16) or (bChan shl 8) or bChan
+                } else {
+                    val edgeX = localFoldX + radius
+                    val edgeZ = radius
+                    val eScale = 1f + (edgeZ / (width * 1.45f)) * 0.26f
+                    val edgeY = anchorY + (y0 - anchorY) / eScale - (edgeZ * 0.11f * (yn - 0.5f))
+                    backVerts[idx * 2] = edgeX
+                    backVerts[idx * 2 + 1] = edgeY
+                    backColors[idx] = 0x00FFFFFF
+                }
+            }
+            idx++
+        }
+    }
+
+    // Cast deep soft drop-shadow onto the revealed page underneath
+    val shadowLeft = (minSpineX - 12f).coerceAtLeast(0f)
+    val shadowRight = (maxTurnedX + radius * 1.45f).coerceAtMost(width)
+    if (shadowRight > shadowLeft + 4f) {
+        val shadowPaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+            shader = LinearGradient(
+                shadowLeft,
+                0f,
+                shadowRight,
+                0f,
+                intArrayOf(
+                    0x00000000,
+                    0x88000000.toInt(),
+                    0x44000000,
+                    0x00000000
+                ),
+                floatArrayOf(0f, 0.22f, 0.65f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        nativeCanvas.drawRect(shadowLeft, 0f, shadowRight, height, shadowPaint)
+    }
+
+    // Pass 1: Draw the front of the page mesh (flat left side + 3D curving cylinder edge)
+    nativeCanvas.drawBitmapMesh(pageBitmap, meshW, meshH, frontVerts, 0, frontColors, 0, null)
+
+    // Pass 2: Draw the peeled back-flap (opaque paper backing + faint mirrored bleed-through text)
+    val backPaperPaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        color = bgColorArgb
+        alpha = 235
+    }
+    val flapOutline = AndroidPath()
+    var hasFlap = false
+    for (iy in 0..meshH) {
+        val rowStart = iy * (meshW + 1)
+        val xEdge = frontVerts[(rowStart + meshW) * 2]
+        val yEdge = frontVerts[(rowStart + meshW) * 2 + 1]
+        if (iy == 0) flapOutline.moveTo(xEdge, yEdge) else flapOutline.lineTo(xEdge, yEdge)
+    }
+    for (iy in meshH downTo 0) {
+        val rowStart = iy * (meshW + 1)
+        val bx = backVerts[(rowStart + meshW) * 2]
+        val by = backVerts[(rowStart + meshW) * 2 + 1]
+        if ( abs(bx - frontVerts[(rowStart + meshW) * 2]) > 2f) hasFlap = true
+        flapOutline.lineTo(bx, by)
+    }
+    flapOutline.close()
+
+    if (hasFlap) {
+        nativeCanvas.drawPath(flapOutline, backPaperPaint)
+        // Draw the warped reverse-side text bleeding through the back of the paper (like Google Play Books!)
+        val bleedPaint = AndroidPaint(AndroidPaint.FILTER_BITMAP_FLAG).apply {
+            alpha = 95
+        }
+        nativeCanvas.drawBitmapMesh(pageBitmap, meshW, meshH, backVerts, 0, backColors, 0, bleedPaint)
+    }
 }
 
 @Composable
@@ -759,23 +1042,12 @@ fun EpubReaderScreen(
 ) {
     val fmtUpper = ebook.format.uppercase(Locale.ROOT)
     val currentChapter = chapters.getOrNull(currentChapterIndex)
-    // A chapter is rendered in Reflowed Text Mode whenever bodyText is non-blank (including reflowed PDFs!)
     val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
 
     val bgColor = when (readerTheme) {
         "SEPIA" -> Color(0xFFF4ECD8)
         "LIGHT" -> Color(0xFFFAFAFA)
-        else -> Color(0xFF0C1A14)
-    }
-    val curlBackMidColor = when (readerTheme) {
-        "SEPIA" -> Color(0xFFE4D5B7)
-        "LIGHT" -> Color(0xFFE8ECE9)
-        else -> Color(0xFF183327)
-    }
-    val curlBackHighlightColor = when (readerTheme) {
-        "SEPIA" -> Color(0xFFFBF6EC)
-        "LIGHT" -> Color(0xFFFFFFFF)
-        else -> Color(0xFF244938)
+        else -> Color(0xFF060E0A) // Deep OLED Book Black/Forest like Google Play Books
     }
     val textColor = when (readerTheme) {
         "SEPIA" -> Color(0xFF3B2F2F)
@@ -794,7 +1066,6 @@ fun EpubReaderScreen(
         mutableStateOf(repository.getPreferences().getBoolean("pdf_original_page_mode", false))
     }
 
-    // Sub-page state within the current chapter for single-page turning
     var subPageIndex by remember(ebook.id, currentChapterIndex) { mutableIntStateOf(0) }
     var startAtLastSubPage by remember { mutableStateOf(false) }
 
@@ -804,15 +1075,15 @@ fun EpubReaderScreen(
     var isRenderingVisualPage by remember(ebook.id, currentChapterIndex) { mutableStateOf(false) }
 
     val coroutineScope = rememberCoroutineScope()
-    // curlAnim: 0f = flat page, +0.01..+1f = curling forward (Next), -0.01..-1f = curling backward (Prev)
+    // curlAnim: 0f = flat, +0.01..+1f = curling forward (Next), -0.01..-1f = curling backward (Prev)
     val curlAnim = remember { Animatable(0f) }
+    var touchYNorm by remember { mutableFloatStateOf(0.55f) }
 
     LaunchedEffect(currentChapterIndex, ebook.id, isVisualPageMode, readerTheme) {
         if (isVisualPageMode) {
             isRenderingVisualPage = true
             renderedPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex, 1400, readerTheme)
             isRenderingVisualPage = false
-            // Pre-render adjacent pages for smooth page-curl preview
             if (currentChapterIndex + 1 < chapters.size) {
                 nextPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex + 1, 1200, readerTheme)
             }
@@ -890,23 +1161,28 @@ fun EpubReaderScreen(
             }
         }
 
-        HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
+        HorizontalDivider(color = accentColor.copy(alpha = 0.18f))
 
-        // Main Interactive 3D Page-Curl Reading Canvas
+        // Main Interactive 3D Mesh Page-Curl Reading Area
         BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .background(bgColor)
         ) {
+            val density = LocalDensity.current
+            val canvasWidthPx = with(density) { maxWidth.toPx().toInt().coerceAtLeast(100) }
+            val canvasHeightPx = with(density) { (maxHeight - 48.dp).toPx().toInt().coerceAtLeast(100) }
+            val fontSizePx = with(density) { fontSizeSp.sp.toPx() }
+
             val availWidthDp = maxWidth.value
-            val availHeightDp = maxHeight.value
+            val availHeightDp = (maxHeight - 48.dp).value
 
-            val charsPerLine = ((availWidthDp - 44f) / (fontSizeSp * 0.54f)).toInt().coerceIn(26, 85)
-            val lineHeightSp = fontSizeSp * 1.52f
-            val linesPerPage = ((availHeightDp - 52f) / (lineHeightSp * 1.05f)).toInt().coerceIn(10, 42)
+            val charsPerLine = ((availWidthDp - 48f) / (fontSizeSp * 0.56f)).toInt().coerceIn(26, 85)
+            val lineHeightSp = fontSizeSp * 1.46f
+            val linesPerPage = ((availHeightDp - 64f) / (lineHeightSp * 1.08f)).toInt().coerceIn(8, 38)
 
-            val subPages = remember(currentChapter?.bodyText, charsPerLine, linesPerPage) {
+            val subPages = remember(currentChapter?.bodyText, charsPerLine, linesPerPage, isVisualPageMode) {
                 if (isVisualPageMode) listOf("")
                 else paginateChapterText(currentChapter?.bodyText ?: "", charsPerLine, linesPerPage)
             }
@@ -945,8 +1221,9 @@ fun EpubReaderScreen(
             fun animatePageTurnForward() {
                 if (!canGoNext || curlAnim.isRunning) return
                 coroutineScope.launch {
-                    curlAnim.snapTo(0.04f)
-                    curlAnim.animateTo(1f, tween(durationMillis = 360))
+                    touchYNorm = 0.62f
+                    curlAnim.snapTo(0.03f)
+                    curlAnim.animateTo(1f, tween(durationMillis = 420, easing = FastOutSlowInEasing))
                     commitNextPage()
                     curlAnim.snapTo(0f)
                 }
@@ -955,13 +1232,15 @@ fun EpubReaderScreen(
             fun animatePageTurnBackward() {
                 if (!canGoPrev || curlAnim.isRunning) return
                 coroutineScope.launch {
-                    curlAnim.snapTo(-0.04f)
-                    curlAnim.animateTo(-1f, tween(durationMillis = 360))
+                    touchYNorm = 0.62f
+                    curlAnim.snapTo(-0.03f)
+                    curlAnim.animateTo(-1f, tween(durationMillis = 420, easing = FastOutSlowInEasing))
                     commitPrevPage()
                     curlAnim.snapTo(0f)
                 }
             }
 
+            val currSubPageText = subPages.getOrElse(subPageIndex) { "" }
             val nextPreviewText = remember(subPageIndex, subPages, currentChapterIndex, chapters) {
                 if (subPageIndex + 1 < subPages.size) {
                     subPages[subPageIndex + 1]
@@ -970,7 +1249,6 @@ fun EpubReaderScreen(
                     paginateChapterText(nextChap.bodyText, charsPerLine, linesPerPage).firstOrNull() ?: ""
                 } else ""
             }
-
             val prevPreviewText = remember(subPageIndex, subPages, currentChapterIndex, chapters) {
                 if (subPageIndex > 0) {
                     subPages[subPageIndex - 1]
@@ -980,57 +1258,77 @@ fun EpubReaderScreen(
                 } else ""
             }
 
-            @Composable
-            fun PageContentLayer(
-                pageText: String,
-                showChapterHeading: Boolean,
-                headingText: String,
-                visualBitmap: Bitmap?
+            val bgArgb = bgColor.toArgb()
+            val textArgb = textColor.toArgb()
+            val accentArgb = accentColor.toArgb()
+
+            val currentFooter = if (isVisualPageMode) {
+                "Page ${currentChapterIndex + 1} of ${chapters.size}"
+            } else {
+                "Page ${subPageIndex + 1} of ${subPages.size}  •  Ch ${currentChapterIndex + 1}/${chapters.size}"
+            }
+
+            // Offscreen bitmaps for current, next, and previous pages so drawBitmapMesh bends the real text
+            val currentBitmap = remember(
+                canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb,
+                currentChapter?.title, subPageIndex, currSubPageText, fontSizePx, renderedPageBitmap, currentFooter
             ) {
-                if (isVisualPageMode) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(bgColor)
-                            .padding(horizontal = 6.dp, vertical = 4.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (visualBitmap != null) {
-                            Image(
-                                bitmap = visualBitmap.asImageBitmap(),
-                                contentDescription = headingText,
-                                contentScale = ContentScale.Fit,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                    }
-                } else {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(bgColor)
-                            .padding(horizontal = 22.dp, vertical = 16.dp)
-                            .verticalScroll(rememberScrollState())
-                    ) {
-                        if (showChapterHeading && headingText.isNotBlank()) {
-                            Text(
-                                text = headingText,
-                                fontSize = (fontSizeSp + 3f).sp,
-                                fontWeight = FontWeight.Bold,
-                                color = accentColor,
-                                fontFamily = FontFamily.Serif
-                            )
-                            Spacer(Modifier.height(12.dp))
-                        }
-                        Text(
-                            text = pageText,
-                            fontSize = fontSizeSp.sp,
-                            lineHeight = lineHeightSp.sp,
-                            color = textColor,
-                            fontFamily = FontFamily.Serif
-                        )
-                    }
-                }
+                renderBookPageToBitmap(
+                    widthPx = canvasWidthPx,
+                    heightPx = canvasHeightPx,
+                    bgColorArgb = bgArgb,
+                    textColorArgb = textArgb,
+                    accentColorArgb = accentArgb,
+                    headingText = currentChapter?.title ?: "",
+                    showHeading = subPageIndex == 0,
+                    bodyText = currSubPageText,
+                    fontSizePx = fontSizePx,
+                    visualBitmap = if (isVisualPageMode) renderedPageBitmap else null,
+                    pageFooterLabel = currentFooter
+                )
+            }
+
+            val nextBitmap = remember(
+                canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb,
+                currentChapterIndex, subPageIndex, nextPreviewText, fontSizePx, nextPageBitmap
+            ) {
+                val isNextNewChapter = subPageIndex + 1 >= subPages.size
+                val nextHeading = if (isNextNewChapter && currentChapterIndex + 1 < chapters.size) {
+                    chapters[currentChapterIndex + 1].title
+                } else ""
+                renderBookPageToBitmap(
+                    widthPx = canvasWidthPx,
+                    heightPx = canvasHeightPx,
+                    bgColorArgb = bgArgb,
+                    textColorArgb = textArgb,
+                    accentColorArgb = accentArgb,
+                    headingText = nextHeading,
+                    showHeading = isNextNewChapter,
+                    bodyText = nextPreviewText,
+                    fontSizePx = fontSizePx,
+                    visualBitmap = if (isVisualPageMode) (nextPageBitmap ?: renderedPageBitmap) else null,
+                    pageFooterLabel = ""
+                )
+            }
+
+            val prevBitmap = remember(
+                canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb,
+                currentChapterIndex, subPageIndex, prevPreviewText, fontSizePx, prevPageBitmap
+            ) {
+                val isPrevFirstSubPage = subPageIndex == 1
+                renderBookPageToBitmap(
+                    widthPx = canvasWidthPx,
+                    heightPx = canvasHeightPx,
+                    bgColorArgb = bgArgb,
+                    textColorArgb = textArgb,
+                    accentColorArgb = accentArgb,
+                    headingText = currentChapter?.title ?: "",
+                    showHeading = isPrevFirstSubPage,
+                    bodyText = prevPreviewText,
+                    fontSizePx = fontSizePx,
+                    visualBitmap = if (isVisualPageMode) (prevPageBitmap ?: renderedPageBitmap) else null,
+                    pageFooterLabel = ""
+                )
             }
 
             if (isLoading || (isVisualPageMode && isRenderingVisualPage && renderedPageBitmap == null)) {
@@ -1038,247 +1336,147 @@ fun EpubReaderScreen(
                     CircularProgressIndicator(color = accentColor)
                 }
             } else {
-                val curlVal = curlAnim.value
-                Box(
+                // Interactive 2D Finger-Tracking Page-Curl Canvas
+                Canvas(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .fillMaxWidth()
+                        .height(with(density) { canvasHeightPx.toDp() })
                         .pointerInput(currentChapterIndex, subPageIndex, subPages.size, chapters.size) {
-                            detectHorizontalDragGestures(
-                                onDragEnd = {
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val w = size.width.toFloat().coerceAtLeast(1f)
+                                val h = size.height.toFloat().coerceAtLeast(1f)
+                                val startX = down.position.x
+                                touchYNorm = (down.position.y / h).coerceIn(0.1f, 0.9f)
+
+                                var totalDragX = 0f
+                                var dragDirection = 0 // +1 = Next Page (peeling right-to-left), -1 = Prev Page (peeling left-to-right)
+                                var lastDx = 0f
+
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull() ?: break
+                                    if (!change.pressed) break
+
+                                    val dx = change.positionChange().x
+                                    if (abs(dx) > 0.1f) lastDx = dx
+                                    totalDragX += dx
+                                    touchYNorm = (change.position.y / h).coerceIn(0.1f, 0.9f)
+
+                                    if (dragDirection == 0 && abs(totalDragX) > 8f) {
+                                        dragDirection = if (totalDragX < 0f && canGoNext) {
+                                            1
+                                        } else if (totalDragX > 0f && canGoPrev) {
+                                            -1
+                                        } else {
+                                            0
+                                        }
+                                    }
+
+                                    if (dragDirection == 1 && canGoNext) {
+                                        change.consume()
+                                        // Finger position directly drives the 3D cylinder spine
+                                        val fingerProgress = ((w - change.position.x) / (w * 0.92f)).coerceIn(0.01f, 1f)
+                                        val dragProgress = (-totalDragX / (w * 0.85f)).coerceIn(0.01f, 1f)
+                                        val combined = if (startX > w * 0.65f) max(fingerProgress, dragProgress) else dragProgress
+                                        coroutineScope.launch { curlAnim.snapTo(combined) }
+                                    } else if (dragDirection == -1 && canGoPrev) {
+                                        change.consume()
+                                        // Pulling previous page back from the left edge following finger X
+                                        val dragProgress = (totalDragX / (w * 0.85f)).coerceIn(0.01f, 1f)
+                                        coroutineScope.launch { curlAnim.snapTo(-dragProgress) }
+                                    }
+                                }
+
+                                // Finger released: either tap-to-turn on screen edges or snap forward/backward
+                                if (dragDirection == 0 && abs(totalDragX) < 12f) {
+                                    if (startX > w * 0.72f && canGoNext) {
+                                        animatePageTurnForward()
+                                    } else if (startX < w * 0.28f && canGoPrev) {
+                                        animatePageTurnBackward()
+                                    }
+                                } else {
                                     val c = curlAnim.value
                                     coroutineScope.launch {
-                                        when {
-                                            c > 0.16f && canGoNext -> {
-                                                curlAnim.animateTo(1f, tween(240))
+                                        if (c > 0f) {
+                                            val shouldComplete = c > 0.22f || lastDx < -6f
+                                            if (shouldComplete && canGoNext) {
+                                                curlAnim.animateTo(1f, tween(280, easing = FastOutSlowInEasing))
                                                 commitNextPage()
                                                 curlAnim.snapTo(0f)
+                                            } else {
+                                                curlAnim.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
                                             }
-                                            c < -0.16f && canGoPrev -> {
-                                                curlAnim.animateTo(-1f, tween(240))
+                                        } else if (c < 0f) {
+                                            val shouldComplete = abs(c) > 0.22f || lastDx > 6f
+                                            if (shouldComplete && canGoPrev) {
+                                                curlAnim.animateTo(-1f, tween(280, easing = FastOutSlowInEasing))
                                                 commitPrevPage()
                                                 curlAnim.snapTo(0f)
-                                            }
-                                            else -> {
-                                                curlAnim.animateTo(0f, tween(200))
+                                            } else {
+                                                curlAnim.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
                                             }
                                         }
                                     }
-                                },
-                                onDragCancel = {
-                                    coroutineScope.launch { curlAnim.animateTo(0f, tween(200)) }
-                                },
-                                onHorizontalDrag = { change, dragAmount ->
-                                    change.consume()
-                                    val widthPx = size.width.toFloat().coerceAtLeast(1f)
-                                    val delta = -dragAmount / (widthPx * 0.85f)
-                                    val target = (curlAnim.value + delta).coerceIn(
-                                        if (canGoPrev) -1f else 0f,
-                                        if (canGoNext) 1f else 0f
-                                    )
-                                    coroutineScope.launch { curlAnim.snapTo(target) }
-                                }
-                            )
-                        }
-                ) {
-                    // 1. Underneath Revealed Page (Next or Previous Page)
-                    if (curlVal > 0.005f) {
-                        val isNextNewChapter = subPageIndex + 1 >= subPages.size
-                        val nextHeading = if (isNextNewChapter && currentChapterIndex + 1 < chapters.size) {
-                            chapters[currentChapterIndex + 1].title
-                        } else ""
-                        PageContentLayer(
-                            pageText = nextPreviewText,
-                            showChapterHeading = isNextNewChapter,
-                            headingText = nextHeading,
-                            visualBitmap = nextPageBitmap ?: renderedPageBitmap
-                        )
-                    } else if (curlVal < -0.005f) {
-                        val isPrevFirstSubPage = subPageIndex == 1
-                        PageContentLayer(
-                            pageText = prevPreviewText,
-                            showChapterHeading = isPrevFirstSubPage,
-                            headingText = currentChapter?.title ?: "",
-                            visualBitmap = prevPageBitmap ?: renderedPageBitmap
-                        )
-                    }
-
-                    // 2. Top Active Page with 3D Curved Page-Curl Clip, Back-Flap & Cast Shadow
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .drawWithContent {
-                                val c = curlAnim.value
-                                if (abs(c) < 0.005f) {
-                                    drawContent()
-                                } else if (c > 0f) {
-                                    // Curling Forward (Right-to-Left): Current page peels back from the right
-                                    val progress = c.coerceIn(0f, 1f)
-                                    val w = size.width
-                                    val h = size.height
-                                    val spineX = w * (1f - progress)
-                                    val curveBow = sin(progress * Math.PI).toFloat() * (w * 0.085f)
-                                    val flapWidth = (w * 0.28f * sin(progress * Math.PI).toFloat()).coerceAtLeast(14f)
-                                    val flapRightX = (spineX + flapWidth).coerceAtMost(w)
-
-                                    val visiblePagePath = Path().apply {
-                                        moveTo(0f, 0f)
-                                        lineTo(spineX, 0f)
-                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, h)
-                                        lineTo(0f, h)
-                                        close()
-                                    }
-
-                                    clipPath(visiblePagePath, ClipOp.Intersect) {
-                                        this@drawWithContent.drawContent()
-                                    }
-
-                                    // Drop shadow cast onto the revealed next page underneath
-                                    val shadowEnd = (flapRightX + 54f).coerceAtMost(w)
-                                    if (shadowEnd > spineX) {
-                                        drawRect(
-                                            brush = Brush.horizontalGradient(
-                                                colors = listOf(
-                                                    Color.Black.copy(alpha = 0.42f * (1f - progress * 0.4f)),
-                                                    Color.Transparent
-                                                ),
-                                                startX = spineX,
-                                                endX = shadowEnd
-                                            ),
-                                            topLeft = Offset(spineX, 0f),
-                                            size = Size(shadowEnd - spineX, h)
-                                        )
-                                    }
-
-                                    // 3D Curved Paper Back-Flap (Bends at top and bottom like Google Play Books)
-                                    val verticalPinch = h * 0.035f * sin(progress * Math.PI).toFloat()
-                                    val backFlapPath = Path().apply {
-                                        moveTo(spineX, 0f)
-                                        quadraticBezierTo(
-                                            (spineX + flapRightX) * 0.5f,
-                                            verticalPinch,
-                                            flapRightX,
-                                            verticalPinch * 1.4f
-                                        )
-                                        quadraticBezierTo(
-                                            flapRightX - (curveBow * 0.6f),
-                                            h * 0.5f,
-                                            flapRightX,
-                                            h - (verticalPinch * 1.4f)
-                                        )
-                                        quadraticBezierTo(
-                                            (spineX + flapRightX) * 0.5f,
-                                            h - verticalPinch,
-                                            spineX,
-                                            h
-                                        )
-                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, 0f)
-                                        close()
-                                    }
-
-                                    drawPath(
-                                        path = backFlapPath,
-                                        brush = Brush.horizontalGradient(
-                                            colors = listOf(
-                                                curlBackHighlightColor,
-                                                curlBackMidColor,
-                                                Color.Black.copy(alpha = 0.25f)
-                                            ),
-                                            startX = (spineX - curveBow).coerceAtLeast(0f),
-                                            endX = flapRightX.coerceAtLeast(spineX + 1f)
-                                        )
-                                    )
-
-                                    // Specular highlight along the curved fold spine
-                                    val spineLine = Path().apply {
-                                        moveTo(spineX, 0f)
-                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, h)
-                                    }
-                                    drawPath(
-                                        path = spineLine,
-                                        color = accentColor.copy(alpha = 0.45f),
-                                        style = Stroke(width = 2.dp.toPx())
-                                    )
-                                } else {
-                                    // Curling Backward (Left-to-Right): Previous page uncurls from the left
-                                    val progress = abs(c).coerceIn(0f, 1f)
-                                    val w = size.width
-                                    val h = size.height
-                                    val spineX = w * progress
-                                    val curveBow = sin(progress * Math.PI).toFloat() * (w * 0.075f)
-                                    val flapWidth = (w * 0.24f * sin(progress * Math.PI).toFloat()).coerceAtLeast(12f)
-                                    val flapLeftX = (spineX - flapWidth).coerceAtLeast(0f)
-
-                                    val rightSidePath = Path().apply {
-                                        moveTo(spineX, 0f)
-                                        lineTo(w, 0f)
-                                        lineTo(w, h)
-                                        lineTo(spineX, h)
-                                        quadraticBezierTo(spineX + curveBow, h * 0.5f, spineX, 0f)
-                                        close()
-                                    }
-
-                                    clipPath(rightSidePath, ClipOp.Intersect) {
-                                        this@drawWithContent.drawContent()
-                                    }
-
-                                    val shadowEnd = (spineX + 48f).coerceAtMost(w)
-                                    drawRect(
-                                        brush = Brush.horizontalGradient(
-                                            colors = listOf(
-                                                Color.Black.copy(alpha = 0.38f),
-                                                Color.Transparent
-                                            ),
-                                            startX = spineX,
-                                            endX = shadowEnd.coerceAtLeast(spineX + 1f)
-                                        ),
-                                        topLeft = Offset(spineX, 0f),
-                                        size = Size((shadowEnd - spineX).coerceAtLeast(1f), h)
-                                    )
-
-                                    val backFlapPath = Path().apply {
-                                        moveTo(flapLeftX, 0f)
-                                        lineTo(spineX, 0f)
-                                        quadraticBezierTo(spineX + curveBow, h * 0.5f, spineX, h)
-                                        lineTo(flapLeftX, h)
-                                        close()
-                                    }
-                                    drawPath(
-                                        path = backFlapPath,
-                                        brush = Brush.horizontalGradient(
-                                            colors = listOf(
-                                                curlBackMidColor,
-                                                curlBackHighlightColor
-                                            ),
-                                            startX = flapLeftX,
-                                            endX = (spineX + curveBow).coerceAtLeast(flapLeftX + 1f)
-                                        )
-                                    )
                                 }
                             }
-                    ) {
-                        val currSubPageText = subPages.getOrElse(subPageIndex) { "" }
-                        PageContentLayer(
-                            pageText = currSubPageText,
-                            showChapterHeading = subPageIndex == 0,
-                            headingText = currentChapter?.title ?: "",
-                            visualBitmap = renderedPageBitmap
-                        )
+                        }
+                ) {
+                    val c = curlAnim.value
+                    drawIntoCanvas { composeCanvas ->
+                        val native = composeCanvas.nativeCanvas
+                        val w = size.width
+                        val h = size.height
+
+                        when {
+                            abs(c) < 0.003f -> {
+                                // Flat resting page
+                                native.drawBitmap(currentBitmap, 0f, 0f, null)
+                            }
+                            c > 0f -> {
+                                // Forward Page Turn: Next page sits flat underneath while Current page curls left
+                                native.drawBitmap(nextBitmap, 0f, 0f, null)
+                                draw3DCurledPageMesh(
+                                    nativeCanvas = native,
+                                    pageBitmap = currentBitmap,
+                                    width = w,
+                                    height = h,
+                                    curlProgress = c,
+                                    touchYNorm = touchYNorm,
+                                    bgColorArgb = bgArgb
+                                )
+                            }
+                            else -> {
+                                // Backward Page Turn: Current page sits flat underneath while Previous page uncurls from left to right
+                                native.drawBitmap(currentBitmap, 0f, 0f, null)
+                                val uncurlProgress = (1f - abs(c)).coerceIn(0.01f, 0.99f)
+                                draw3DCurledPageMesh(
+                                    nativeCanvas = native,
+                                    pageBitmap = prevBitmap,
+                                    width = w,
+                                    height = h,
+                                    curlProgress = uncurlProgress,
+                                    touchYNorm = touchYNorm,
+                                    bgColorArgb = bgArgb
+                                )
+                            }
+                        }
                     }
                 }
             }
 
-            // Bottom Page-Turn Bar inside BoxWithConstraints so Prev/Next buttons trigger the 3D Page-Curl!
+            // Bottom Navigation Bar
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .background(bgColor.copy(alpha = 0.95f))
+                    .background(bgColor)
             ) {
-                HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
+                HorizontalDivider(color = accentColor.copy(alpha = 0.18f))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1290,16 +1488,12 @@ fun EpubReaderScreen(
                         Text("Prev", color = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
                     }
 
-                    val statusLabel = if (isVisualPageMode) {
-                        "Page ${currentChapterIndex + 1} of ${chapters.size}"
-                    } else if (subPages.size > 1) {
-                        "Ch ${currentChapterIndex + 1}/${chapters.size} • Page ${subPageIndex + 1}/${subPages.size}"
-                    } else {
-                        "Chapter ${currentChapterIndex + 1} of ${chapters.size}"
-                    }
+                    val pct = if (chapters.isNotEmpty()) {
+                        (((currentChapterIndex + 1).toFloat() / chapters.size) * 100).toInt().coerceIn(1, 100)
+                    } else 0
 
                     Text(
-                        text = statusLabel,
+                        text = "$currentFooter ($pct%)",
                         fontSize = 12.sp,
                         color = textColor.copy(alpha = 0.85f),
                         modifier = Modifier.clickable { showTocDialog = true }
