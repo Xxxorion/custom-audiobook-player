@@ -1,30 +1,20 @@
 package com.example.audiobook
 
-import android.Manifest
-import android.content.ComponentName
-import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.Color as AndroidColor
-import android.net.Uri
-import android.os.Build
-import android.os.Bundle
-import android.os.Environment
-import android.provider.Settings
-import android.util.Log
-import android.widget.Toast
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,2032 +26,2019 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.PlaybackParameters
-import androidx.media3.common.Player
-import androidx.media3.session.MediaController
-import androidx.media3.session.SessionCommand
-import androidx.media3.session.SessionToken
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.net.URLEncoder
 import java.util.Locale
-import kotlin.math.round
+import java.util.concurrent.TimeUnit
+import kotlin.math.abs
+import kotlin.math.sin
 
-private const val TAG = "Fablewood"
+fun formatTime(ms: Long): String {
+    val totalSeconds = ms.coerceAtLeast(0L) / 1000L
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    val hours = minutes / 60L
+    val remainingMinutes = minutes % 60L
 
-data class ExtractedCoverPalette(
-    val dominantHue: Float,
-    val dominantSat: Float,
-    val accentHue: Float,
-    val accentSat: Float
-)
-
-fun extractCoverPaletteFromBitmap(bitmap: Bitmap?): ExtractedCoverPalette? {
-    if (bitmap == null || bitmap.width <= 0 || bitmap.height <= 0) return null
-    return try {
-        val scaled = Bitmap.createScaledBitmap(bitmap, 24, 24, true)
-        val pixels = IntArray(24 * 24)
-        scaled.getPixels(pixels, 0, 24, 0, 0, 24, 24)
-
-        val bucketCount = 36
-        val bucketWeights = FloatArray(bucketCount)
-        val bucketHueSum = FloatArray(bucketCount)
-        val bucketSatSum = FloatArray(bucketCount)
-        val bucketVibrancy = FloatArray(bucketCount)
-
-        val hsv = FloatArray(3)
-        for (px in pixels) {
-            val alpha = (px ushr 24) and 0xFF
-            if (alpha < 128) continue
-            AndroidColor.colorToHSV(px, hsv)
-            val h = hsv[0]
-            val s = hsv[1]
-            val v = hsv[2]
-
-            if (v < 0.14f || (v > 0.94f && s < 0.18f) || s < 0.14f) continue
-
-            val bucket = ((h / 10f).toInt()).coerceIn(0, bucketCount - 1)
-            val weight = s * v
-            bucketWeights[bucket] += weight
-            bucketHueSum[bucket] += h * weight
-            bucketSatSum[bucket] += s * weight
-            bucketVibrancy[bucket] += (s * s * v)
-        }
-
-        var domBucket = -1
-        var maxWeight = 0f
-        for (i in 0 until bucketCount) {
-            if (bucketWeights[i] > maxWeight) {
-                maxWeight = bucketWeights[i]
-                domBucket = i
-            }
-        }
-
-        if (domBucket == -1 || maxWeight <= 0f) return null
-
-        val domHue = (bucketHueSum[domBucket] / maxWeight).coerceIn(0f, 360f)
-        val domSat = (bucketSatSum[domBucket] / maxWeight).coerceIn(0.2f, 1f)
-
-        var accentBucket = domBucket
-        var maxVib = 0f
-        for (i in 0 until bucketCount) {
-            if (bucketWeights[i] <= 0f) continue
-            val avgH = bucketHueSum[i] / bucketWeights[i]
-            val hueDiff = kotlin.math.abs(avgH - domHue).let { if (it > 180f) 360f - it else it }
-            val distinctBonus = if (hueDiff > 25f) 1.35f else 1.0f
-            val score = bucketVibrancy[i] * distinctBonus
-            if (score > maxVib) {
-                maxVib = score
-                accentBucket = i
-            }
-        }
-
-        val accWeight = bucketWeights[accentBucket].coerceAtLeast(0.001f)
-        val accHue = (bucketHueSum[accentBucket] / accWeight).coerceIn(0f, 360f)
-        val accSat = (bucketSatSum[accentBucket] / accWeight).coerceIn(0.35f, 1f)
-
-        ExtractedCoverPalette(
-            dominantHue = domHue,
-            dominantSat = domSat,
-            accentHue = accHue,
-            accentSat = accSat
-        )
-    } catch (t: Throwable) {
-        Log.w(TAG, "Failed extracting palette from cover art", t)
-        null
-    }
-}
-
-private fun hsvColor(hue: Float, sat: Float, value: Float): Color {
-    val cleanHue = ((hue % 360f) + 360f) % 360f
-    val argb = AndroidColor.HSVToColor(
-        floatArrayOf(
-            cleanHue,
-            sat.coerceIn(0f, 1f),
-            value.coerceIn(0f, 1f)
-        )
-    )
-    return Color(argb)
-}
-
-fun buildDynamicColorScheme(palette: ExtractedCoverPalette?, isDarkTheme: Boolean): ColorScheme {
-    val defaultDark = darkColorScheme(
-        background = Color(0xFF0C1A14),
-        surface = Color(0xFF142B20),
-        surfaceVariant = Color(0xFF1E3F30),
-        onSurfaceVariant = Color(0xFFB5C7BD),
-        primary = Color(0xFFD4AF37),
-        onPrimary = Color.Black,
-        secondary = Color(0xFF2D5A27),
-        tertiary = Color(0xFF8B5A2B)
-    )
-    val defaultLight = lightColorScheme(
-        background = Color(0xFFF0F4F1),
-        surface = Color(0xFFFFFFFF),
-        surfaceVariant = Color(0xFFDCE6E0),
-        onSurfaceVariant = Color(0xFF44564C),
-        primary = Color(0xFFB58500),
-        onPrimary = Color.White,
-        secondary = Color(0xFF3E7A45),
-        tertiary = Color(0xFF8B5A2B)
-    )
-
-    if (palette == null) {
-        return if (isDarkTheme) defaultDark else defaultLight
-    }
-
-    return if (isDarkTheme) {
-        val bg = hsvColor(palette.dominantHue, (palette.dominantSat * 0.58f).coerceIn(0.22f, 0.52f), 0.12f)
-        val surf = hsvColor(palette.dominantHue, (palette.dominantSat * 0.52f).coerceIn(0.22f, 0.48f), 0.19f)
-        val surfVar = hsvColor(palette.dominantHue, (palette.dominantSat * 0.48f).coerceIn(0.24f, 0.50f), 0.28f)
-        val onSurfVar = hsvColor(palette.dominantHue, 0.14f, 0.82f)
-        val prim = hsvColor(palette.accentHue, palette.accentSat.coerceIn(0.50f, 0.82f), 0.92f)
-        val sec = hsvColor(palette.dominantHue, 0.45f, 0.42f)
-        val tert = hsvColor(palette.accentHue, 0.65f, 0.72f)
-
-        defaultDark.copy(
-            background = bg,
-            surface = surf,
-            surfaceVariant = surfVar,
-            onSurfaceVariant = onSurfVar,
-            primary = prim,
-            onPrimary = Color.Black,
-            secondary = sec,
-            tertiary = tert
-        )
+    return if (hours > 0L) {
+        String.format(Locale.US, "%d:%02d:%02d", hours, remainingMinutes, seconds)
     } else {
-        val bg = hsvColor(palette.dominantHue, 0.09f, 0.96f)
-        val surf = Color(0xFFFFFFFF)
-        val surfVar = hsvColor(palette.dominantHue, 0.18f, 0.90f)
-        val onSurfVar = hsvColor(palette.dominantHue, 0.30f, 0.32f)
-        val prim = hsvColor(palette.accentHue, palette.accentSat.coerceIn(0.65f, 0.90f), 0.62f)
-        val sec = hsvColor(palette.dominantHue, 0.50f, 0.48f)
-        val tert = hsvColor(palette.accentHue, 0.60f, 0.55f)
-
-        defaultLight.copy(
-            background = bg,
-            surface = surf,
-            surfaceVariant = surfVar,
-            onSurfaceVariant = onSurfVar,
-            primary = prim,
-            onPrimary = Color.White,
-            secondary = sec,
-            tertiary = tert
-        )
+        String.format(Locale.US, "%02d:%02d", remainingMinutes, seconds)
     }
 }
 
-@Composable
-fun rememberAnimatedColorScheme(target: ColorScheme): ColorScheme {
-    val spec = tween<Color>(durationMillis = 550)
-    val background by animateColorAsState(target.background, spec, label = "bg")
-    val surface by animateColorAsState(target.surface, spec, label = "surf")
-    val surfaceVariant by animateColorAsState(target.surfaceVariant, spec, label = "surfVar")
-    val onSurfaceVariant by animateColorAsState(target.onSurfaceVariant, spec, label = "onSurfVar")
-    val primary by animateColorAsState(target.primary, spec, label = "prim")
-    val secondary by animateColorAsState(target.secondary, spec, label = "sec")
-    val tertiary by animateColorAsState(target.tertiary, spec, label = "tert")
+// Splits a chapter's body text into screen-fitted pages so every swipe turns a single page
+fun paginateChapterText(
+    bodyText: String,
+    charsPerLine: Int,
+    linesPerPage: Int
+): List<String> {
+    val clean = bodyText.trim()
+    if (clean.isEmpty()) return listOf("")
 
-    return target.copy(
-        background = background,
-        surface = surface,
-        surfaceVariant = surfaceVariant,
-        onSurfaceVariant = onSurfaceVariant,
-        primary = primary,
-        secondary = secondary,
-        tertiary = tertiary
-    )
-}
+    val safeCharsPerLine = charsPerLine.coerceIn(24, 90)
+    val safeLinesPerPage = linesPerPage.coerceIn(10, 48)
 
-class LibraryViewModelFactory(private val repository: AudiobookRepository) : ViewModelProvider.Factory {
-    override fun <T : ViewModel> create(modelClass: Class<T>): T {
-        if (modelClass.isAssignableFrom(LibraryViewModel::class.java)) {
-            @Suppress("UNCHECKED_CAST")
-            return LibraryViewModel(repository) as T
-        }
-        throw IllegalArgumentException("Unknown ViewModel class")
-    }
-}
+    val pages = mutableListOf<String>()
+    val currentPage = StringBuilder()
+    var currentLines = 0
 
-class PlayerBinder(
-    val player: Player,
-    private val viewModel: LibraryViewModel,
-    private val appContext: Context
-) {
-    fun sendCustomCommand(action: String, enabled: Boolean) {
-        (player as? MediaController)?.sendCustomCommand(
-            SessionCommand(action, Bundle.EMPTY),
-            Bundle().apply { putBoolean(AudiobookPlaybackService.KEY_ENABLED, enabled) }
-        )
-    }
+    val paragraphs = clean.split(Regex("\\n\\s*\\n"))
+    for (para in paragraphs) {
+        val trimmedPara = para.trim()
+        if (trimmedPara.isEmpty()) continue
 
-    fun playBook(book: Audiobook, trackIndex: Int, positionMs: Long, autoPlay: Boolean) {
-        viewModel.repository.touchBookLastPlayed(book.id)
-        player.playWhenReady = autoPlay
-        player.stop()
-        player.clearMediaItems()
-        val artBytes = viewModel.repository.bitmapToJpegBytes(viewModel.currentCoverArt)
-        val mediaItems = buildBookMediaItems(book, artBytes)
-        player.setMediaItems(mediaItems)
-        val validIndex = if (trackIndex in mediaItems.indices) trackIndex else 0
-        viewModel.currentTrackIndex = validIndex
-        viewModel.currentPosition = positionMs.coerceAtLeast(0L)
-        player.seekTo(validIndex, positionMs.coerceAtLeast(0L))
-        player.prepare()
-    }
+        val words = trimmedPara.split(Regex("\\s+"))
+        val paraBuf = StringBuilder()
+        var lineChars = 0
 
-    fun updatePlayingArtwork(book: Audiobook, artworkBytes: ByteArray?) {
-        if (artworkBytes == null || artworkBytes.isEmpty() || player.mediaItemCount != book.tracks.size) return
-        try {
-            for (i in book.tracks.indices) {
-                val track = book.tracks[i]
-                val existing = player.getMediaItemAt(i)
-                if (existing.mediaMetadata.artworkData != null) continue
-                val updatedMeta = existing.mediaMetadata.buildUpon()
-                    .setTitle(book.title)
-                    .setArtist(book.author)
-                    .setAlbumTitle(book.series)
-                    .setDisplayTitle(track.name)
-                    .setArtworkData(artworkBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
-                    .build()
-                val updatedItem = MediaItem.Builder()
-                    .setUri(track.uri)
-                    .setMediaId(track.uri.toString())
-                    .setMediaMetadata(updatedMeta)
-                    .build()
-                player.replaceMediaItem(i, updatedItem)
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "Failed updating MediaSession artwork", t)
-        }
-    }
-
-    fun seekLive(positionMs: Long) {
-        val safePos = positionMs.coerceAtLeast(0L)
-        player.seekTo(safePos)
-        viewModel.currentPosition = safePos
-    }
-
-    fun seekAndPersist(trackIndex: Int = player.currentMediaItemIndex, positionMs: Long) {
-        val safePos = positionMs.coerceAtLeast(0L)
-        val safeTrack = trackIndex.coerceAtLeast(0)
-        player.seekTo(safeTrack, safePos)
-        viewModel.currentTrackIndex = safeTrack
-        viewModel.currentPosition = safePos
-        viewModel.saveProgressNow(viewModel.currentBookId, safeTrack, safePos)
-    }
-}
-
-class MainActivity : ComponentActivity() {
-    private lateinit var repository: AudiobookRepository
-    private lateinit var libraryViewModel: LibraryViewModel
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        repository = AudiobookRepository(applicationContext)
-        libraryViewModel = ViewModelProvider(this, LibraryViewModelFactory(repository))[LibraryViewModel::class.java]
-
-        setContent {
-            val context = LocalContext.current
-            var controller by remember { mutableStateOf<Player?>(null) }
-
-            DisposableEffect(context) {
-                val appCtx = context.applicationContext
-                val sessionToken = SessionToken(appCtx, ComponentName(appCtx, AudiobookPlaybackService::class.java))
-                val controllerFuture = MediaController.Builder(appCtx, sessionToken).buildAsync()
-                controllerFuture.addListener({
-                    try {
-                        controller = controllerFuture.get()
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "Failed connecting MediaController", t)
-                    }
-                }, ContextCompat.getMainExecutor(appCtx))
-                onDispose { MediaController.releaseFuture(controllerFuture) }
-            }
-
-            var isDarkTheme by remember {
-                mutableStateOf(repository.getPreferences().getBoolean("is_dark_theme", true))
-            }
-            var dynamicThemeEnabled by remember {
-                mutableStateOf(repository.getPreferences().getBoolean("dynamic_cover_theme", true))
-            }
-            var extractedPalette by remember { mutableStateOf<ExtractedCoverPalette?>(null) }
-
-            val activeThemeBitmap = if (libraryViewModel.shelfMode == "EBOOK" && libraryViewModel.currentEbookCoverArt != null) {
-                libraryViewModel.currentEbookCoverArt
+        for (word in words) {
+            val wordLen = word.length + if (lineChars > 0) 1 else 0
+            if (lineChars + wordLen > safeCharsPerLine) {
+                currentLines++
+                lineChars = word.length
+                if (currentLines >= safeLinesPerPage && paraBuf.isNotEmpty()) {
+                    if (currentPage.isNotEmpty()) currentPage.append("\n\n")
+                    currentPage.append(paraBuf.toString().trim())
+                    pages.add(currentPage.toString().trim())
+                    currentPage.clear()
+                    paraBuf.clear()
+                    currentLines = 1
+                }
             } else {
-                libraryViewModel.currentCoverArt
+                lineChars += wordLen
             }
+            if (paraBuf.isNotEmpty()) paraBuf.append(' ')
+            paraBuf.append(word)
+        }
 
-            LaunchedEffect(activeThemeBitmap, dynamicThemeEnabled) {
-                if (!dynamicThemeEnabled || activeThemeBitmap == null) {
-                    extractedPalette = null
-                } else {
-                    extractedPalette = withContext(Dispatchers.Default) {
-                        extractCoverPaletteFromBitmap(activeThemeBitmap)
-                    }
-                }
-            }
-
-            val targetColorScheme = remember(extractedPalette, isDarkTheme, dynamicThemeEnabled) {
-                buildDynamicColorScheme(
-                    palette = if (dynamicThemeEnabled) extractedPalette else null,
-                    isDarkTheme = isDarkTheme
-                )
-            }
-            val animatedColorScheme = rememberAnimatedColorScheme(targetColorScheme)
-
-            MaterialTheme(colorScheme = animatedColorScheme) {
-                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    if (controller != null) {
-                        val binder = remember(controller) {
-                            PlayerBinder(controller!!, libraryViewModel, context.applicationContext)
-                        }
-                        FablewoodAudiobookApp(
-                            binder = binder,
-                            viewModel = libraryViewModel,
-                            isDarkTheme = isDarkTheme,
-                            dynamicThemeEnabled = dynamicThemeEnabled,
-                            onToggleTheme = {
-                                isDarkTheme = !isDarkTheme
-                                repository.getPreferences().edit().putBoolean("is_dark_theme", isDarkTheme).apply()
-                            },
-                            onToggleDynamicTheme = { enabled ->
-                                dynamicThemeEnabled = enabled
-                                repository.getPreferences().edit().putBoolean("dynamic_cover_theme", enabled).apply()
-                            }
-                        )
-                    } else {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                        }
-                    }
-                }
+        if (paraBuf.isNotEmpty()) {
+            val addedLines = 1 + if (currentPage.isNotEmpty()) 1 else 0
+            if (currentLines + addedLines > safeLinesPerPage && currentPage.isNotEmpty()) {
+                pages.add(currentPage.toString().trim())
+                currentPage.clear()
+                currentPage.append(paraBuf.toString().trim())
+                currentLines = (paraBuf.length / safeCharsPerLine) + 1
+            } else {
+                if (currentPage.isNotEmpty()) currentPage.append("\n\n")
+                currentPage.append(paraBuf.toString().trim())
+                currentLines += addedLines
             }
         }
     }
-}
 
-private fun requiredAudioPermission(): String {
-    return if (Build.VERSION.SDK_INT >= 33) {
-        Manifest.permission.READ_MEDIA_AUDIO
-    } else {
-        Manifest.permission.READ_EXTERNAL_STORAGE
+    if (currentPage.isNotEmpty()) {
+        pages.add(currentPage.toString().trim())
     }
+
+    return if (pages.isEmpty()) listOf(clean) else pages
 }
 
-private fun hasAudioReadPermission(context: Context): Boolean {
-    return ContextCompat.checkSelfPermission(context, requiredAudioPermission()) == PackageManager.PERMISSION_GRANTED
-}
-
-private fun hasAllFilesAccess(): Boolean {
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        Environment.isExternalStorageManager()
-    } else {
-        true
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FablewoodAudiobookApp(
-    binder: PlayerBinder,
-    viewModel: LibraryViewModel,
-    isDarkTheme: Boolean,
-    dynamicThemeEnabled: Boolean,
-    onToggleTheme: () -> Unit,
-    onToggleDynamicTheme: (Boolean) -> Unit
+fun ShelfModeTogglePill(
+    shelfMode: String,
+    onSelectMode: (String) -> Unit
 ) {
-    val player = binder.player
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-
-    var targetCoverItemId by remember { mutableStateOf("") }
-    var showCoverOptionsDialog by remember { mutableStateOf(false) }
-    var liveCoverSearchQuery by remember { mutableStateOf("") }
-    var showAllFilesPermissionPrompt by remember { mutableStateOf(false) }
-
-    var showViewDialog by remember { mutableStateOf(false) }
-    var showSortDialog by remember { mutableStateOf(false) }
-    var showSettingsDialog by remember { mutableStateOf(false) }
-    var showAudioFXDialog by remember { mutableStateOf(false) }
-    var showChaptersDialog by remember { mutableStateOf(false) }
-    var showBookmarksDialog by remember { mutableStateOf(false) }
-    var showSpeedDialog by remember { mutableStateOf(false) }
-    var newBookmarkNoteText by remember { mutableStateOf("") }
-    var showAddBookmarkPrompt by remember { mutableStateOf(false) }
-    var showSleepMenu by remember { mutableStateOf(false) }
-    var showAnalyticsDialog by remember { mutableStateOf(false) }
-
-    var hasRequestedNotificationPermission by remember {
-        mutableStateOf(viewModel.repository.getPreferences().getBoolean("notif_perm_requested", false))
-    }
-
-    val notificationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        Log.i(TAG, "POST_NOTIFICATIONS permission result: $granted")
-    }
-
-    fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= 33 && !hasRequestedNotificationPermission) {
-            hasRequestedNotificationPermission = true
-            viewModel.repository.getPreferences().edit().putBoolean("notif_perm_requested", true).apply()
-            val status = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
-            if (status != PackageManager.PERMISSION_GRANTED) {
-                try {
-                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                } catch (t: Throwable) {
-                    Log.w(TAG, "Could not launch notification permission request", t)
-                }
-            }
-        }
-    }
-
-    fun runEbookAutoScan(showToast: Boolean) {
-        coroutineScope.launch {
-            try {
-                val scannedEbooks = viewModel.repository.scanDeviceForEbooks()
-                if (scannedEbooks.isNotEmpty()) {
-                    viewModel.ebooks = scannedEbooks
-                    val lastEbId = viewModel.repository.getLastEbookId()
-                    if (viewModel.currentEbookId.isEmpty() || scannedEbooks.none { it.id == viewModel.currentEbookId }) {
-                        val firstEb = scannedEbooks.find { it.id == lastEbId } ?: scannedEbooks.first()
-                        viewModel.selectEbook(firstEb, openFullScreen = false)
-                    } else {
-                        val currEb = scannedEbooks.find { it.id == viewModel.currentEbookId }
-                        if (currEb != null && viewModel.currentEbookChapters.size <= 1) {
-                            viewModel.selectEbook(currEb, openFullScreen = false)
-                        }
-                    }
-                }
-                if (showToast) {
-                    Toast.makeText(context, "Found ${scannedEbooks.size} eBook(s)", Toast.LENGTH_SHORT).show()
-                }
-            } catch (t: Throwable) {
-                Log.e(TAG, "eBook auto scan failed", t)
-            }
-        }
-    }
-
-    val manageStorageLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(50))
+            .padding(3.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        runEbookAutoScan(showToast = true)
-    }
+        val isAudio = shelfMode == "AUDIO"
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(if (isAudio) MaterialTheme.colorScheme.primary else Color.Transparent)
+                .clickable { onSelectMode("AUDIO") }
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Headphones,
+                contentDescription = null,
+                tint = if (isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                text = "Audio",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
 
-    fun launchAllFilesAccessSettings() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                    Uri.parse("package:${context.packageName}")
-                )
-                manageStorageLauncher.launch(intent)
-            } catch (_: Throwable) {
-                try {
-                    manageStorageLauncher.launch(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-                } catch (_: Throwable) {}
-            }
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(if (!isAudio) MaterialTheme.colorScheme.primary else Color.Transparent)
+                .clickable { onSelectMode("EBOOK") }
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.MenuBook,
+                contentDescription = null,
+                tint = if (!isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                text = "eBooks",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (!isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
+}
 
-    fun runAutoDeviceScan(explicitUserAction: Boolean) {
-        coroutineScope.launch {
-            try {
-                viewModel.repository.saveScanMode("AUTO")
-                viewModel.selectedFolderUri = "AUTO_SCAN"
-                val scannedBooks = viewModel.repository.scanDeviceForAudiobooks()
-                if (scannedBooks.isNotEmpty()) {
-                    viewModel.books = scannedBooks
-                    viewModel.repository.saveBooksCache(scannedBooks)
-                    val lastBookId = viewModel.repository.getLastBookId()
-                    if (viewModel.currentBookId.isEmpty() || scannedBooks.none { it.id == viewModel.currentBookId }) {
-                        val firstBook = scannedBooks.find { it.id == lastBookId } ?: scannedBooks.first()
-                        viewModel.selectBookMetadata(firstBook, isDifferentBook = true)
-                        val savedTrackIdx = viewModel.repository.getBookTrackIndex(firstBook.id)
-                        val savedPos = viewModel.repository.getBookPosition(firstBook.id)
-                        binder.playBook(firstBook, savedTrackIdx, savedPos, false)
-                    }
-                    FablewoodWidgetProvider.updateAllWidgets(context)
-                }
-
-                val scannedEbooks = viewModel.repository.scanDeviceForEbooks()
-                if (scannedEbooks.isNotEmpty()) {
-                    viewModel.ebooks = scannedEbooks
-                    val lastEbId = viewModel.repository.getLastEbookId()
-                    if (viewModel.currentEbookId.isEmpty() || scannedEbooks.none { it.id == viewModel.currentEbookId }) {
-                        val firstEb = scannedEbooks.find { it.id == lastEbId } ?: scannedEbooks.first()
-                        viewModel.selectEbook(firstEb, openFullScreen = false)
-                    }
-                }
-
-                if (explicitUserAction) {
-                    Toast.makeText(
-                        context,
-                        "Found ${scannedBooks.size} audiobook(s) & ${scannedEbooks.size} eBook(s)",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
-            } catch (t: Throwable) {
-                Log.e(TAG, "Auto device scan failed", t)
-                if (explicitUserAction) {
-                    Toast.makeText(context, context.getString(R.string.folder_scan_failed), Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
-    val audioPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            runAutoDeviceScan(explicitUserAction = true)
-        } else {
-            Toast.makeText(context, context.getString(R.string.audio_permission_denied), Toast.LENGTH_LONG).show()
-        }
-    }
-
-    fun triggerAutoScanWithPermission() {
-        if (hasAudioReadPermission(context)) {
-            runAutoDeviceScan(explicitUserAction = true)
-        } else {
-            try {
-                audioPermissionLauncher.launch(requiredAudioPermission())
-            } catch (t: Throwable) {
-                Log.w(TAG, "Could not launch audio permission request", t)
-            }
-        }
-    }
-
-    val epubFilePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
-        if (uris.isNotEmpty()) {
-            uris.forEach { uri ->
-                try {
-                    context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+@Composable
+fun FoldableSpineDivider() {
+    Box(
+        modifier = Modifier
+            .fillMaxHeight()
+            .width(10.dp)
+            .background(
+                Brush.horizontalGradient(
+                    colors = listOf(
+                        Color.Black.copy(alpha = 0.35f),
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
+                        Color.Black.copy(alpha = 0.35f)
                     )
-                } catch (_: Throwable) {}
-            }
-            coroutineScope.launch {
-                val updatedEbooks = viewModel.repository.importEpubUris(uris)
-                viewModel.ebooks = updatedEbooks
-                val newlyImported = updatedEbooks.find { it.uri == uris.first() } ?: updatedEbooks.firstOrNull()
-                if (newlyImported != null) {
-                    viewModel.updateShelfMode("EBOOK")
-                    viewModel.selectEbook(newlyImported, openFullScreen = true)
-                }
-                Toast.makeText(context, "Imported ${uris.size} eBook(s)", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
+                )
+            )
+    )
+}
 
-    val activeBook = remember(viewModel.books, viewModel.currentBookId) {
-        viewModel.books.find { it.id == viewModel.currentBookId }
-    }
-
-    val activeEbook = remember(viewModel.ebooks, viewModel.currentEbookId) {
-        viewModel.ebooks.find { it.id == viewModel.currentEbookId } ?: viewModel.ebooks.firstOrNull()
-    }
-
-    val customCoverLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let { selectedUri ->
-            if (targetCoverItemId.isNotEmpty()) {
-                viewModel.setCustomCover(targetCoverItemId, selectedUri) { success ->
-                    if (success) {
-                        Toast.makeText(context, "Custom cover saved!", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        }
-    }
-
-    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let {
-            val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-            try {
-                context.contentResolver.takePersistableUriPermission(it, takeFlags)
-            } catch (t: Throwable) {
-                Log.w(TAG, "Failed taking persistable read URI permission", t)
-            }
-            val uriStr = it.toString()
-            viewModel.repository.saveSelectedFolderUri(uriStr)
-            viewModel.repository.saveScanMode("FOLDER")
-            viewModel.selectedFolderUri = uriStr
-
-            coroutineScope.launch {
-                try {
-                    val scannedBooks = viewModel.repository.scanFolderForAudiobooks(it)
-                    viewModel.books = scannedBooks
-                    viewModel.repository.saveBooksCache(scannedBooks)
-
-                    if (scannedBooks.isNotEmpty()) {
-                        val selectedBook = scannedBooks[0]
-                        viewModel.selectBookMetadata(selectedBook, isDifferentBook = true)
-                        val savedTrackIdx = viewModel.repository.getBookTrackIndex(selectedBook.id)
-                        val savedPos = viewModel.repository.getBookPosition(selectedBook.id)
-                        binder.playBook(selectedBook, savedTrackIdx, savedPos, false)
-                        FablewoodWidgetProvider.updateAllWidgets(context)
-                    }
-
-                    val folderEbooks = viewModel.repository.scanFolderForEbooks(it)
-                    if (folderEbooks.isNotEmpty()) {
-                        viewModel.ebooks = folderEbooks
-                        viewModel.repository.saveEbooksCache(folderEbooks)
-                    }
-                } catch (t: Throwable) {
-                    Log.e(TAG, "Explicit folder scan threw an error", t)
-                    Toast.makeText(context, context.getString(R.string.folder_scan_failed), Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
-    BackHandler(enabled = viewModel.isCarModeActive || viewModel.isPlayerFullScreen || viewModel.isEbookReaderFullScreen) {
-        when {
-            viewModel.isCarModeActive -> viewModel.isCarModeActive = false
-            viewModel.isEbookReaderFullScreen -> viewModel.isEbookReaderFullScreen = false
-            else -> viewModel.isPlayerFullScreen = false
-        }
-    }
-
-    LaunchedEffect(viewModel.playbackSpeed, viewModel.playbackPitch) {
-        player.playbackParameters = PlaybackParameters(viewModel.playbackSpeed, viewModel.playbackPitch)
-    }
-
-    LaunchedEffect(viewModel.silenceTrimEnabled) {
-        binder.sendCustomCommand(AudiobookPlaybackService.ACTION_SET_SILENCE_TRIM, viewModel.silenceTrimEnabled)
-    }
-
-    LaunchedEffect(viewModel.volumeBoostEnabled) {
-        binder.sendCustomCommand(AudiobookPlaybackService.ACTION_SET_VOLUME_BOOST, viewModel.volumeBoostEnabled)
-    }
-
-    LaunchedEffect(viewModel.currentCoverArt, activeBook?.id) {
-        val book = activeBook ?: return@LaunchedEffect
-        val bmp = viewModel.currentCoverArt ?: return@LaunchedEffect
-        val jpegBytes = viewModel.repository.bitmapToJpegBytes(bmp)
-        binder.updatePlayingArtwork(book, jpegBytes)
-        FablewoodWidgetProvider.updateAllWidgets(
-            context = context,
-            isPlayingOverride = viewModel.isPlaying,
-            titleOverride = book.title,
-            authorOverride = book.author
+@Composable
+fun ContrastThemeIcon(
+    tint: Color = MaterialTheme.colorScheme.primary,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val strokeWidth = 2.dp.toPx()
+        val radius = (size.minDimension / 2f) - strokeWidth
+        val center = Offset(size.width / 2f, size.height / 2f)
+        drawCircle(color = tint, radius = radius, center = center, style = Stroke(width = strokeWidth))
+        val innerRadius = (radius - (strokeWidth / 2f)).coerceAtLeast(0f)
+        drawArc(
+            color = tint,
+            startAngle = 90f,
+            sweepAngle = 180f,
+            useCenter = true,
+            topLeft = Offset(center.x - innerRadius, center.y - innerRadius),
+            size = Size(innerRadius * 2f, innerRadius * 2f)
         )
     }
+}
 
-    LaunchedEffect(Unit) {
-        val lastBookId = viewModel.repository.getLastBookId()
-        val initialBook = viewModel.books.find { b -> b.id == lastBookId } ?: viewModel.books.firstOrNull()
-
-        if (initialBook != null && viewModel.currentBookId.isEmpty()) {
-            viewModel.selectBookMetadata(initialBook, isDifferentBook = true)
-            if (player.mediaItemCount > 0) {
-                viewModel.isPlaying = player.isPlaying
-                viewModel.currentTrackIndex = player.currentMediaItemIndex
-                viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
-                viewModel.duration = player.duration.coerceAtLeast(0L)
-            } else {
-                val savedTrackIdx = viewModel.repository.getBookTrackIndex(initialBook.id)
-                val savedPos = viewModel.repository.getBookPosition(initialBook.id)
-                val lastPauseTime = viewModel.repository.getPreferences().getLong("last_pause_time", 0L)
-                val rewindPos = calculateSmartRewindPos(savedPos, lastPauseTime)
-                binder.playBook(initialBook, savedTrackIdx, rewindPos, false)
-            }
-        }
-
-        val lastEbookId = viewModel.repository.getLastEbookId()
-        val initialEbook = viewModel.ebooks.find { it.id == lastEbookId } ?: viewModel.ebooks.firstOrNull()
-        if (initialEbook != null && viewModel.currentEbookChapters.isEmpty()) {
-            viewModel.selectEbook(initialEbook, openFullScreen = false)
-        }
-
-        val scanMode = viewModel.repository.getScanMode()
-        val savedUriStr = viewModel.repository.getSelectedFolderUri()
-
-        if (scanMode == "FOLDER" && !savedUriStr.isNullOrEmpty()) {
-            viewModel.selectedFolderUri = savedUriStr
-            try {
-                val folderUri = Uri.parse(savedUriStr)
-                val scannedBooks = viewModel.repository.scanFolderForAudiobooks(folderUri)
-                if (scannedBooks.isNotEmpty()) {
-                    viewModel.books = scannedBooks
-                    viewModel.repository.saveBooksCache(scannedBooks)
-                    if (viewModel.currentBookId.isEmpty()) {
-                        val firstBook = scannedBooks.find { b -> b.id == lastBookId } ?: scannedBooks.first()
-                        viewModel.selectBookMetadata(firstBook, isDifferentBook = true)
-                        val savedTrackIdx = viewModel.repository.getBookTrackIndex(firstBook.id)
-                        val savedPos = viewModel.repository.getBookPosition(firstBook.id)
-                        binder.playBook(firstBook, savedTrackIdx, savedPos, false)
-                    }
-                }
-                val folderEbooks = viewModel.repository.scanFolderForEbooks(folderUri)
-                if (folderEbooks.isNotEmpty()) {
-                    viewModel.ebooks = folderEbooks
-                    viewModel.repository.saveEbooksCache(folderEbooks)
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "Launch folder refresh failed; preserving cached library", t)
-            }
-        } else {
-            if (hasAudioReadPermission(context)) {
-                runAutoDeviceScan(explicitUserAction = false)
-            } else if (viewModel.books.isEmpty()) {
-                triggerAutoScanWithPermission()
-            }
-        }
-    }
-
-    LaunchedEffect(viewModel.sleepTimerActive, viewModel.sleepEndAtChapter, viewModel.isPlaying, viewModel.sleepTimerVersion) {
-        if (viewModel.sleepTimerActive && viewModel.isPlaying && !viewModel.sleepEndAtChapter) {
-            while (viewModel.sleepTimerActive && !viewModel.sleepEndAtChapter && viewModel.sleepTimeRemaining > 0L) {
-                delay(1000L)
-                val next = (viewModel.sleepTimeRemaining - 1000L).coerceAtLeast(0L)
-                viewModel.sleepTimeRemaining = next
-                if (next <= 0L) {
-                    player.pause()
-                    viewModel.cancelSleepTimer()
-                    break
-                }
-            }
-        }
-    }
-
-    LaunchedEffect(viewModel.isPlaying) {
-        var ticksSinceSave = 0
-        while (viewModel.isPlaying) {
-            viewModel.currentTrackIndex = player.currentMediaItemIndex
-            viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
-            if (player.duration > 0L) {
-                viewModel.duration = player.duration.coerceAtLeast(0L)
-            }
-
-            if (viewModel.sleepTimerActive && viewModel.sleepEndAtChapter) {
-                val currChap = getCurrentChapter(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex)
-                val chapEndMs = if (currChap != null && currChap.durationMs > 0L) {
-                    currChap.startMs + currChap.durationMs
+@Composable
+fun MiniPlayerBar(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    chapterTitle: String,
+    isPlaying: Boolean,
+    onPlayPause: () -> Unit,
+    onOpenPlayer: () -> Unit
+) {
+    Surface(
+        tonalElevation = 6.dp,
+        shadowElevation = 8.dp,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .clickable { onOpenPlayer() }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surface),
+                contentAlignment = Alignment.Center
+            ) {
+                if (coverArt != null) {
+                    Image(
+                        bitmap = coverArt,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 } else {
-                    viewModel.duration
-                }
-                if (chapEndMs > 0L && viewModel.currentPosition >= chapEndMs - 1500L) {
-                    player.pause()
-                    viewModel.cancelSleepTimer()
-                }
-            }
-
-            delay(1000L)
-            viewModel.totalListenMs += 1000L
-            ticksSinceSave++
-
-            activeBook?.let { b ->
-                if (ticksSinceSave >= 10) {
-                    ticksSinceSave = 0
-                    viewModel.repository.saveBookProgress(
-                        b.id,
-                        viewModel.currentTrackIndex,
-                        viewModel.currentPosition,
-                        viewModel.totalListenMs,
-                        immediate = false
+                    Icon(
+                        imageVector = Icons.Default.Headphones,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
-                val isLastTrack = !player.hasNextMediaItem()
-                if (isLastTrack && viewModel.duration > 0L && viewModel.currentPosition >= viewModel.duration - 2000L) {
-                    if (viewModel.repository.markBookCompleted(b.id)) {
-                        viewModel.completedBooksCount = viewModel.repository.loadCompletedBookIds().size
-                        viewModel.progressRevision++
-                    }
-                }
-            }
-        }
-    }
-
-    DisposableEffect(player) {
-        val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(playing: Boolean) {
-                viewModel.isPlaying = playing
-                if (!playing) {
-                    viewModel.repository.markPauseTime()
-                    if (player.mediaItemCount > 0) {
-                        activeBook?.let { b ->
-                            viewModel.saveProgressNow(b.id, player.currentMediaItemIndex, player.currentPosition)
-                        }
-                    }
-                }
             }
 
-            override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_READY) {
-                    viewModel.duration = player.duration.coerceAtLeast(0L)
-                }
-            }
+            Spacer(Modifier.width(12.dp))
 
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                viewModel.currentTrackIndex = player.currentMediaItemIndex
-                viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
-                if (player.duration > 0L) {
-                    viewModel.duration = player.duration.coerceAtLeast(0L)
-                }
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                Log.e(TAG, "ExoPlayer error", error)
-                Toast.makeText(context, "Playback error: ${error.localizedMessage}", Toast.LENGTH_LONG).show()
-            }
-        }
-        player.addListener(listener)
-        onDispose { player.removeListener(listener) }
-    }
-
-    val currentChapter = getCurrentChapter(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex)
-    val currentChapterIndex = getCurrentChapterIndex(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex)
-
-    val isMultiFileActive = activeBook != null && activeBook.tracks.size > 1
-    val totalBookDurationMs = if (isMultiFileActive && viewModel.currentBookTrackDurations.isNotEmpty()) {
-        val sum = bookDurationMs(viewModel.currentBookTrackDurations)
-        if (sum > 0L) sum else viewModel.duration
-    } else {
-        viewModel.duration
-    }
-    val totalBookReadMs = if (isMultiFileActive && viewModel.currentBookTrackDurations.isNotEmpty()) {
-        bookOffsetMs(viewModel.currentBookTrackDurations, viewModel.currentTrackIndex, viewModel.currentPosition)
-    } else {
-        viewModel.currentPosition
-    }
-
-    val togglePlayPause = {
-        if (viewModel.isPlaying) {
-            player.pause()
-        } else {
-            requestNotificationPermissionIfNeeded()
-            activeBook?.let { viewModel.repository.touchBookLastPlayed(it.id) }
-            player.play()
-        }
-    }
-
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
-                Spacer(Modifier.height(24.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = stringResource(R.string.app_header_title),
-                    style = MaterialTheme.typography.headlineSmall,
-                    modifier = Modifier.padding(16.dp),
+                    text = book.title,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
-                HorizontalDivider()
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
-                    label = { Text(stringResource(R.string.scan_device_audiobooks)) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        if (!hasAllFilesAccess()) {
-                            showAllFilesPermissionPrompt = true
-                        }
-                        triggerAutoScanWithPermission()
-                    }
+                Text(
+                    text = chapterTitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
-                    label = { Text("Import .epub / .pdf eBook(s)") },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        epubFilePicker.launch(arrayOf("application/epub+zip", "application/pdf", "*/*"))
-                    }
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
-                    label = { Text(stringResource(R.string.select_audiobook_folder)) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        folderPicker.launch(null)
-                    }
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.ImageSearch, contentDescription = null) },
-                    label = {
-                        Text(
-                            if (viewModel.isBatchFetchingCovers) "Finding Missing Covers..."
-                            else "Auto-Find Missing Covers"
-                        )
-                    },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        Toast.makeText(context, "Searching online for missing covers...", Toast.LENGTH_SHORT).show()
-                        viewModel.autoFillMissingCovers { count ->
-                            Toast.makeText(context, "Updated $count book cover(s)", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.GraphicEq, contentDescription = null) },
-                    label = { Text(stringResource(R.string.audio_fx)) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        showAudioFXDialog = true
-                    }
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                    label = { Text(stringResource(R.string.settings)) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        showSettingsDialog = true
-                    }
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.Analytics, contentDescription = null) },
-                    label = { Text(stringResource(R.string.listening_stats)) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        showAnalyticsDialog = true
-                    }
+            }
+
+            IconButton(onClick = onPlayPause) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = "Play/Pause",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(32.dp)
                 )
             }
         }
-    ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val isFoldableUnfolded = maxWidth >= 600.dp
+    }
+}
 
-            @Composable
-            fun RenderNowPlaying(isEmbedded: Boolean) {
-                if (activeBook == null) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("Select an audiobook on the left page to begin listening.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    return
+@Composable
+fun CarModeScreen(
+    book: Audiobook,
+    chapterTitle: String,
+    isPlaying: Boolean,
+    skipIntervalSeconds: Int,
+    onPlayPause: () -> Unit,
+    onQuickRewind: () -> Unit,
+    onQuickForward: () -> Unit,
+    onAddBookmark: () -> Unit,
+    onExitCarMode: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF08120E))
+            .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.DirectionsCar, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(36.dp))
+                Spacer(Modifier.width(12.dp))
+                Text(stringResource(R.string.car_mode), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
+            }
+            IconButton(
+                onClick = onExitCarMode,
+                modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xFF1A3324))
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Exit Car Mode", tint = Color.White, modifier = Modifier.size(28.dp))
+            }
+        }
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 16.dp)) {
+            Text(
+                text = book.title,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = chapterTitle,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onQuickRewind,
+                modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF12241C))
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Replay, contentDescription = "Rewind", tint = Color.White, modifier = Modifier.size(48.dp))
+                    Text(
+                        text = "$skipIntervalSeconds",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 3.dp)
+                    )
                 }
-                NowPlayingScreen(
-                    book = activeBook,
-                    coverArt = viewModel.currentCoverArt?.asImageBitmap(),
-                    chapterTitle = currentChapter?.title ?: getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex),
-                    isPlaying = viewModel.isPlaying,
-                    currentPosition = viewModel.currentPosition,
-                    duration = viewModel.duration,
-                    bookPositionMs = totalBookReadMs,
-                    bookDurationMs = totalBookDurationMs,
-                    skipIntervalSeconds = viewModel.skipIntervalSeconds,
-                    silenceTrimEnabled = viewModel.silenceTrimEnabled,
-                    sleepTimerActive = viewModel.sleepTimerActive,
-                    sleepTimeRemaining = viewModel.sleepTimeRemaining,
-                    sleepEndAtChapter = viewModel.sleepEndAtChapter,
-                    isDarkTheme = isDarkTheme,
-                    playerVolume = viewModel.playerVolume,
-                    playbackSpeed = viewModel.playbackSpeed,
-                    isEmbeddedPane = isEmbedded,
-                    onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
-                    onBackToBookshelf = {
-                        viewModel.saveProgressNow(activeBook.id, player.currentMediaItemIndex, player.currentPosition)
-                        viewModel.isPlayerFullScreen = !viewModel.isPlayerFullScreen
-                    },
-                    onPlayPause = togglePlayPause,
-                    onSeekLive = { pos -> binder.seekLive(pos) },
-                    onSeekFinished = { pos -> binder.seekAndPersist(player.currentMediaItemIndex, pos) },
-                    onSkipPrevChapter = {
-                        val chapters = viewModel.chaptersList
-                        if (chapters.isNotEmpty()) {
-                            val currChap = chapters.getOrNull(currentChapterIndex)
-                            if (currChap != null && viewModel.currentPosition - currChap.startMs > 3000L) {
-                                binder.seekAndPersist(currChap.trackIndex, currChap.startMs)
-                            } else if (currentChapterIndex > 0) {
-                                val prevChap = chapters[currentChapterIndex - 1]
-                                binder.seekAndPersist(prevChap.trackIndex, prevChap.startMs)
-                            } else {
-                                binder.seekAndPersist(0, 0L)
-                            }
-                        } else {
-                            player.seekToPreviousMediaItem()
-                            viewModel.saveProgressNow(activeBook.id, player.currentMediaItemIndex, player.currentPosition)
-                        }
-                    },
-                    onSkipNextChapter = {
-                        val chapters = viewModel.chaptersList
-                        if (chapters.isNotEmpty() && currentChapterIndex + 1 < chapters.size) {
-                            val nextChap = chapters[currentChapterIndex + 1]
-                            binder.seekAndPersist(nextChap.trackIndex, nextChap.startMs)
-                        } else if (player.hasNextMediaItem()) {
-                            player.seekToNextMediaItem()
-                            viewModel.saveProgressNow(activeBook.id, player.currentMediaItemIndex, player.currentPosition)
-                        }
-                    },
-                    onQuickRewind = {
-                        val newPos = (player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)).coerceAtLeast(0L)
-                        binder.seekAndPersist(player.currentMediaItemIndex, newPos)
-                    },
-                    onQuickForward = {
-                        val maxDur = if (viewModel.duration > 0L) viewModel.duration else Long.MAX_VALUE
-                        val newPos = (player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)).coerceAtMost(maxDur)
-                        binder.seekAndPersist(player.currentMediaItemIndex, newPos)
-                    },
-                    onToggleSilenceTrim = { viewModel.setSilenceTrim(!viewModel.silenceTrimEnabled) },
-                    onOpenSleepMenu = { showSleepMenu = true },
-                    onToggleTheme = onToggleTheme,
-                    onOpenAudioFX = { showAudioFXDialog = true },
-                    onOpenChapters = { showChaptersDialog = true },
-                    onOpenBookmarks = { showBookmarksDialog = true },
-                    onOpenSpeed = { showSpeedDialog = true },
-                    onEnterCarMode = { viewModel.isCarModeActive = true },
-                    onVolumeChange = { vol ->
-                        viewModel.playerVolume = vol
-                        player.volume = vol
-                    },
-                    chapterStartMs = currentChapter?.startMs ?: 0L,
-                    chapterDurationMs = currentChapter?.durationMs ?: 0L
+            }
+
+            IconButton(onClick = onPlayPause, modifier = Modifier.size(128.dp)) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = "Play/Pause",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(96.dp)
                 )
             }
 
-            @Composable
-            fun RenderShelfScaffold(showBottomMiniPlayer: Boolean) {
-                Scaffold(
-                    topBar = {
-                        CenterAlignedTopAppBar(
-                            title = {
-                                ShelfModeTogglePill(
-                                    shelfMode = viewModel.shelfMode,
-                                    onSelectMode = { mode ->
-                                        viewModel.updateShelfMode(mode)
-                                        if (mode == "EBOOK") {
-                                            if (!hasAllFilesAccess()) {
-                                                showAllFilesPermissionPrompt = true
-                                            }
-                                            runEbookAutoScan(showToast = false)
-                                        } else {
-                                            if (hasAudioReadPermission(context)) {
-                                                runAutoDeviceScan(explicitUserAction = false)
-                                            }
-                                        }
-                                    }
-                                )
-                            },
-                            navigationIcon = {
-                                IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
-                                    Icon(Icons.Default.Menu, contentDescription = "Menu")
-                                }
-                            },
-                            actions = {
-                                if (viewModel.shelfMode == "EBOOK") {
-                                    IconButton(onClick = { epubFilePicker.launch(arrayOf("application/epub+zip", "application/pdf", "*/*")) }) {
-                                        Icon(Icons.Default.FileOpen, contentDescription = "Import .epub / .pdf", tint = MaterialTheme.colorScheme.primary)
-                                    }
-                                }
-                                IconButton(onClick = {
-                                    viewModel.isSearching = !viewModel.isSearching
-                                    if (!viewModel.isSearching) viewModel.searchQuery = ""
-                                }) {
-                                    Icon(Icons.Default.Search, contentDescription = "Search")
-                                }
-                                IconButton(onClick = { showViewDialog = true }) {
-                                    Icon(if (viewModel.viewMode == "GRID") Icons.Default.GridView else Icons.Default.ViewList, contentDescription = stringResource(R.string.view_mode))
-                                }
-                                IconButton(onClick = { showSortDialog = true }) {
-                                    Icon(Icons.Default.Sort, contentDescription = stringResource(R.string.sort_library_by))
-                                }
-                            }
-                        )
+            IconButton(
+                onClick = onQuickForward,
+                modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF12241C))
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.RotateRight, contentDescription = "Forward", tint = Color.White, modifier = Modifier.size(48.dp))
+                    Text(
+                        text = "$skipIntervalSeconds",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 3.dp)
+                    )
+                }
+            }
+        }
+
+        Button(
+            onClick = onAddBookmark,
+            modifier = Modifier.fillMaxWidth().height(60.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A3324))
+        ) {
+            Icon(Icons.Default.BookmarkAdd, contentDescription = null, tint = Color.White, modifier = Modifier.size(28.dp))
+            Spacer(Modifier.width(12.dp))
+            Text(stringResource(R.string.drop_bookmark_pin), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
+        }
+    }
+}
+
+@Composable
+fun BookshelfContent(
+    books: List<Audiobook>,
+    activeBookId: String,
+    activeBookProgress: Float,
+    activeBookSubtitle: String,
+    hasSelectedFolder: Boolean,
+    viewMode: String,
+    viewModel: LibraryViewModel,
+    onAutoScanDevice: () -> Unit,
+    onChooseFolder: () -> Unit,
+    onSelectBook: (Audiobook) -> Unit,
+    onLongPressBook: (Audiobook) -> Unit
+) {
+    if (books.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    imageVector = Icons.Default.LibraryMusic,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = if (!hasSelectedFolder) {
+                        stringResource(R.string.no_folder_selected)
+                    } else {
+                        stringResource(R.string.no_supported_audio_files)
                     },
-                    bottomBar = {
-                        if (showBottomMiniPlayer && activeBook != null) {
-                            MiniPlayerBar(
-                                book = activeBook,
-                                coverArt = viewModel.currentCoverArt?.asImageBitmap(),
-                                chapterTitle = currentChapter?.title ?: getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex),
-                                isPlaying = viewModel.isPlaying,
-                                onPlayPause = togglePlayPause,
-                                onOpenPlayer = { viewModel.isPlayerFullScreen = true }
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(20.dp))
+                Button(
+                    onClick = onAutoScanDevice,
+                    modifier = Modifier.fillMaxWidth(0.85f)
+                ) {
+                    Icon(Icons.Default.LibraryMusic, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.scan_device_audiobooks))
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = onChooseFolder,
+                    modifier = Modifier.fillMaxWidth(0.85f)
+                ) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.choose_audiobook_folder))
+                }
+            }
+        }
+    } else if (viewMode == "GRID") {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = 145.dp),
+            contentPadding = PaddingValues(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            items(count = books.size, key = { idx -> books[idx].id }) { index ->
+                val book = books[index]
+                val isSelected = book.id == activeBookId
+                BookCardWrapper(
+                    book = book,
+                    isSelected = isSelected,
+                    liveProgress = if (isSelected) activeBookProgress else null,
+                    liveSubtitle = if (isSelected) activeBookSubtitle else null,
+                    viewMode = "GRID",
+                    viewModel = viewModel,
+                    onSelectBook = onSelectBook,
+                    onLongPressBook = onLongPressBook
+                )
+            }
+        }
+    } else {
+        LazyColumn(
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(count = books.size, key = { idx -> books[idx].id }) { index ->
+                val book = books[index]
+                val isSelected = book.id == activeBookId
+                BookCardWrapper(
+                    book = book,
+                    isSelected = isSelected,
+                    liveProgress = if (isSelected) activeBookProgress else null,
+                    liveSubtitle = if (isSelected) activeBookSubtitle else null,
+                    viewMode = "LIST",
+                    viewModel = viewModel,
+                    onSelectBook = onSelectBook,
+                    onLongPressBook = onLongPressBook
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun EbookShelfContent(
+    ebooks: List<Ebook>,
+    activeEbookId: String,
+    viewMode: String,
+    viewModel: LibraryViewModel,
+    onScanDeviceEbooks: () -> Unit,
+    onImportEpubFiles: () -> Unit,
+    onSelectEbook: (Ebook) -> Unit,
+    onLongPressEbook: (Ebook) -> Unit
+) {
+    if (ebooks.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    imageVector = Icons.Default.MenuBook,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "Scan your Downloads & Books folders for eBooks (.epub, .azw3, .mobi, .pdf novels, .cbz & more), or import files directly.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(20.dp))
+                Button(
+                    onClick = onScanDeviceEbooks,
+                    modifier = Modifier.fillMaxWidth(0.85f)
+                ) {
+                    Icon(Icons.Default.Search, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Scan Device (Downloads & Books)")
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = onImportEpubFiles,
+                    modifier = Modifier.fillMaxWidth(0.85f)
+                ) {
+                    Icon(Icons.Default.FileOpen, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Import eBook File(s)")
+                }
+            }
+        }
+    } else if (viewMode == "GRID") {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = 145.dp),
+            contentPadding = PaddingValues(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            items(count = ebooks.size, key = { idx -> ebooks[idx].id }) { index ->
+                val ebook = ebooks[index]
+                EbookCardWrapper(
+                    ebook = ebook,
+                    isSelected = ebook.id == activeEbookId,
+                    viewMode = "GRID",
+                    viewModel = viewModel,
+                    onSelectEbook = onSelectEbook,
+                    onLongPressEbook = onLongPressEbook
+                )
+            }
+        }
+    } else {
+        LazyColumn(
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(count = ebooks.size, key = { idx -> ebooks[idx].id }) { index ->
+                val ebook = ebooks[index]
+                EbookCardWrapper(
+                    ebook = ebook,
+                    isSelected = ebook.id == activeEbookId,
+                    viewMode = "LIST",
+                    viewModel = viewModel,
+                    onSelectEbook = onSelectEbook,
+                    onLongPressEbook = onLongPressEbook
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun EbookCardWrapper(
+    ebook: Ebook,
+    isSelected: Boolean,
+    viewMode: String,
+    viewModel: LibraryViewModel,
+    onSelectEbook: (Ebook) -> Unit,
+    onLongPressEbook: (Ebook) -> Unit
+) {
+    var cardArt by remember(ebook.id, viewModel.coverRevision) { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(ebook.id, viewModel.coverRevision) {
+        val bmp = viewModel.repository.getOrFetchEbookCoverArt(ebook)
+        cardArt = bmp?.asImageBitmap()
+    }
+
+    val totalChaps = remember(ebook.id, viewModel.progressRevision) {
+        viewModel.repository.getEbookTotalChapters(ebook.id)
+    }
+    val currChap = remember(ebook.id, viewModel.progressRevision) {
+        viewModel.repository.getEbookChapterIndex(ebook.id)
+    }
+    val progress = if (totalChaps > 0) ((currChap + 1).toFloat() / totalChaps).coerceIn(0.02f, 1f) else 0f
+    val isVisualPageFormat = ebook.format.uppercase(Locale.ROOT) in VISUAL_PAGE_EBOOK_FORMATS
+    val unitLabel = if (isVisualPageFormat) "Section" else "Chapter"
+    val subtitle = if (totalChaps > 0) "$unitLabel ${currChap + 1} of $totalChaps" else "${ebook.format} eBook"
+
+    if (viewMode == "GRID") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { onSelectEbook(ebook) },
+                    onLongClick = { onLongPressEbook(ebook) }
+                )
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                if (cardArt != null) {
+                    Image(bitmap = cardArt!!, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else {
+                    Icon(Icons.Default.MenuBook, contentDescription = null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary)
+                }
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(8.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color.Black.copy(alpha = 0.65f))
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                ) {
+                    Text(ebook.format, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+
+                if (progress > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth(progress)
+                            .height(4.dp)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(ebook.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(ebook.author, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+    } else {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { onSelectEbook(ebook) },
+                    onLongClick = { onLongPressEbook(ebook) }
+                ),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+            ),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (cardArt != null) {
+                        Image(bitmap = cardArt!!, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    } else {
+                        Icon(Icons.Default.MenuBook, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
+                Spacer(Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(ebook.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(ebook.author, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                    Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                }
+                Icon(Icons.Default.MenuBook, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+fun EpubReaderScreen(
+    ebook: Ebook,
+    repository: AudiobookRepository,
+    chapters: List<EbookChapter>,
+    currentChapterIndex: Int,
+    isLoading: Boolean,
+    fontSizeSp: Float,
+    readerTheme: String,
+    isEmbeddedPane: Boolean = false,
+    isFullScreen: Boolean = false,
+    onToggleFullScreen: (() -> Unit)? = null,
+    onBackToShelf: () -> Unit,
+    onSelectChapter: (Int) -> Unit,
+    onUpdateFontSize: (Float) -> Unit,
+    onUpdateTheme: (String) -> Unit,
+    onReloadEbook: () -> Unit = {}
+) {
+    val fmtUpper = ebook.format.uppercase(Locale.ROOT)
+    val currentChapter = chapters.getOrNull(currentChapterIndex)
+    // A chapter is rendered in Reflowed Text Mode whenever bodyText is non-blank (including reflowed PDFs!)
+    val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
+
+    val bgColor = when (readerTheme) {
+        "SEPIA" -> Color(0xFFF4ECD8)
+        "LIGHT" -> Color(0xFFFAFAFA)
+        else -> Color(0xFF0C1A14)
+    }
+    val curlBackMidColor = when (readerTheme) {
+        "SEPIA" -> Color(0xFFE4D5B7)
+        "LIGHT" -> Color(0xFFE8ECE9)
+        else -> Color(0xFF183327)
+    }
+    val curlBackHighlightColor = when (readerTheme) {
+        "SEPIA" -> Color(0xFFFBF6EC)
+        "LIGHT" -> Color(0xFFFFFFFF)
+        else -> Color(0xFF244938)
+    }
+    val textColor = when (readerTheme) {
+        "SEPIA" -> Color(0xFF3B2F2F)
+        "LIGHT" -> Color(0xFF1C2420)
+        else -> Color(0xFFE8F0EC)
+    }
+    val accentColor = when (readerTheme) {
+        "SEPIA" -> Color(0xFF8B5A2B)
+        "LIGHT" -> Color(0xFF2D5A27)
+        else -> Color(0xFFD4AF37)
+    }
+
+    var showTocDialog by remember { mutableStateOf(false) }
+    var showReaderSettings by remember { mutableStateOf(false) }
+    var pdfOriginalPageMode by remember {
+        mutableStateOf(repository.getPreferences().getBoolean("pdf_original_page_mode", false))
+    }
+
+    // Sub-page state within the current chapter for single-page turning
+    var subPageIndex by remember(ebook.id, currentChapterIndex) { mutableIntStateOf(0) }
+    var startAtLastSubPage by remember { mutableStateOf(false) }
+
+    var renderedPageBitmap by remember(ebook.id, currentChapterIndex, readerTheme) { mutableStateOf<Bitmap?>(null) }
+    var nextPageBitmap by remember(ebook.id, currentChapterIndex, readerTheme) { mutableStateOf<Bitmap?>(null) }
+    var prevPageBitmap by remember(ebook.id, currentChapterIndex, readerTheme) { mutableStateOf<Bitmap?>(null) }
+    var isRenderingVisualPage by remember(ebook.id, currentChapterIndex) { mutableStateOf(false) }
+
+    val coroutineScope = rememberCoroutineScope()
+    // curlAnim: 0f = flat page, +0.01..+1f = curling forward (Next), -0.01..-1f = curling backward (Prev)
+    val curlAnim = remember { Animatable(0f) }
+
+    LaunchedEffect(currentChapterIndex, ebook.id, isVisualPageMode, readerTheme) {
+        if (isVisualPageMode) {
+            isRenderingVisualPage = true
+            renderedPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex, 1400, readerTheme)
+            isRenderingVisualPage = false
+            // Pre-render adjacent pages for smooth page-curl preview
+            if (currentChapterIndex + 1 < chapters.size) {
+                nextPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex + 1, 1200, readerTheme)
+            }
+            if (currentChapterIndex > 0) {
+                prevPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex - 1, 1200, readerTheme)
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(bgColor)
+            .let { if (!isEmbeddedPane) it.windowInsetsPadding(WindowInsets.systemBars) else it }
+    ) {
+        // Top Reader Bar
+        Surface(
+            color = bgColor,
+            tonalElevation = 2.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                if (!isEmbeddedPane) {
+                    IconButton(onClick = onBackToShelf) {
+                        Icon(Icons.Default.ChevronLeft, contentDescription = "Back", tint = accentColor)
+                    }
+                } else if (onToggleFullScreen != null) {
+                    IconButton(onClick = onToggleFullScreen) {
+                        Icon(
+                            imageVector = if (isFullScreen) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
+                            contentDescription = "Toggle Full Screen",
+                            tint = accentColor
+                        )
+                    }
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 8.dp)
+                        .clickable { showTocDialog = true },
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = ebook.title,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        color = textColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = currentChapter?.title ?: if (isVisualPageMode) "Page ${currentChapterIndex + 1}" else "Loading...",
+                        fontSize = 12.sp,
+                        color = accentColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { showTocDialog = true }) {
+                        Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters / Pages", tint = accentColor)
+                    }
+                    IconButton(onClick = { showReaderSettings = true }) {
+                        Icon(Icons.Default.FormatSize, contentDescription = "Reader Appearance", tint = accentColor)
+                    }
+                }
+            }
+        }
+
+        HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
+
+        // Main Interactive 3D Page-Curl Reading Canvas
+        BoxWithConstraints(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(bgColor)
+        ) {
+            val availWidthDp = maxWidth.value
+            val availHeightDp = maxHeight.value
+
+            val charsPerLine = ((availWidthDp - 44f) / (fontSizeSp * 0.54f)).toInt().coerceIn(26, 85)
+            val lineHeightSp = fontSizeSp * 1.52f
+            val linesPerPage = ((availHeightDp - 52f) / (lineHeightSp * 1.05f)).toInt().coerceIn(10, 42)
+
+            val subPages = remember(currentChapter?.bodyText, charsPerLine, linesPerPage) {
+                if (isVisualPageMode) listOf("")
+                else paginateChapterText(currentChapter?.bodyText ?: "", charsPerLine, linesPerPage)
+            }
+
+            LaunchedEffect(subPages.size, currentChapterIndex) {
+                if (startAtLastSubPage) {
+                    subPageIndex = subPages.lastIndex.coerceAtLeast(0)
+                    startAtLastSubPage = false
+                } else if (subPageIndex > subPages.lastIndex) {
+                    subPageIndex = subPages.lastIndex.coerceAtLeast(0)
+                }
+            }
+
+            val canGoNext = (subPageIndex + 1 < subPages.size) || (currentChapterIndex + 1 < chapters.size)
+            val canGoPrev = (subPageIndex > 0) || (currentChapterIndex > 0)
+
+            fun commitNextPage() {
+                if (subPageIndex + 1 < subPages.size) {
+                    subPageIndex++
+                } else if (currentChapterIndex + 1 < chapters.size) {
+                    startAtLastSubPage = false
+                    subPageIndex = 0
+                    onSelectChapter(currentChapterIndex + 1)
+                }
+            }
+
+            fun commitPrevPage() {
+                if (subPageIndex > 0) {
+                    subPageIndex--
+                } else if (currentChapterIndex > 0) {
+                    startAtLastSubPage = true
+                    onSelectChapter(currentChapterIndex - 1)
+                }
+            }
+
+            fun animatePageTurnForward() {
+                if (!canGoNext || curlAnim.isRunning) return
+                coroutineScope.launch {
+                    curlAnim.snapTo(0.04f)
+                    curlAnim.animateTo(1f, tween(durationMillis = 360))
+                    commitNextPage()
+                    curlAnim.snapTo(0f)
+                }
+            }
+
+            fun animatePageTurnBackward() {
+                if (!canGoPrev || curlAnim.isRunning) return
+                coroutineScope.launch {
+                    curlAnim.snapTo(-0.04f)
+                    curlAnim.animateTo(-1f, tween(durationMillis = 360))
+                    commitPrevPage()
+                    curlAnim.snapTo(0f)
+                }
+            }
+
+            val nextPreviewText = remember(subPageIndex, subPages, currentChapterIndex, chapters) {
+                if (subPageIndex + 1 < subPages.size) {
+                    subPages[subPageIndex + 1]
+                } else if (currentChapterIndex + 1 < chapters.size) {
+                    val nextChap = chapters[currentChapterIndex + 1]
+                    paginateChapterText(nextChap.bodyText, charsPerLine, linesPerPage).firstOrNull() ?: ""
+                } else ""
+            }
+
+            val prevPreviewText = remember(subPageIndex, subPages, currentChapterIndex, chapters) {
+                if (subPageIndex > 0) {
+                    subPages[subPageIndex - 1]
+                } else if (currentChapterIndex > 0) {
+                    val prevChap = chapters[currentChapterIndex - 1]
+                    paginateChapterText(prevChap.bodyText, charsPerLine, linesPerPage).lastOrNull() ?: ""
+                } else ""
+            }
+
+            @Composable
+            fun PageContentLayer(
+                pageText: String,
+                showChapterHeading: Boolean,
+                headingText: String,
+                visualBitmap: Bitmap?
+            ) {
+                if (isVisualPageMode) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(bgColor)
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (visualBitmap != null) {
+                            Image(
+                                bitmap = visualBitmap.asImageBitmap(),
+                                contentDescription = headingText,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize()
                             )
                         }
                     }
-                ) { innerPadding ->
-                    Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
-                        val displayedBooks = remember(
-                            viewModel.books,
-                            viewModel.searchQuery,
-                            viewModel.sortBy,
-                            viewModel.currentBookId,
-                            viewModel.progressRevision
-                        ) {
-                            val filtered = viewModel.books.filter {
-                                if (viewModel.searchQuery.isEmpty()) true
-                                else it.title.contains(viewModel.searchQuery, ignoreCase = true) ||
-                                    it.author.contains(viewModel.searchQuery, ignoreCase = true)
-                            }
-                            val activeId = viewModel.currentBookId.ifEmpty { viewModel.repository.getLastBookId() ?: "" }
-                            val baseSorted = when (viewModel.sortBy) {
-                                "TITLE" -> filtered.sortedWith { a, b -> compareNatural(a.title, b.title) }
-                                "AUTHOR" -> filtered.sortedWith { a, b -> compareNatural(a.author, b.author) }
-                                else -> filtered.sortedWith { a, b ->
-                                    val timeA = viewModel.repository.getBookLastPlayedTime(a.id)
-                                    val timeB = viewModel.repository.getBookLastPlayedTime(b.id)
-                                    if (timeA != timeB) timeB.compareTo(timeA)
-                                    else viewModel.repository.getBookPosition(b.id).compareTo(viewModel.repository.getBookPosition(a.id))
-                                }
-                            }
-                            if (activeId.isNotEmpty()) {
-                                val (pinned, rest) = baseSorted.partition { it.id == activeId }
-                                pinned + rest
-                            } else baseSorted
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(bgColor)
+                            .padding(horizontal = 22.dp, vertical = 16.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        if (showChapterHeading && headingText.isNotBlank()) {
+                            Text(
+                                text = headingText,
+                                fontSize = (fontSizeSp + 3f).sp,
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor,
+                                fontFamily = FontFamily.Serif
+                            )
+                            Spacer(Modifier.height(12.dp))
                         }
-
-                        val displayedEbooks = remember(
-                            viewModel.ebooks,
-                            viewModel.searchQuery,
-                            viewModel.sortBy,
-                            viewModel.currentEbookId,
-                            viewModel.progressRevision
-                        ) {
-                            val filtered = viewModel.ebooks.filter {
-                                if (viewModel.searchQuery.isEmpty()) true
-                                else it.title.contains(viewModel.searchQuery, ignoreCase = true) ||
-                                    it.author.contains(viewModel.searchQuery, ignoreCase = true)
-                            }
-                            val activeEbId = viewModel.currentEbookId.ifEmpty { viewModel.repository.getLastEbookId() ?: "" }
-                            val baseSorted = when (viewModel.sortBy) {
-                                "TITLE" -> filtered.sortedWith { a, b -> compareNatural(a.title, b.title) }
-                                "AUTHOR" -> filtered.sortedWith { a, b -> compareNatural(a.author, b.author) }
-                                else -> filtered.sortedWith { a, b ->
-                                    viewModel.repository.getEbookLastReadTime(b.id)
-                                        .compareTo(viewModel.repository.getEbookLastReadTime(a.id))
-                                }
-                            }
-                            if (activeEbId.isNotEmpty()) {
-                                val (pinned, rest) = baseSorted.partition { it.id == activeEbId }
-                                pinned + rest
-                            } else baseSorted
-                        }
-
-                        val activeProgressFraction = if (totalBookDurationMs > 0L) {
-                            (totalBookReadMs.toFloat() / totalBookDurationMs).coerceIn(0f, 1f)
-                        } else 0f
-
-                        val activeSubtitleText = when {
-                            viewModel.chaptersList.size > 1 && totalBookDurationMs > 0L ->
-                                "${viewModel.chaptersList.size} chapters • ${formatTime(totalBookDurationMs)}"
-                            totalBookDurationMs > 0L -> formatTime(totalBookDurationMs)
-                            else -> ""
-                        }
-
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            if (viewModel.isSearching || viewModel.searchQuery.isNotEmpty()) {
-                                OutlinedTextField(
-                                    value = viewModel.searchQuery,
-                                    onValueChange = { viewModel.searchQuery = it },
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                                    placeholder = { Text(stringResource(R.string.search_books_hint)) },
-                                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                                    trailingIcon = {
-                                        IconButton(onClick = {
-                                            viewModel.searchQuery = ""
-                                            viewModel.isSearching = false
-                                        }) {
-                                            Icon(Icons.Default.Close, contentDescription = "Close Search")
-                                        }
-                                    },
-                                    singleLine = true,
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-                            }
-
-                            if (viewModel.shelfMode == "AUDIO") {
-                                BookshelfContent(
-                                    books = displayedBooks,
-                                    activeBookId = viewModel.currentBookId,
-                                    activeBookProgress = activeProgressFraction,
-                                    activeBookSubtitle = activeSubtitleText,
-                                    hasSelectedFolder = viewModel.selectedFolderUri.isNotEmpty(),
-                                    viewMode = viewModel.viewMode,
-                                    viewModel = viewModel,
-                                    onAutoScanDevice = { triggerAutoScanWithPermission() },
-                                    onChooseFolder = { folderPicker.launch(null) },
-                                    onSelectBook = { book ->
-                                        viewModel.repository.touchBookLastPlayed(book.id)
-                                        viewModel.progressRevision++
-                                        if (book.id == viewModel.currentBookId && player.mediaItemCount > 0) {
-                                            if (!isFoldableUnfolded) viewModel.isPlayerFullScreen = true
-                                        } else {
-                                            val snapshotPos = player.currentPosition
-                                            val snapshotIdx = player.currentMediaItemIndex
-                                            activeBook?.let { curr ->
-                                                viewModel.saveProgressNow(curr.id, snapshotIdx, snapshotPos)
-                                            }
-                                            player.playWhenReady = false
-                                            player.pause()
-
-                                            viewModel.selectBookMetadata(book, isDifferentBook = true)
-                                            val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
-                                            val savedPos = viewModel.repository.getBookPosition(book.id)
-                                            binder.playBook(book, savedTrackIdx, savedPos, false)
-                                            if (!isFoldableUnfolded) viewModel.isPlayerFullScreen = true
-                                        }
-                                    },
-                                    onLongPressBook = { book ->
-                                        targetCoverItemId = book.id
-                                        val initialCleanQuery = cleanAudiobookSearchQuery(book.title, book.author)
-                                        liveCoverSearchQuery = initialCleanQuery
-                                        showCoverOptionsDialog = true
-                                        viewModel.searchOnlineCoverCandidates(initialCleanQuery)
-                                    }
-                                )
-                            } else {
-                                EbookShelfContent(
-                                    ebooks = displayedEbooks,
-                                    activeEbookId = viewModel.currentEbookId,
-                                    viewMode = viewModel.viewMode,
-                                    viewModel = viewModel,
-                                    onScanDeviceEbooks = {
-                                        if (!hasAllFilesAccess()) {
-                                            showAllFilesPermissionPrompt = true
-                                        } else {
-                                            runEbookAutoScan(showToast = true)
-                                        }
-                                    },
-                                    onImportEpubFiles = {
-                                        epubFilePicker.launch(arrayOf("application/epub+zip", "application/pdf", "*/*"))
-                                    },
-                                    onSelectEbook = { ebook ->
-                                        viewModel.selectEbook(ebook, openFullScreen = !isFoldableUnfolded)
-                                    },
-                                    onLongPressEbook = { ebook ->
-                                        targetCoverItemId = ebook.id
-                                        val initialCleanQuery = cleanAudiobookSearchQuery(ebook.title, ebook.author)
-                                        liveCoverSearchQuery = initialCleanQuery
-                                        showCoverOptionsDialog = true
-                                        viewModel.searchOnlineCoverCandidates(initialCleanQuery)
-                                    }
-                                )
-                            }
-                        }
+                        Text(
+                            text = pageText,
+                            fontSize = fontSizeSp.sp,
+                            lineHeight = lineHeightSp.sp,
+                            color = textColor,
+                            fontFamily = FontFamily.Serif
+                        )
                     }
                 }
             }
 
-            when {
-                viewModel.isCarModeActive && activeBook != null -> {
-                    CarModeScreen(
-                        book = activeBook,
-                        chapterTitle = currentChapter?.title ?: getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex),
-                        isPlaying = viewModel.isPlaying,
-                        skipIntervalSeconds = viewModel.skipIntervalSeconds,
-                        onPlayPause = togglePlayPause,
-                        onQuickRewind = {
-                            val newPos = (player.currentPosition - (viewModel.skipIntervalSeconds * 1000L)).coerceAtLeast(0L)
-                            binder.seekAndPersist(player.currentMediaItemIndex, newPos)
-                        },
-                        onQuickForward = {
-                            val maxDur = if (viewModel.duration > 0L) viewModel.duration else Long.MAX_VALUE
-                            val newPos = (player.currentPosition + (viewModel.skipIntervalSeconds * 1000L)).coerceAtMost(maxDur)
-                            binder.seekAndPersist(player.currentMediaItemIndex, newPos)
-                        },
-                        onAddBookmark = { showAddBookmarkPrompt = true },
-                        onExitCarMode = { viewModel.isCarModeActive = false }
-                    )
+            if (isLoading || (isVisualPageMode && isRenderingVisualPage && renderedPageBitmap == null)) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = accentColor)
                 }
-
-                viewModel.isEbookReaderFullScreen && activeEbook != null -> {
-                    EpubReaderScreen(
-                        ebook = activeEbook,
-                        repository = viewModel.repository,
-                        chapters = viewModel.currentEbookChapters,
-                        currentChapterIndex = viewModel.currentEbookChapterIndex,
-                        isLoading = viewModel.isLoadingEbook,
-                        fontSizeSp = viewModel.ebookFontSizeSp,
-                        readerTheme = viewModel.ebookReaderTheme,
-                        isEmbeddedPane = false,
-                        isFullScreen = true,
-                        onToggleFullScreen = { viewModel.isEbookReaderFullScreen = false },
-                        onBackToShelf = { viewModel.isEbookReaderFullScreen = false },
-                        onSelectChapter = { idx -> viewModel.goToEbookChapter(idx) },
-                        onUpdateFontSize = { sp -> viewModel.updateEbookFontSize(sp) },
-                        onUpdateTheme = { th -> viewModel.updateEbookReaderTheme(th) }
-                    )
-                }
-
-                viewModel.isPlayerFullScreen && activeBook != null -> {
-                    RenderNowPlaying(isEmbedded = false)
-                }
-
-                isFoldableUnfolded -> {
-                    Row(modifier = Modifier.fillMaxSize()) {
-                        Box(modifier = Modifier.weight(0.46f).fillMaxHeight()) {
-                            RenderShelfScaffold(
-                                showBottomMiniPlayer = viewModel.shelfMode == "EBOOK" && activeBook != null
+            } else {
+                val curlVal = curlAnim.value
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(currentChapterIndex, subPageIndex, subPages.size, chapters.size) {
+                            detectHorizontalDragGestures(
+                                onDragEnd = {
+                                    val c = curlAnim.value
+                                    coroutineScope.launch {
+                                        when {
+                                            c > 0.16f && canGoNext -> {
+                                                curlAnim.animateTo(1f, tween(240))
+                                                commitNextPage()
+                                                curlAnim.snapTo(0f)
+                                            }
+                                            c < -0.16f && canGoPrev -> {
+                                                curlAnim.animateTo(-1f, tween(240))
+                                                commitPrevPage()
+                                                curlAnim.snapTo(0f)
+                                            }
+                                            else -> {
+                                                curlAnim.animateTo(0f, tween(200))
+                                            }
+                                        }
+                                    }
+                                },
+                                onDragCancel = {
+                                    coroutineScope.launch { curlAnim.animateTo(0f, tween(200)) }
+                                },
+                                onHorizontalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                                    val delta = -dragAmount / (widthPx * 0.85f)
+                                    val target = (curlAnim.value + delta).coerceIn(
+                                        if (canGoPrev) -1f else 0f,
+                                        if (canGoNext) 1f else 0f
+                                    )
+                                    coroutineScope.launch { curlAnim.snapTo(target) }
+                                }
                             )
                         }
+                ) {
+                    // 1. Underneath Revealed Page (Next or Previous Page)
+                    if (curlVal > 0.005f) {
+                        val isNextNewChapter = subPageIndex + 1 >= subPages.size
+                        val nextHeading = if (isNextNewChapter && currentChapterIndex + 1 < chapters.size) {
+                            chapters[currentChapterIndex + 1].title
+                        } else ""
+                        PageContentLayer(
+                            pageText = nextPreviewText,
+                            showChapterHeading = isNextNewChapter,
+                            headingText = nextHeading,
+                            visualBitmap = nextPageBitmap ?: renderedPageBitmap
+                        )
+                    } else if (curlVal < -0.005f) {
+                        val isPrevFirstSubPage = subPageIndex == 1
+                        PageContentLayer(
+                            pageText = prevPreviewText,
+                            showChapterHeading = isPrevFirstSubPage,
+                            headingText = currentChapter?.title ?: "",
+                            visualBitmap = prevPageBitmap ?: renderedPageBitmap
+                        )
+                    }
 
-                        FoldableSpineDivider()
+                    // 2. Top Active Page with 3D Curved Page-Curl Clip, Back-Flap & Cast Shadow
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .drawWithContent {
+                                val c = curlAnim.value
+                                if (abs(c) < 0.005f) {
+                                    drawContent()
+                                } else if (c > 0f) {
+                                    // Curling Forward (Right-to-Left): Current page peels back from the right
+                                    val progress = c.coerceIn(0f, 1f)
+                                    val w = size.width
+                                    val h = size.height
+                                    val spineX = w * (1f - progress)
+                                    val curveBow = sin(progress * Math.PI).toFloat() * (w * 0.085f)
+                                    val flapWidth = (w * 0.28f * sin(progress * Math.PI).toFloat()).coerceAtLeast(14f)
+                                    val flapRightX = (spineX + flapWidth).coerceAtMost(w)
 
-                        Box(modifier = Modifier.weight(0.54f).fillMaxHeight()) {
-                            if (viewModel.shelfMode == "EBOOK") {
-                                if (activeEbook != null) {
-                                    EpubReaderScreen(
-                                        ebook = activeEbook,
-                                        repository = viewModel.repository,
-                                        chapters = viewModel.currentEbookChapters,
-                                        currentChapterIndex = viewModel.currentEbookChapterIndex,
-                                        isLoading = viewModel.isLoadingEbook,
-                                        fontSizeSp = viewModel.ebookFontSizeSp,
-                                        readerTheme = viewModel.ebookReaderTheme,
-                                        isEmbeddedPane = true,
-                                        isFullScreen = false,
-                                        onToggleFullScreen = { viewModel.isEbookReaderFullScreen = true },
-                                        onBackToShelf = { viewModel.isEbookReaderFullScreen = false },
-                                        onSelectChapter = { idx -> viewModel.goToEbookChapter(idx) },
-                                        onUpdateFontSize = { sp -> viewModel.updateEbookFontSize(sp) },
-                                        onUpdateTheme = { th -> viewModel.updateEbookReaderTheme(th) }
-                                    )
-                                } else {
-                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                        Text(
-                                            "Scan or select an .epub / .pdf on the left page to start reading.",
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    val visiblePagePath = Path().apply {
+                                        moveTo(0f, 0f)
+                                        lineTo(spineX, 0f)
+                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, h)
+                                        lineTo(0f, h)
+                                        close()
+                                    }
+
+                                    clipPath(visiblePagePath, ClipOp.Intersect) {
+                                        this@drawWithContent.drawContent()
+                                    }
+
+                                    // Drop shadow cast onto the revealed next page underneath
+                                    val shadowEnd = (flapRightX + 54f).coerceAtMost(w)
+                                    if (shadowEnd > spineX) {
+                                        drawRect(
+                                            brush = Brush.horizontalGradient(
+                                                colors = listOf(
+                                                    Color.Black.copy(alpha = 0.42f * (1f - progress * 0.4f)),
+                                                    Color.Transparent
+                                                ),
+                                                startX = spineX,
+                                                endX = shadowEnd
+                                            ),
+                                            topLeft = Offset(spineX, 0f),
+                                            size = Size(shadowEnd - spineX, h)
                                         )
                                     }
+
+                                    // 3D Curved Paper Back-Flap (Bends at top and bottom like Google Play Books)
+                                    val verticalPinch = h * 0.035f * sin(progress * Math.PI).toFloat()
+                                    val backFlapPath = Path().apply {
+                                        moveTo(spineX, 0f)
+                                        quadraticBezierTo(
+                                            (spineX + flapRightX) * 0.5f,
+                                            verticalPinch,
+                                            flapRightX,
+                                            verticalPinch * 1.4f
+                                        )
+                                        quadraticBezierTo(
+                                            flapRightX - (curveBow * 0.6f),
+                                            h * 0.5f,
+                                            flapRightX,
+                                            h - (verticalPinch * 1.4f)
+                                        )
+                                        quadraticBezierTo(
+                                            (spineX + flapRightX) * 0.5f,
+                                            h - verticalPinch,
+                                            spineX,
+                                            h
+                                        )
+                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, 0f)
+                                        close()
+                                    }
+
+                                    drawPath(
+                                        path = backFlapPath,
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                curlBackHighlightColor,
+                                                curlBackMidColor,
+                                                Color.Black.copy(alpha = 0.25f)
+                                            ),
+                                            startX = (spineX - curveBow).coerceAtLeast(0f),
+                                            endX = flapRightX.coerceAtLeast(spineX + 1f)
+                                        )
+                                    )
+
+                                    // Specular highlight along the curved fold spine
+                                    val spineLine = Path().apply {
+                                        moveTo(spineX, 0f)
+                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, h)
+                                    }
+                                    drawPath(
+                                        path = spineLine,
+                                        color = accentColor.copy(alpha = 0.45f),
+                                        style = Stroke(width = 2.dp.toPx())
+                                    )
+                                } else {
+                                    // Curling Backward (Left-to-Right): Previous page uncurls from the left
+                                    val progress = abs(c).coerceIn(0f, 1f)
+                                    val w = size.width
+                                    val h = size.height
+                                    val spineX = w * progress
+                                    val curveBow = sin(progress * Math.PI).toFloat() * (w * 0.075f)
+                                    val flapWidth = (w * 0.24f * sin(progress * Math.PI).toFloat()).coerceAtLeast(12f)
+                                    val flapLeftX = (spineX - flapWidth).coerceAtLeast(0f)
+
+                                    val rightSidePath = Path().apply {
+                                        moveTo(spineX, 0f)
+                                        lineTo(w, 0f)
+                                        lineTo(w, h)
+                                        lineTo(spineX, h)
+                                        quadraticBezierTo(spineX + curveBow, h * 0.5f, spineX, 0f)
+                                        close()
+                                    }
+
+                                    clipPath(rightSidePath, ClipOp.Intersect) {
+                                        this@drawWithContent.drawContent()
+                                    }
+
+                                    val shadowEnd = (spineX + 48f).coerceAtMost(w)
+                                    drawRect(
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                Color.Black.copy(alpha = 0.38f),
+                                                Color.Transparent
+                                            ),
+                                            startX = spineX,
+                                            endX = shadowEnd.coerceAtLeast(spineX + 1f)
+                                        ),
+                                        topLeft = Offset(spineX, 0f),
+                                        size = Size((shadowEnd - spineX).coerceAtLeast(1f), h)
+                                    )
+
+                                    val backFlapPath = Path().apply {
+                                        moveTo(flapLeftX, 0f)
+                                        lineTo(spineX, 0f)
+                                        quadraticBezierTo(spineX + curveBow, h * 0.5f, spineX, h)
+                                        lineTo(flapLeftX, h)
+                                        close()
+                                    }
+                                    drawPath(
+                                        path = backFlapPath,
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                curlBackMidColor,
+                                                curlBackHighlightColor
+                                            ),
+                                            startX = flapLeftX,
+                                            endX = (spineX + curveBow).coerceAtLeast(flapLeftX + 1f)
+                                        )
+                                    )
                                 }
-                            } else {
-                                RenderNowPlaying(isEmbedded = true)
                             }
-                        }
+                    ) {
+                        val currSubPageText = subPages.getOrElse(subPageIndex) { "" }
+                        PageContentLayer(
+                            pageText = currSubPageText,
+                            showChapterHeading = subPageIndex == 0,
+                            headingText = currentChapter?.title ?: "",
+                            visualBitmap = renderedPageBitmap
+                        )
                     }
                 }
+            }
 
-                else -> {
-                    RenderShelfScaffold(showBottomMiniPlayer = true)
+            // Bottom Page-Turn Bar inside BoxWithConstraints so Prev/Next buttons trigger the 3D Page-Curl!
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(bgColor.copy(alpha = 0.95f))
+            ) {
+                HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = { animatePageTurnBackward() },
+                        enabled = canGoPrev
+                    ) {
+                        Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
+                        Text("Prev", color = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
+                    }
+
+                    val statusLabel = if (isVisualPageMode) {
+                        "Page ${currentChapterIndex + 1} of ${chapters.size}"
+                    } else if (subPages.size > 1) {
+                        "Ch ${currentChapterIndex + 1}/${chapters.size} • Page ${subPageIndex + 1}/${subPages.size}"
+                    } else {
+                        "Chapter ${currentChapterIndex + 1} of ${chapters.size}"
+                    }
+
+                    Text(
+                        text = statusLabel,
+                        fontSize = 12.sp,
+                        color = textColor.copy(alpha = 0.85f),
+                        modifier = Modifier.clickable { showTocDialog = true }
+                    )
+
+                    TextButton(
+                        onClick = { animatePageTurnForward() },
+                        enabled = canGoNext
+                    ) {
+                        Text("Next", color = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
+                        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
+                    }
                 }
             }
         }
     }
 
-    if (showAllFilesPermissionPrompt) {
+    if (showTocDialog) {
+        val listHeader = if (isVisualPageMode) "Pages (${chapters.size})" else "Chapters (${chapters.size})"
         AlertDialog(
-            onDismissRequest = { showAllFilesPermissionPrompt = false },
-            title = { Text("Enable Downloads eBook Auto-Scan") },
-            text = {
-                Text(
-                    "Android requires 'All Files Access' to automatically scan and open .epub and .pdf books inside your Downloads folder. Tap Allow to enable it once."
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showAllFilesPermissionPrompt = false
-                        launchAllFilesAccessSettings()
-                    }
-                ) {
-                    Text("Allow")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAllFilesPermissionPrompt = false }) {
-                    Text("Not Now")
-                }
-            }
-        )
-    }
-
-    if (showCoverOptionsDialog && targetCoverItemId.isNotEmpty()) {
-        AlertDialog(
-            onDismissRequest = { showCoverOptionsDialog = false },
-            title = { Text(stringResource(R.string.cover_art_options)) },
+            onDismissRequest = { showTocDialog = false },
+            title = { Text(listHeader) },
             text = {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 440.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                        .heightIn(max = 400.dp)
+                        .verticalScroll(rememberScrollState())
                 ) {
-                    OutlinedTextField(
-                        value = liveCoverSearchQuery,
-                        onValueChange = { liveCoverSearchQuery = it },
-                        label = { Text("Search book title or author") },
-                        singleLine = true,
-                        trailingIcon = {
-                            IconButton(onClick = { viewModel.searchOnlineCoverCandidates(liveCoverSearchQuery) }) {
-                                Icon(Icons.Default.Search, contentDescription = "Search Covers", tint = MaterialTheme.colorScheme.primary)
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    chapters.forEachIndexed { idx, chap ->
+                        val isCurr = idx == currentChapterIndex
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    subPageIndex = 0
+                                    onSelectChapter(idx)
+                                    showTocDialog = false
+                                }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (isVisualPageMode) chap.title else "${idx + 1}. ${chap.title}",
+                                fontWeight = if (isCurr) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isCurr) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showTocDialog = false }) { Text("Close") }
+            }
+        )
+    }
 
+    if (showReaderSettings) {
+        AlertDialog(
+            onDismissRequest = { showReaderSettings = false },
+            title = { Text("Reader Appearance") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(onClick = { onUpdateFontSize(fontSizeSp - 2f) }) { Text("A-") }
+                        Text("${fontSizeSp.toInt()} pt", fontWeight = FontWeight.Bold)
+                        OutlinedButton(onClick = { onUpdateFontSize(fontSizeSp + 2f) }) { Text("A+") }
+                    }
+
+                    Text("Reading Theme", fontWeight = FontWeight.Bold)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        OutlinedButton(
-                            onClick = {
-                                showCoverOptionsDialog = false
-                                customCoverLauncher.launch("image/*")
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Device Image", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-
-                        OutlinedButton(
-                            onClick = {
-                                try {
-                                    val encoded = URLEncoder.encode("$liveCoverSearchQuery book cover", "UTF-8")
-                                    val webIntent = Intent(
-                                        Intent.ACTION_VIEW,
-                                        Uri.parse("https://www.google.com/search?tbm=isch&q=$encoded")
-                                    )
-                                    context.startActivity(webIntent)
-                                } catch (t: Throwable) {
-                                    Log.w(TAG, "Failed launching web image search", t)
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Default.Public, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Web Search", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-
-                    HorizontalDivider()
-
-                    if (viewModel.isSearchingCovers) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 28.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                                Spacer(Modifier.height(10.dp))
-                                Text(
-                                    text = "Searching Apple Books, Google Books & Open Library...",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        }
-                    } else if (viewModel.coverSearchCandidates.isEmpty()) {
-                        Text(
-                            text = "No covers found for \"$liveCoverSearchQuery\". Edit the title above and tap the search icon, or use Web Search.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp)
-                        )
-                    } else {
-                        Text(
-                            text = "Tap a cover to apply:",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-
-                        viewModel.coverSearchCandidates.chunked(2).forEach { rowItems ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                rowItems.forEach { candidate ->
-                                    Card(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .clickable {
-                                                showCoverOptionsDialog = false
-                                                Toast.makeText(context, "Applying high-res cover...", Toast.LENGTH_SHORT).show()
-                                                viewModel.selectOnlineCoverCandidate(targetCoverItemId, candidate) {
-                                                    Toast.makeText(context, "Cover updated!", Toast.LENGTH_SHORT).show()
-                                                }
-                                            },
-                                        shape = RoundedCornerShape(12.dp),
-                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                                    ) {
-                                        Column(
-                                            modifier = Modifier.padding(8.dp),
-                                            horizontalAlignment = Alignment.CenterHorizontally
-                                        ) {
-                                            Image(
-                                                bitmap = candidate.previewBitmap.asImageBitmap(),
-                                                contentDescription = candidate.title,
-                                                contentScale = ContentScale.Crop,
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .aspectRatio(1f)
-                                                    .clip(RoundedCornerShape(8.dp))
-                                            )
-                                            Spacer(Modifier.height(6.dp))
-                                            Text(
-                                                text = candidate.title,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Text(
-                                                text = candidate.source,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.primary,
-                                                maxLines = 1
-                                            )
-                                        }
-                                    }
-                                }
-                                if (rowItems.size == 1) {
-                                    Spacer(modifier = Modifier.weight(1f))
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showCoverOptionsDialog = false }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            }
-        )
-    }
-
-    if (showAddBookmarkPrompt) {
-        AlertDialog(
-            onDismissRequest = { showAddBookmarkPrompt = false },
-            title = { Text(stringResource(R.string.add_bookmark)) },
-            text = {
-                OutlinedTextField(
-                    value = newBookmarkNoteText,
-                    onValueChange = { newBookmarkNoteText = it },
-                    label = { Text(stringResource(R.string.bookmark_note_label)) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val trackIdx = player.currentMediaItemIndex.coerceAtLeast(0)
-                    val chapterName = getChapterTitle(viewModel.chaptersList, viewModel.currentPosition, trackIdx)
-                    viewModel.addBookmark(trackIdx, viewModel.currentPosition, chapterName, newBookmarkNoteText)
-                    showAddBookmarkPrompt = false
-                    newBookmarkNoteText = ""
-                    Toast.makeText(context, "Bookmark Saved", Toast.LENGTH_SHORT).show()
-                }) { Text(stringResource(R.string.save)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddBookmarkPrompt = false }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            }
-        )
-    }
-
-    if (showViewDialog) {
-        AlertDialog(
-            onDismissRequest = { showViewDialog = false },
-            title = { Text(stringResource(R.string.view_mode)) },
-            text = {
-                Column {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().clickable {
-                            viewModel.updateViewMode("GRID")
-                            showViewDialog = false
-                        }.padding(vertical = 12.dp)
-                    ) {
-                        RadioButton(selected = viewModel.viewMode == "GRID", onClick = null)
-                        Spacer(Modifier.width(12.dp))
-                        Text(stringResource(R.string.grid_view))
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().clickable {
-                            viewModel.updateViewMode("LIST")
-                            showViewDialog = false
-                        }.padding(vertical = 12.dp)
-                    ) {
-                        RadioButton(selected = viewModel.viewMode == "LIST", onClick = null)
-                        Spacer(Modifier.width(12.dp))
-                        Text(stringResource(R.string.list_view))
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showViewDialog = false }) { Text(stringResource(R.string.close)) } }
-        )
-    }
-
-    if (showSortDialog) {
-        AlertDialog(
-            onDismissRequest = { showSortDialog = false },
-            title = { Text(stringResource(R.string.sort_library_by)) },
-            text = {
-                Column {
-                    val sortOptions = listOf(
-                        "RECENT" to stringResource(R.string.sort_recent),
-                        "TITLE" to stringResource(R.string.sort_title),
-                        "AUTHOR" to stringResource(R.string.sort_author)
-                    )
-                    sortOptions.forEach { (key, label) ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth().clickable {
-                                viewModel.updateSortBy(key)
-                                showSortDialog = false
-                            }.padding(vertical = 12.dp)
-                        ) {
-                            RadioButton(selected = viewModel.sortBy == key, onClick = null)
-                            Spacer(Modifier.width(12.dp))
-                            Text(label)
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showSortDialog = false }) { Text(stringResource(R.string.close)) } }
-        )
-    }
-
-    if (showAudioFXDialog) {
-        AlertDialog(
-            onDismissRequest = { showAudioFXDialog = false },
-            title = { Text(stringResource(R.string.audio_fx)) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(stringResource(R.string.volume_boost_title), fontWeight = FontWeight.Bold)
-                            Text(
-                                stringResource(R.string.volume_boost_desc),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                        listOf("FOREST" to "Forest", "SEPIA" to "Sepia", "LIGHT" to "Light").forEach { (key, label) ->
+                            FilterChip(
+                                selected = readerTheme == key,
+                                onClick = { onUpdateTheme(key) },
+                                label = { Text(label) },
+                                modifier = Modifier.weight(1f)
                             )
                         }
-                        Switch(
-                            checked = viewModel.volumeBoostEnabled,
-                            onCheckedChange = { enabled -> viewModel.setVolumeBoost(enabled) }
-                        )
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(stringResource(R.string.trim_silence_title), fontWeight = FontWeight.Bold)
-                            Text(
-                                stringResource(R.string.trim_silence_desc),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = viewModel.silenceTrimEnabled,
-                            onCheckedChange = { enabled -> viewModel.setSilenceTrim(enabled) }
-                        )
-                    }
-
-                    HorizontalDivider()
-
-                    Column {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(stringResource(R.string.voice_pitch), fontWeight = FontWeight.Bold)
-                            Text(String.format(Locale.US, "%.2fx", viewModel.playbackPitch), color = MaterialTheme.colorScheme.primary)
-                        }
-                        Slider(
-                            value = viewModel.playbackPitch,
-                            onValueChange = { viewModel.updatePitch(round(it * 20f) / 20f) },
-                            valueRange = 0.75f..1.25f
-                        )
-                    }
-
-                    Column {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(stringResource(R.string.app_volume), fontWeight = FontWeight.Bold)
-                            Text("${(viewModel.playerVolume * 100).toInt()}%", color = MaterialTheme.colorScheme.primary)
-                        }
-                        Slider(
-                            value = viewModel.playerVolume,
-                            onValueChange = { vol ->
-                                viewModel.playerVolume = vol
-                                player.volume = vol
-                            },
-                            valueRange = 0.1f..1.0f
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.updatePitch(1.0f)
-                    viewModel.playerVolume = 1.0f
-                    player.volume = 1.0f
-                }) { Text(stringResource(R.string.reset_pitch_vol)) }
-            },
-            dismissButton = { TextButton(onClick = { showAudioFXDialog = false }) { Text(stringResource(R.string.done)) } }
-        )
-    }
-
-    if (showSettingsDialog) {
-        AlertDialog(
-            onDismissRequest = { showSettingsDialog = false },
-            title = { Text(stringResource(R.string.settings)) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Dynamic Cover Theme", fontWeight = FontWeight.Bold)
-                            Text(
-                                "Match UI colors to the active book's cover art",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = dynamicThemeEnabled,
-                            onCheckedChange = { onToggleDynamicTheme(it) }
-                        )
-                    }
-
-                    HorizontalDivider()
-
-                    Column {
-                        Text(stringResource(R.string.skip_interval_label), fontWeight = FontWeight.Bold)
-                        Slider(
-                            value = viewModel.skipIntervalSeconds.toFloat(),
-                            onValueChange = {
-                                val newVal = round(it).toInt()
-                                viewModel.updateSkipInterval(newVal)
-                            },
-                            valueRange = 5f..60f,
-                            steps = 10
-                        )
-                        Text("${viewModel.skipIntervalSeconds}s", modifier = Modifier.align(Alignment.End))
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showSettingsDialog = false }) { Text(stringResource(R.string.close)) } }
-        )
-    }
-
-    if (showAnalyticsDialog) {
-        AlertDialog(
-            onDismissRequest = { showAnalyticsDialog = false },
-            title = { Text(stringResource(R.string.listening_stats)) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Total Listen Time: ${formatTime(viewModel.totalListenMs)}")
-                    Text("Completed Audiobooks: ${viewModel.completedBooksCount}")
-                    Text("Audiobooks in Library: ${viewModel.books.size}")
-                    Text("eBooks in Library: ${viewModel.ebooks.size}")
-                }
-            },
-            confirmButton = { TextButton(onClick = { showAnalyticsDialog = false }) { Text(stringResource(R.string.close)) } }
-        )
-    }
-
-    if (showSpeedDialog) {
-        AlertDialog(
-            onDismissRequest = { showSpeedDialog = false },
-            title = { Text(stringResource(R.string.playback_speed)) },
-            text = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = String.format(Locale.US, "%.2fx", viewModel.playbackSpeed),
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Slider(
-                        value = viewModel.playbackSpeed,
-                        onValueChange = {
-                            val stepped = (round(it * 20f) / 20f).coerceIn(0.5f, 3.0f)
-                            viewModel.updateSpeed(stepped)
-                        },
-                        valueRange = 0.5f..3.0f
-                    )
-                    val presets = listOf(1.0f, 1.25f, 1.5f, 2.0f, 2.5f, 3.0f)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        presets.take(3).forEach { preset ->
-                            TextButton(onClick = { viewModel.updateSpeed(preset) }) {
-                                Text(String.format(Locale.US, "%.2gx", preset))
-                            }
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        presets.drop(3).forEach { preset ->
-                            TextButton(onClick = { viewModel.updateSpeed(preset) }) {
-                                Text(String.format(Locale.US, "%.2gx", preset))
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showSpeedDialog = false }) { Text(stringResource(R.string.close)) } }
-        )
-    }
-
-    if (showChaptersDialog) {
-        AlertDialog(
-            onDismissRequest = { showChaptersDialog = false },
-            title = { Text("Chapters (${viewModel.chaptersList.size})") },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 420.dp)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    viewModel.chaptersList.forEachIndexed { idx, chap ->
-                        val isCurrent = idx == currentChapterIndex
+                    if (fmtUpper == "PDF") {
+                        HorizontalDivider()
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth().clickable {
-                                binder.seekAndPersist(chap.trackIndex, chap.startMs)
-                                showChaptersDialog = false
-                            }.padding(vertical = 12.dp)
-                        ) {
-                            if (isCurrent) {
-                                Box(modifier = Modifier.size(8.dp).background(MaterialTheme.colorScheme.primary, shape = CircleShape))
-                            } else {
-                                Spacer(Modifier.width(8.dp))
-                            }
-                            Spacer(Modifier.width(16.dp))
-                            Column {
-                                Text(chap.title, fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal)
-                                val timeSubtitle = if (chap.durationMs > 0L) {
-                                    "${formatTime(chap.startMs)} • ${formatTime(chap.durationMs)}"
-                                } else {
-                                    formatTime(chap.startMs)
-                                }
-                                Text(
-                                    text = timeSubtitle,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
-                    if (viewModel.chaptersList.isEmpty()) {
-                        Text(stringResource(R.string.no_chapters_found), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showChaptersDialog = false }) { Text(stringResource(R.string.close)) } }
-        )
-    }
-
-    if (showBookmarksDialog) {
-        AlertDialog(
-            onDismissRequest = { showBookmarksDialog = false },
-            title = { Text(stringResource(R.string.bookmarks)) },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 420.dp)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    viewModel.currentBookBookmarks.forEach { bm ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().clickable {
-                                binder.seekAndPersist(bm.trackIndex, bm.positionMs)
-                                showBookmarksDialog = false
-                            }.padding(vertical = 8.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(bm.chapterTitle, fontWeight = FontWeight.Bold)
-                                Text(formatTime(bm.positionMs), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                                if (bm.note.isNotEmpty()) {
-                                    Text(bm.note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("Reflow PDF like ePub", fontWeight = FontWeight.Bold)
+                                Text(
+                                    "Extract text for adjustable font sizes, or switch off for auto-cropped page view",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = !pdfOriginalPageMode,
+                                onCheckedChange = { reflowEnabled ->
+                                    pdfOriginalPageMode = !reflowEnabled
+                                    repository.getPreferences().edit()
+                                        .putBoolean("pdf_original_page_mode", pdfOriginalPageMode)
+                                        .apply()
+                                    onReloadEbook()
                                 }
-                            }
-                            IconButton(onClick = { viewModel.deleteBookmark(bm.id) }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete Bookmark", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+                            )
                         }
-                    }
-                    if (viewModel.currentBookBookmarks.isEmpty()) {
-                        Text(stringResource(R.string.no_bookmarks_yet), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    showBookmarksDialog = false
-                    showAddBookmarkPrompt = true
-                }) { Text(stringResource(R.string.add_bookmark_btn)) }
-            },
-            dismissButton = { TextButton(onClick = { showBookmarksDialog = false }) { Text(stringResource(R.string.close)) } }
+                TextButton(onClick = { showReaderSettings = false }) { Text("Done") }
+            }
         )
     }
+}
 
-    if (showSleepMenu) {
-        AlertDialog(
-            onDismissRequest = { showSleepMenu = false },
-            title = { Text(stringResource(R.string.sleep_timer)) },
-            text = {
-                Column {
-                    listOf(15, 30, 45, 60).forEach { mins ->
-                        TextButton(
-                            onClick = {
-                                viewModel.startTimedSleep(mins)
-                                showSleepMenu = false
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text("$mins Minutes") }
+@Composable
+fun BookCardWrapper(
+    book: Audiobook,
+    isSelected: Boolean,
+    liveProgress: Float?,
+    liveSubtitle: String?,
+    viewMode: String,
+    viewModel: LibraryViewModel,
+    onSelectBook: (Audiobook) -> Unit,
+    onLongPressBook: (Audiobook) -> Unit
+) {
+    var cardArt by remember(book.id, viewModel.coverRevision) { mutableStateOf<ImageBitmap?>(null) }
+    var savedProgress by remember(book.id, viewModel.progressRevision) { mutableFloatStateOf(0f) }
+    var savedSubtitle by remember(book.id, viewModel.progressRevision) { mutableStateOf("") }
+
+    LaunchedEffect(book.id, viewModel.coverRevision) {
+        val bmp = viewModel.repository.getOrFetchCoverArt(book)
+        cardArt = bmp?.asImageBitmap()
+    }
+
+    LaunchedEffect(book.id, viewModel.progressRevision) {
+        val isCompleted = viewModel.repository.loadCompletedBookIds().contains(book.id)
+        if (isCompleted) {
+            savedProgress = 1f
+            savedSubtitle = "Completed"
+        } else {
+            val savedPos = viewModel.repository.getBookPosition(book.id)
+            val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
+            val cachedDurations = viewModel.repository.getCachedTrackDurations(book.id)
+            var totalDur = viewModel.repository.getCachedBookDuration(book.id)
+
+            if (totalDur <= 0L && (savedPos > 0L || savedTrackIdx > 0)) {
+                val computed = viewModel.repository.getOrComputeTrackDurations(book)
+                totalDur = bookDurationMs(computed)
+            }
+
+            if (savedPos > 0L || savedTrackIdx > 0) {
+                if (totalDur > 0L) {
+                    val offsetMs = if (book.tracks.size > 1 && cachedDurations.isNotEmpty()) {
+                        bookOffsetMs(cachedDurations, savedTrackIdx, savedPos)
+                    } else {
+                        savedPos
                     }
-                    TextButton(
-                        onClick = {
-                            viewModel.startEndOfChapterSleep()
-                            showSleepMenu = false
+                    savedProgress = (offsetMs.toFloat() / totalDur).coerceIn(0.01f, 0.99f)
+                    val remaining = (totalDur - offsetMs).coerceAtLeast(0L)
+                    savedSubtitle = "${formatTime(remaining)} left"
+                } else if (book.tracks.size > 1) {
+                    savedProgress = (savedTrackIdx.toFloat() / book.tracks.size).coerceIn(0.01f, 0.99f)
+                    savedSubtitle = "Part ${savedTrackIdx + 1} of ${book.tracks.size}"
+                } else {
+                    savedProgress = 0.05f
+                    savedSubtitle = "In Progress"
+                }
+            } else {
+                savedProgress = 0f
+                savedSubtitle = if (book.tracks.size == 1 && book.tracks.first().isM4b) "M4B Audiobook" else "${book.tracks.size} tracks"
+            }
+        }
+    }
+
+    val displayProgress = if (isSelected && liveProgress != null && liveProgress > 0f) liveProgress else savedProgress
+    val displaySubtitle = if (isSelected && !liveSubtitle.isNullOrEmpty()) liveSubtitle else savedSubtitle
+
+    if (viewMode == "GRID") {
+        GridBookCard(
+            book = book,
+            coverArt = cardArt,
+            progress = displayProgress,
+            subtitleText = displaySubtitle,
+            isSelected = isSelected,
+            onClick = { onSelectBook(book) },
+            onLongClick = { onLongPressBook(book) }
+        )
+    } else {
+        ListBookCard(
+            book = book,
+            coverArt = cardArt,
+            progress = displayProgress,
+            subtitleText = displaySubtitle,
+            isSelected = isSelected,
+            onClick = { onSelectBook(book) },
+            onLongClick = { onLongPressBook(book) }
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun GridBookCard(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    progress: Float,
+    subtitleText: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            if (coverArt != null) {
+                Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(4.dp)
+            ) {
+                Icon(Icons.Default.Headphones, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+
+            if (progress > 0f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth(progress)
+                        .height(4.dp)
+                        .background(MaterialTheme.colorScheme.tertiary)
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (subtitleText.isNotEmpty()) {
+            Text(
+                text = subtitleText,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ListBookCard(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    progress: Float,
+    subtitleText: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.primary),
+                contentAlignment = Alignment.Center
+            ) {
+                if (coverArt != null) {
+                    Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else {
+                    Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
+                }
+
+                if (progress > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth(progress)
+                            .height(4.dp)
+                            .background(MaterialTheme.colorScheme.tertiary)
+                    )
+                }
+            }
+
+            Spacer(Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (subtitleText.isNotEmpty()) {
+                    Text(
+                        text = subtitleText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Icon(
+                imageVector = Icons.Default.Headphones,
+                contentDescription = null,
+                tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+fun NowPlayingScreen(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    chapterTitle: String,
+    isPlaying: Boolean,
+    currentPosition: Long,
+    duration: Long,
+    bookPositionMs: Long,
+    bookDurationMs: Long,
+    skipIntervalSeconds: Int,
+    silenceTrimEnabled: Boolean,
+    sleepTimerActive: Boolean,
+    sleepTimeRemaining: Long,
+    sleepEndAtChapter: Boolean,
+    isDarkTheme: Boolean,
+    playerVolume: Float,
+    playbackSpeed: Float,
+    isEmbeddedPane: Boolean = false,
+    onOpenDrawer: () -> Unit,
+    onBackToBookshelf: () -> Unit,
+    onPlayPause: () -> Unit,
+    onSeekLive: (Long) -> Unit,
+    onSeekFinished: (Long) -> Unit,
+    onSkipPrevChapter: () -> Unit,
+    onSkipNextChapter: () -> Unit,
+    onQuickRewind: () -> Unit,
+    onQuickForward: () -> Unit,
+    onToggleSilenceTrim: () -> Unit,
+    onOpenSleepMenu: () -> Unit,
+    onToggleTheme: () -> Unit,
+    onOpenAudioFX: () -> Unit,
+    onOpenChapters: () -> Unit,
+    onOpenBookmarks: () -> Unit,
+    onOpenSpeed: () -> Unit,
+    onEnterCarMode: () -> Unit,
+    onVolumeChange: (Float) -> Unit,
+    chapterStartMs: Long = 0L,
+    chapterDurationMs: Long = 0L
+) {
+    val totalDur = if (bookDurationMs > 0L) bookDurationMs else duration
+    val totalRead = if (bookDurationMs > 0L) bookPositionMs else currentPosition
+    val percentRead = if (totalDur > 0L) ((totalRead.toDouble() / totalDur.toDouble()) * 100).toInt().coerceIn(0, 100) else 0
+
+    val useChapterScrubber = chapterDurationMs > 0L
+    val sliderPositionMs = if (useChapterScrubber) {
+        (currentPosition - chapterStartMs).coerceIn(0L, chapterDurationMs)
+    } else {
+        currentPosition.coerceAtLeast(0L)
+    }
+    val sliderDurationMs = if (useChapterScrubber) {
+        chapterDurationMs.coerceAtLeast(1L)
+    } else {
+        duration.coerceAtLeast(1L)
+    }
+
+    var isDraggingSlider by remember { mutableStateOf(false) }
+    var dragSliderValue by remember { mutableFloatStateOf(0f) }
+    val activeSliderValue = if (isDraggingSlider) dragSliderValue else sliderPositionMs.toFloat()
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .let { if (!isEmbeddedPane) it.windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout)) else it }
+            .padding(16.dp)
+    ) {
+        val useBookSpread = !isEmbeddedPane && maxWidth >= 600.dp
+
+        @Composable
+        fun ControlsCard() {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(24.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = chapterTitle,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable { onOpenChapters() }
+                    )
+
+                    Spacer(Modifier.height(6.dp))
+
+                    Slider(
+                        value = activeSliderValue.coerceIn(0f, sliderDurationMs.toFloat()),
+                        onValueChange = { newSliderVal ->
+                            isDraggingSlider = true
+                            dragSliderValue = newSliderVal
+                            val targetMs = if (useChapterScrubber) {
+                                chapterStartMs + newSliderVal.toLong()
+                            } else {
+                                newSliderVal.toLong()
+                            }
+                            onSeekLive(targetMs)
                         },
+                        onValueChangeFinished = {
+                            val finalMs = if (useChapterScrubber) {
+                                chapterStartMs + dragSliderValue.toLong()
+                            } else {
+                                dragSliderValue.toLong()
+                            }
+                            isDraggingSlider = false
+                            onSeekFinished(finalMs)
+                        },
+                        valueRange = 0f..sliderDurationMs.toFloat(),
+                        colors = SliderDefaults.colors(
+                            thumbColor = MaterialTheme.colorScheme.primary,
+                            activeTrackColor = MaterialTheme.colorScheme.primary,
+                            inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                        ),
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text(stringResource(R.string.end_of_chapter)) }
-                    if (viewModel.sleepTimerActive) {
-                        TextButton(
-                            onClick = {
-                                viewModel.cancelSleepTimer()
-                                showSleepMenu = false
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text(stringResource(R.string.cancel_timer), color = MaterialTheme.colorScheme.error) }
+                    )
+
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(formatTime(activeSliderValue.toLong()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("-${formatTime((sliderDurationMs - activeSliderValue.toLong()).coerceAtLeast(0L))}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onSkipPrevChapter) {
+                            Icon(Icons.Default.SkipPrevious, contentDescription = "Prev Chapter", modifier = Modifier.size(32.dp))
+                        }
+
+                        IconButton(onClick = onQuickRewind) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Replay, contentDescription = "Rewind", modifier = Modifier.size(38.dp))
+                                Text(text = "$skipIntervalSeconds", fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 2.dp))
+                            }
+                        }
+
+                        IconButton(onClick = onPlayPause, modifier = Modifier.size(60.dp)) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = "Play/Pause",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(52.dp)
+                            )
+                        }
+
+                        IconButton(onClick = onQuickForward) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.RotateRight, contentDescription = "Forward", modifier = Modifier.size(38.dp))
+                                Text(text = "$skipIntervalSeconds", fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 2.dp))
+                            }
+                        }
+
+                        IconButton(onClick = onSkipNextChapter) {
+                            Icon(Icons.Default.SkipNext, contentDescription = "Next Chapter", modifier = Modifier.size(32.dp))
+                        }
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onOpenSpeed) {
+                            Text(
+                                text = String.format(Locale.US, "%.1fx", playbackSpeed),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        IconButton(
+                            onClick = onToggleSilenceTrim,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (silenceTrimEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCut,
+                                contentDescription = "Trim Silence",
+                                tint = if (silenceTrimEnabled) Color.Black else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        IconButton(onClick = onOpenSleepMenu) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Bedtime,
+                                    contentDescription = "Sleep Timer",
+                                    tint = if (sleepTimerActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (sleepTimerActive) {
+                                    Badge(modifier = Modifier.offset(x = 10.dp, y = (-10).dp)) {
+                                        Text(if (sleepEndAtChapter) "End" else "${TimeUnit.MILLISECONDS.toMinutes(sleepTimeRemaining) + 1}m")
+                                    }
+                                }
+                            }
+                        }
+
+                        IconButton(onClick = onToggleTheme) {
+                            ContrastThemeIcon(tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+                        }
+
+                        IconButton(onClick = onOpenAudioFX) {
+                            Icon(Icons.Default.GraphicEq, contentDescription = stringResource(R.string.audio_fx), tint = MaterialTheme.colorScheme.primary)
+                        }
                     }
                 }
-            },
-            confirmButton = { TextButton(onClick = { showSleepMenu = false }) { Text(stringResource(R.string.close)) } }
-        )
+            }
+        }
+
+        if (useBookSpread) {
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f).fillMaxHeight().padding(end = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onOpenDrawer) {
+                            Icon(Icons.Default.Menu, contentDescription = "Open Drawer Menu")
+                        }
+                        IconButton(onClick = onBackToBookshelf) {
+                            Icon(Icons.Default.CloseFullscreen, contentDescription = "Split View", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .size(240.dp)
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (coverArt != null) {
+                            Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                        } else {
+                            Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(96.dp), tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(book.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 2)
+                        Text(
+                            text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text("Total: ${formatTime(totalDur)} • Read: $percentRead%", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+
+                FoldableSpineDivider()
+
+                Column(
+                    modifier = Modifier.weight(1f).fillMaxHeight().padding(start = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        OutlinedButton(onClick = onEnterCarMode) {
+                            Icon(Icons.Default.DirectionsCar, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Car")
+                        }
+                        OutlinedButton(onClick = onOpenChapters) {
+                            Icon(Icons.Default.FormatListNumbered, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Chapters")
+                        }
+                        OutlinedButton(onClick = onOpenBookmarks) {
+                            Icon(Icons.Default.Bookmark, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Pins")
+                        }
+                    }
+
+                    ControlsCard()
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (!isEmbeddedPane) {
+                        IconButton(onClick = onOpenDrawer) {
+                            Icon(Icons.Default.Menu, contentDescription = "Open Drawer Menu")
+                        }
+                    } else {
+                        Spacer(Modifier.width(12.dp))
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onEnterCarMode) {
+                            Icon(Icons.Default.DirectionsCar, contentDescription = "Car Mode", tint = MaterialTheme.colorScheme.primary)
+                        }
+                        IconButton(onClick = onOpenChapters) {
+                            Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters", tint = MaterialTheme.colorScheme.primary)
+                        }
+                        IconButton(onClick = onOpenBookmarks) {
+                            Icon(Icons.Default.Bookmark, contentDescription = "Bookmarks", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+
+                    IconButton(onClick = onBackToBookshelf) {
+                        Icon(
+                            imageVector = if (isEmbeddedPane) Icons.Default.OpenInFull else Icons.Default.Book,
+                            contentDescription = "Toggle Player View",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    Text(
+                        text = book.title,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(if (isEmbeddedPane) 185.dp else 220.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (coverArt != null) {
+                        Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    } else {
+                        Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(84.dp), tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
+
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Total Book: ${formatTime(totalDur)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Read: ${formatTime(totalRead)} ( $percentRead% )", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                ControlsCard()
+            }
+        }
     }
-}
-
-fun calculateSmartRewindPos(
-    savedPos: Long,
-    lastPauseTime: Long,
-    nowMs: Long = System.currentTimeMillis()
-): Long {
-    if (lastPauseTime <= 0L || savedPos <= 0L) return savedPos.coerceAtLeast(0L)
-    val elapsedMs = (nowMs - lastPauseTime).coerceAtLeast(0L)
-    val hoursSincePause = elapsedMs / (1000L * 60L * 60L)
-    val rewindMs = when {
-        hoursSincePause < 2L -> 0L
-        hoursSincePause < 24L -> 15_000L
-        else -> 30_000L
-    }
-    return (savedPos - rewindMs).coerceAtLeast(0L)
-}
-
-fun getCurrentChapterIndex(chapters: List<Chapter>, currentPosMs: Long, trackIndex: Int): Int {
-    if (chapters.isEmpty()) return 0
-    val idx = chapters.indexOfLast {
-        it.trackIndex < trackIndex || (it.trackIndex == trackIndex && currentPosMs >= it.startMs)
-    }
-    return if (idx >= 0) idx else 0
-}
-
-fun getCurrentChapter(chapters: List<Chapter>, currentPosMs: Long, trackIndex: Int): Chapter? {
-    if (chapters.isEmpty()) return null
-    return chapters[getCurrentChapterIndex(chapters, currentPosMs, trackIndex)]
-}
-
-fun getChapterTitle(chapters: List<Chapter>, currentPosMs: Long, trackIndex: Int): String {
-    return getCurrentChapter(chapters, currentPosMs, trackIndex)?.title ?: "Chapter 1"
 }
 // END OF FILE

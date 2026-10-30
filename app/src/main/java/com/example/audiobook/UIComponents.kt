@@ -2,7 +2,6 @@ package com.example.audiobook
 
 import android.graphics.Bitmap
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -11,8 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -30,21 +28,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.Matrix
-import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -57,8 +50,6 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
-import kotlin.math.hypot
-import kotlin.math.pow
 import kotlin.math.sin
 
 fun formatTime(ms: Long): String {
@@ -140,458 +131,6 @@ fun paginateChapterText(
     }
 
     return if (pages.isEmpty()) listOf(clean) else pages
-}
-
-// =========================================================================================
-// 2D/3D GEOMETRIC PAGE-CURL ENGINE (Perpendicular-Bisector Fold + Mirrored Backside Bleed)
-// =========================================================================================
-
-private data class PageCurlGeometry(
-    val foldOrigin: Offset,
-    val normalX: Float,
-    val normalY: Float,
-    val flatPoly: List<Offset>,
-    val peeledPoly: List<Offset>,
-    val reflectedFlapPoly: List<Offset>,
-    val foldEdgeStart: Offset,
-    val foldEdgeEnd: Offset,
-    val maxPeeledDistance: Float,
-    val flapScale: Float
-)
-
-private fun clipPolygonHalfPlane(
-    polygon: List<Offset>,
-    fx: Float,
-    fy: Float,
-    nx: Float,
-    ny: Float,
-    keepNegativeSide: Boolean
-): List<Offset> {
-    if (polygon.isEmpty()) return emptyList()
-    val output = ArrayList<Offset>(polygon.size + 2)
-    val sign = if (keepNegativeSide) 1f else -1f
-
-    fun signedDist(pt: Offset): Float = ((pt.x - fx) * nx + (pt.y - fy) * ny) * sign
-
-    var prev = polygon.last()
-    var prevDist = signedDist(prev)
-
-    for (curr in polygon) {
-        val currDist = signedDist(curr)
-        val prevInside = prevDist <= 0.001f
-        val currInside = currDist <= 0.001f
-
-        if (prevInside != currInside) {
-            val denom = prevDist - currDist
-            val t = if (abs(denom) > 1e-5f) (prevDist / denom).coerceIn(0f, 1f) else 0.5f
-            output.add(
-                Offset(
-                    x = prev.x + (curr.x - prev.x) * t,
-                    y = prev.y + (curr.y - prev.y) * t
-                )
-            )
-        }
-        if (currInside) {
-            output.add(curr)
-        }
-        prev = curr
-        prevDist = currDist
-    }
-    return output
-}
-
-private fun computePageCurlGeometry(
-    width: Float,
-    height: Float,
-    peelProgress: Float,
-    touchYNorm: Float
-): PageCurlGeometry? {
-    if (width <= 1f || height <= 1f) return null
-    val p = peelProgress.coerceIn(0.002f, 0.998f)
-
-    // Determine whether the user is lifting from the bottom-right, top-right, or middle-right edge
-    val rawBias = (touchYNorm.coerceIn(0.05f, 0.95f) - 0.5f) * 2f
-    val effectiveBias = if (abs(rawBias) < 0.16f) {
-        // Default natural lower-hand corner lift when swiping near the vertical center
-        0.30f
-    } else {
-        rawBias
-    }
-
-    val cornerX = width
-    val cornerY = if (effectiveBias >= 0f) height else 0f
-
-    // As p goes 0 -> 1, the lifted corner tip P sweeps from x = W across to x = -W
-    val tipX = width * (1f - 2f * p)
-    val archFactor = sin(p * Math.PI).toFloat() * (1f - p).pow(0.55f)
-    val verticalLift = height * (0.16f + 0.34f * abs(effectiveBias)) * archFactor
-    val tipY = if (effectiveBias >= 0f) {
-        (cornerY - verticalLift).coerceIn(height * 0.05f, height)
-    } else {
-        (cornerY + verticalLift).coerceIn(0f, height * 0.95f)
-    }
-
-    val dx = cornerX - tipX
-    val dy = cornerY - tipY
-    val len = hypot(dx, dy).coerceAtLeast(1e-3f)
-    val nx = dx / len
-    val ny = dy / len
-
-    // Midpoint M of (Corner, Tip) defines the perpendicular-bisector crease line
-    val foldX = (cornerX + tipX) * 0.5f
-    val foldY = (cornerY + tipY) * 0.5f
-
-    val pageRect = listOf(
-        Offset(0f, 0f),
-        Offset(width, 0f),
-        Offset(width, height),
-        Offset(0f, height)
-    )
-
-    val flatPoly = clipPolygonHalfPlane(pageRect, foldX, foldY, nx, ny, keepNegativeSide = true)
-    val peeledPoly = clipPolygonHalfPlane(pageRect, foldX, foldY, nx, ny, keepNegativeSide = false)
-    if (peeledPoly.size < 3 || flatPoly.size < 3) return null
-
-    // Foreshortening scale simulates the paper wrapping over a 3D curved cylinder before extending flat
-    val flapScale = (0.76f + 0.22f * p).coerceIn(0.74f, 0.98f)
-    var maxDist = 1f
-    val reflectedPoly = peeledPoly.map { pt ->
-        val d = ((pt.x - foldX) * nx + (pt.y - foldY) * ny).coerceAtLeast(0f)
-        if (d > maxDist) maxDist = d
-        Offset(
-            x = pt.x - (1f + flapScale) * d * nx,
-            y = pt.y - (1f + flapScale) * d * ny
-        )
-    }
-
-    // Identify the two intersection endpoints lying directly on the fold line (d ~ 0)
-    val foldEndpoints = peeledPoly.filter { pt ->
-        abs((pt.x - foldX) * nx + (pt.y - foldY) * ny) <= 2.5f
-    }
-    val edgeStart = foldEndpoints.firstOrNull() ?: Offset(foldX, 0f)
-    val edgeEnd = foldEndpoints.lastOrNull() ?: Offset(foldX, height)
-
-    return PageCurlGeometry(
-        foldOrigin = Offset(foldX, foldY),
-        normalX = nx,
-        normalY = ny,
-        flatPoly = flatPoly,
-        peeledPoly = peeledPoly,
-        reflectedFlapPoly = reflectedPoly,
-        foldEdgeStart = edgeStart,
-        foldEdgeEnd = edgeEnd,
-        maxPeeledDistance = maxDist * flapScale,
-        flapScale = flapScale
-    )
-}
-
-private fun buildCurvedFlapPath(geom: PageCurlGeometry): Path {
-    val path = Path()
-    val pts = geom.reflectedFlapPoly
-    if (pts.isEmpty()) return path
-
-    val fx = geom.foldOrigin.x
-    val fy = geom.foldOrigin.y
-    val nx = geom.normalX
-    val ny = geom.normalY
-    val bowAmount = (geom.maxPeeledDistance * 0.08f).coerceIn(4f, 28f)
-
-    path.moveTo(pts[0].x, pts[0].y)
-    for (i in pts.indices) {
-        val curr = pts[i]
-        val next = pts[(i + 1) % pts.size]
-        val currOnFold = abs((curr.x - fx) * nx + (curr.y - fy) * ny) <= 3f
-        val nextOnFold = abs((next.x - fx) * nx + (next.y - fy) * ny) <= 3f
-
-        if (currOnFold != nextOnFold) {
-            // Add a subtle outward S-curve where the paper bends off the fold crease
-            val midX = (curr.x + next.x) * 0.5f - nx * bowAmount
-            val midY = (curr.y + next.y) * 0.5f - ny * bowAmount
-            path.quadraticBezierTo(midX, midY, next.x, next.y)
-        } else {
-            path.lineTo(next.x, next.y)
-        }
-    }
-    path.close()
-    return path
-}
-
-@Composable
-fun ShelfModeTogglePill(
-    shelfMode: String,
-    onSelectMode: (String) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(50))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(50))
-            .padding(3.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        val isAudio = shelfMode == "AUDIO"
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(if (isAudio) MaterialTheme.colorScheme.primary else Color.Transparent)
-                .clickable { onSelectMode("AUDIO") }
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = Icons.Default.Headphones,
-                contentDescription = null,
-                tint = if (isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(Modifier.width(5.dp))
-            Text(
-                text = "Audio",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                color = if (isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(if (!isAudio) MaterialTheme.colorScheme.primary else Color.Transparent)
-                .clickable { onSelectMode("EBOOK") }
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = Icons.Default.MenuBook,
-                contentDescription = null,
-                tint = if (!isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(Modifier.width(5.dp))
-            Text(
-                text = "eBooks",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                color = if (!isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-fun FoldableSpineDivider() {
-    Box(
-        modifier = Modifier
-            .fillMaxHeight()
-            .width(10.dp)
-            .background(
-                Brush.horizontalGradient(
-                    colors = listOf(
-                        Color.Black.copy(alpha = 0.35f),
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
-                        Color.Black.copy(alpha = 0.35f)
-                    )
-                )
-            )
-    )
-}
-
-@Composable
-fun ContrastThemeIcon(
-    tint: Color = MaterialTheme.colorScheme.primary,
-    modifier: Modifier = Modifier
-) {
-    Canvas(modifier = modifier) {
-        val strokeWidth = 2.dp.toPx()
-        val radius = (size.minDimension / 2f) - strokeWidth
-        val center = Offset(size.width / 2f, size.height / 2f)
-        drawCircle(color = tint, radius = radius, center = center, style = Stroke(width = strokeWidth))
-        val innerRadius = (radius - (strokeWidth / 2f)).coerceAtLeast(0f)
-        drawArc(
-            color = tint,
-            startAngle = 90f,
-            sweepAngle = 180f,
-            useCenter = true,
-            topLeft = Offset(center.x - innerRadius, center.y - innerRadius),
-            size = Size(innerRadius * 2f, innerRadius * 2f)
-        )
-    }
-}
-
-@Composable
-fun MiniPlayerBar(
-    book: Audiobook,
-    coverArt: ImageBitmap?,
-    chapterTitle: String,
-    isPlaying: Boolean,
-    onPlayPause: () -> Unit,
-    onOpenPlayer: () -> Unit
-) {
-    Surface(
-        tonalElevation = 6.dp,
-        shadowElevation = 8.dp,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier
-            .fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.navigationBars)
-            .clickable { onOpenPlayer() }
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.surface),
-                contentAlignment = Alignment.Center
-            ) {
-                if (coverArt != null) {
-                    Image(
-                        bitmap = coverArt,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.Headphones,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-
-            Spacer(Modifier.width(12.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = book.title,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    text = chapterTitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            IconButton(onClick = onPlayPause) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = "Play/Pause",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(32.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun CarModeScreen(
-    book: Audiobook,
-    chapterTitle: String,
-    isPlaying: Boolean,
-    skipIntervalSeconds: Int,
-    onPlayPause: () -> Unit,
-    onQuickRewind: () -> Unit,
-    onQuickForward: () -> Unit,
-    onAddBookmark: () -> Unit,
-    onExitCarMode: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF08120E))
-            .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.DirectionsCar, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(36.dp))
-                Spacer(Modifier.width(12.dp))
-                Text(stringResource(R.string.car_mode), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
-            }
-            IconButton(
-                onClick = onExitCarMode,
-                modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xFF1A3324))
-            ) {
-                Icon(Icons.Default.Close, contentDescription = "Exit Car Mode", tint = Color.White, modifier = Modifier.size(28.dp))
-            }
-        }
-
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 16.dp)) {
-            Text(
-                text = book.title,
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
-                textAlign = TextAlign.Center,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-          fset(foldX, height)
-
-    return PageCurlGeometry(
-        foldOrigin = Offset(foldX, foldY),
-        normalX = nx,
-        normalY = ny,
-        flatPoly = flatPoly,
-        peeledPoly = peeledPoly,
-        reflectedFlapPoly = reflectedPoly,
-        foldEdgeStart = edgeStart,
-        foldEdgeEnd = edgeEnd,
-        maxPeeledDistance = maxDist * flapScale,
-        flapScale = flapScale
-    )
-}
-
-private fun buildCurvedFlapPath(geom: PageCurlGeometry): Path {
-    val path = Path()
-    val pts = geom.reflectedFlapPoly
-    if (pts.isEmpty()) return path
-
-    val fx = geom.foldOrigin.x
-    val fy = geom.foldOrigin.y
-    val nx = geom.normalX
-    val ny = geom.normalY
-    val bowAmount = (geom.maxPeeledDistance * 0.08f).coerceIn(4f, 28f)
-
-    path.moveTo(pts[0].x, pts[0].y)
-    for (i in pts.indices) {
-        val curr = pts[i]
-        val next = pts[(i + 1) % pts.size]
-        val currOnFold = abs((curr.x - fx) * nx + (curr.y - fy) * ny) <= 3f
-        val nextOnFold = abs((next.x - fx) * nx + (next.y - fy) * ny) <= 3f
-
-        if (currOnFold != nextOnFold) {
-            // Add a subtle outward S-curve where the paper bends off the fold crease
-            val midX = (curr.x + next.x) * 0.5f - nx * bowAmount
-            val midY = (curr.y + next.y) * 0.5f - ny * bowAmount
-            path.quadraticBezierTo(midX, midY, next.x, next.y)
-        } else {
-            path.lineTo(next.x, next.y)
-        }
-    }
-    path.close()
-    return path
 }
 
 @Composable
@@ -1220,6 +759,7 @@ fun EpubReaderScreen(
 ) {
     val fmtUpper = ebook.format.uppercase(Locale.ROOT)
     val currentChapter = chapters.getOrNull(currentChapterIndex)
+    // A chapter is rendered in Reflowed Text Mode whenever bodyText is non-blank (including reflowed PDFs!)
     val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
 
     val bgColor = when (readerTheme) {
@@ -1227,20 +767,15 @@ fun EpubReaderScreen(
         "LIGHT" -> Color(0xFFFAFAFA)
         else -> Color(0xFF0C1A14)
     }
-    val curlBackPaperBaseColor = when (readerTheme) {
-        "SEPIA" -> Color(0xFFEDE1C7)
-        "LIGHT" -> Color(0xFFF2F4F3)
-        else -> Color(0xFF13281F)
+    val curlBackMidColor = when (readerTheme) {
+        "SEPIA" -> Color(0xFFE4D5B7)
+        "LIGHT" -> Color(0xFFE8ECE9)
+        else -> Color(0xFF183327)
     }
     val curlBackHighlightColor = when (readerTheme) {
-        "SEPIA" -> Color(0xFFFDF9F0)
+        "SEPIA" -> Color(0xFFFBF6EC)
         "LIGHT" -> Color(0xFFFFFFFF)
-        else -> Color(0xFF214233)
-    }
-    val curlBackShadeColor = when (readerTheme) {
-        "SEPIA" -> Color(0xFFD6C5A3)
-        "LIGHT" -> Color(0xFFD9E0DC)
-        else -> Color(0xFF09130E)
+        else -> Color(0xFF244938)
     }
     val textColor = when (readerTheme) {
         "SEPIA" -> Color(0xFF3B2F2F)
@@ -1259,6 +794,7 @@ fun EpubReaderScreen(
         mutableStateOf(repository.getPreferences().getBoolean("pdf_original_page_mode", false))
     }
 
+    // Sub-page state within the current chapter for single-page turning
     var subPageIndex by remember(ebook.id, currentChapterIndex) { mutableIntStateOf(0) }
     var startAtLastSubPage by remember { mutableStateOf(false) }
 
@@ -1268,16 +804,15 @@ fun EpubReaderScreen(
     var isRenderingVisualPage by remember(ebook.id, currentChapterIndex) { mutableStateOf(false) }
 
     val coroutineScope = rememberCoroutineScope()
-    // curlAnim: 0f = flat, +0.01..+1f = curling forward (Next), -0.01..-1f = curling backward (Prev)
+    // curlAnim: 0f = flat page, +0.01..+1f = curling forward (Next), -0.01..-1f = curling backward (Prev)
     val curlAnim = remember { Animatable(0f) }
-    // Normalized vertical touch coordinate (0f = top, 0.5f = center, 1f = bottom) for corner-lifting tilt
-    var curlTouchYNorm by remember { mutableFloatStateOf(0.78f) }
 
     LaunchedEffect(currentChapterIndex, ebook.id, isVisualPageMode, readerTheme) {
         if (isVisualPageMode) {
             isRenderingVisualPage = true
             renderedPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex, 1400, readerTheme)
             isRenderingVisualPage = false
+            // Pre-render adjacent pages for smooth page-curl preview
             if (currentChapterIndex + 1 < chapters.size) {
                 nextPageBitmap = repository.renderPdfPageBitmap(ebook, currentChapterIndex + 1, 1200, readerTheme)
             }
@@ -1357,7 +892,7 @@ fun EpubReaderScreen(
 
         HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
 
-        // Main Interactive 2D/3D Page-Curl Area + Bottom Navigation Bar
+        // Main Interactive 3D Page-Curl Reading Canvas
         BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
@@ -1365,11 +900,11 @@ fun EpubReaderScreen(
                 .background(bgColor)
         ) {
             val availWidthDp = maxWidth.value
-            val availHeightDp = (maxHeight.value - 48f).coerceAtLeast(180f)
+            val availHeightDp = maxHeight.value
 
             val charsPerLine = ((availWidthDp - 44f) / (fontSizeSp * 0.54f)).toInt().coerceIn(26, 85)
             val lineHeightSp = fontSizeSp * 1.52f
-            val linesPerPage = ((availHeightDp - 40f) / (lineHeightSp * 1.05f)).toInt().coerceIn(10, 42)
+            val linesPerPage = ((availHeightDp - 52f) / (lineHeightSp * 1.05f)).toInt().coerceIn(10, 42)
 
             val subPages = remember(currentChapter?.bodyText, charsPerLine, linesPerPage) {
                 if (isVisualPageMode) listOf("")
@@ -1407,30 +942,27 @@ fun EpubReaderScreen(
                 }
             }
 
-            fun animatePageTurnForward(startYNorm: Float = 0.78f) {
+            fun animatePageTurnForward() {
                 if (!canGoNext || curlAnim.isRunning) return
-                curlTouchYNorm = startYNorm
                 coroutineScope.launch {
-                    curlAnim.snapTo(0.03f)
-                    curlAnim.animateTo(1f, tween(durationMillis = 420, easing = FastOutSlowInEasing))
+                    curlAnim.snapTo(0.04f)
+                    curlAnim.animateTo(1f, tween(durationMillis = 360))
                     commitNextPage()
                     curlAnim.snapTo(0f)
                 }
             }
 
-            fun animatePageTurnBackward(startYNorm: Float = 0.78f) {
+            fun animatePageTurnBackward() {
                 if (!canGoPrev || curlAnim.isRunning) return
-                curlTouchYNorm = startYNorm
                 coroutineScope.launch {
-                    curlAnim.snapTo(-0.03f)
-                    curlAnim.animateTo(-1f, tween(durationMillis = 420, easing = FastOutSlowInEasing))
+                    curlAnim.snapTo(-0.04f)
+                    curlAnim.animateTo(-1f, tween(durationMillis = 360))
                     commitPrevPage()
                     curlAnim.snapTo(0f)
                 }
             }
 
-            val currSubPageText = subPages.getOrElse(subPageIndex) { "" }
-            val nextPreviewText = remember(subPageIndex, subPages, currentChapterIndex, chapters, charsPerLine, linesPerPage) {
+            val nextPreviewText = remember(subPageIndex, subPages, currentChapterIndex, chapters) {
                 if (subPageIndex + 1 < subPages.size) {
                     subPages[subPageIndex + 1]
                 } else if (currentChapterIndex + 1 < chapters.size) {
@@ -1439,7 +971,7 @@ fun EpubReaderScreen(
                 } else ""
             }
 
-            val prevPreviewText = remember(subPageIndex, subPages, currentChapterIndex, chapters, charsPerLine, linesPerPage) {
+            val prevPreviewText = remember(subPageIndex, subPages, currentChapterIndex, chapters) {
                 if (subPageIndex > 0) {
                     subPages[subPageIndex - 1]
                 } else if (currentChapterIndex > 0) {
@@ -1501,16 +1033,1012 @@ fun EpubReaderScreen(
                 }
             }
 
-            Column(modifier = Modifier.fillMaxSize()) {
-                // Interactive Page-Curl Viewport
+            if (isLoading || (isVisualPageMode && isRenderingVisualPage && renderedPageBitmap == null)) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = accentColor)
+                }
+            } else {
+                val curlVal = curlAnim.value
                 Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
+                        .fillMaxSize()
                         .pointerInput(currentChapterIndex, subPageIndex, subPages.size, chapters.size) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                val w = size.width.toFloat().coerceAtLeast(1f)
-                                val h = size.height.toFloat().coerceAtLeast(1f)
+                            detectHorizontalDragGestures(
+                                onDragEnd = {
+                                    val c = curlAnim.value
+                                    coroutineScope.launch {
+                                        when {
+                                            c > 0.16f && canGoNext -> {
+                                                curlAnim.animateTo(1f, tween(240))
+                                                commitNextPage()
+                                                curlAnim.snapTo(0f)
+                                            }
+                                            c < -0.16f && canGoPrev -> {
+                                                curlAnim.animateTo(-1f, tween(240))
+                                                commitPrevPage()
+                                                curlAnim.snapTo(0f)
+                                            }
+                                            else -> {
+                                                curlAnim.animateTo(0f, tween(200))
+                                            }
+                                        }
+                                    }
+                                },
+                                onDragCancel = {
+                                    coroutineScope.launch { curlAnim.animateTo(0f, tween(200)) }
+                                },
+                                onHorizontalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                                    val delta = -dragAmount / (widthPx * 0.85f)
+                                    val target = (curlAnim.value + delta).coerceIn(
+                                        if (canGoPrev) -1f else 0f,
+                                        if (canGoNext) 1f else 0f
+                                    )
+                                    coroutineScope.launch { curlAnim.snapTo(target) }
+                                }
+                            )
+                        }
+                ) {
+                    // 1. Underneath Revealed Page (Next or Previous Page)
+                    if (curlVal > 0.005f) {
+                        val isNextNewChapter = subPageIndex + 1 >= subPages.size
+                        val nextHeading = if (isNextNewChapter && currentChapterIndex + 1 < chapters.size) {
+                            chapters[currentChapterIndex + 1].title
+                        } else ""
+                        PageContentLayer(
+                            pageText = nextPreviewText,
+                            showChapterHeading = isNextNewChapter,
+                            headingText = nextHeading,
+                            visualBitmap = nextPageBitmap ?: renderedPageBitmap
+                        )
+                    } else if (curlVal < -0.005f) {
+                        val isPrevFirstSubPage = subPageIndex == 1
+                        PageContentLayer(
+                            pageText = prevPreviewText,
+                            showChapterHeading = isPrevFirstSubPage,
+                            headingText = currentChapter?.title ?: "",
+                            visualBitmap = prevPageBitmap ?: renderedPageBitmap
+                        )
+                    }
 
-                                var totalDragX = 0
+                    // 2. Top Active Page with 3D Curved Page-Curl Clip, Back-Flap & Cast Shadow
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .drawWithContent {
+                                val c = curlAnim.value
+                                if (abs(c) < 0.005f) {
+                                    drawContent()
+                                } else if (c > 0f) {
+                                    // Curling Forward (Right-to-Left): Current page peels back from the right
+                                    val progress = c.coerceIn(0f, 1f)
+                                    val w = size.width
+                                    val h = size.height
+                                    val spineX = w * (1f - progress)
+                                    val curveBow = sin(progress * Math.PI).toFloat() * (w * 0.085f)
+                                    val flapWidth = (w * 0.28f * sin(progress * Math.PI).toFloat()).coerceAtLeast(14f)
+                                    val flapRightX = (spineX + flapWidth).coerceAtMost(w)
+
+                                    val visiblePagePath = Path().apply {
+                                        moveTo(0f, 0f)
+                                        lineTo(spineX, 0f)
+                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, h)
+                                        lineTo(0f, h)
+                                        close()
+                                    }
+
+                                    clipPath(visiblePagePath, ClipOp.Intersect) {
+                                        this@drawWithContent.drawContent()
+                                    }
+
+                                    // Drop shadow cast onto the revealed next page underneath
+                                    val shadowEnd = (flapRightX + 54f).coerceAtMost(w)
+                                    if (shadowEnd > spineX) {
+                                        drawRect(
+                                            brush = Brush.horizontalGradient(
+                                                colors = listOf(
+                                                    Color.Black.copy(alpha = 0.42f * (1f - progress * 0.4f)),
+                                                    Color.Transparent
+                                                ),
+                                                startX = spineX,
+                                                endX = shadowEnd
+                                            ),
+                                            topLeft = Offset(spineX, 0f),
+                                            size = Size(shadowEnd - spineX, h)
+                                        )
+                                    }
+
+                                    // 3D Curved Paper Back-Flap (Bends at top and bottom like Google Play Books)
+                                    val verticalPinch = h * 0.035f * sin(progress * Math.PI).toFloat()
+                                    val backFlapPath = Path().apply {
+                                        moveTo(spineX, 0f)
+                                        quadraticBezierTo(
+                                            (spineX + flapRightX) * 0.5f,
+                                            verticalPinch,
+                                            flapRightX,
+                                            verticalPinch * 1.4f
+                                        )
+                                        quadraticBezierTo(
+                                            flapRightX - (curveBow * 0.6f),
+                                            h * 0.5f,
+                                            flapRightX,
+                                            h - (verticalPinch * 1.4f)
+                                        )
+                                        quadraticBezierTo(
+                                            (spineX + flapRightX) * 0.5f,
+                                            h - verticalPinch,
+                                            spineX,
+                                            h
+                                        )
+                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, 0f)
+                                        close()
+                                    }
+
+                                    drawPath(
+                                        path = backFlapPath,
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                curlBackHighlightColor,
+                                                curlBackMidColor,
+                                                Color.Black.copy(alpha = 0.25f)
+                                            ),
+                                            startX = (spineX - curveBow).coerceAtLeast(0f),
+                                            endX = flapRightX.coerceAtLeast(spineX + 1f)
+                                        )
+                                    )
+
+                                    // Specular highlight along the curved fold spine
+                                    val spineLine = Path().apply {
+                                        moveTo(spineX, 0f)
+                                        quadraticBezierTo(spineX - curveBow, h * 0.5f, spineX, h)
+                                    }
+                                    drawPath(
+                                        path = spineLine,
+                                        color = accentColor.copy(alpha = 0.45f),
+                                        style = Stroke(width = 2.dp.toPx())
+                                    )
+                                } else {
+                                    // Curling Backward (Left-to-Right): Previous page uncurls from the left
+                                    val progress = abs(c).coerceIn(0f, 1f)
+                                    val w = size.width
+                                    val h = size.height
+                                    val spineX = w * progress
+                                    val curveBow = sin(progress * Math.PI).toFloat() * (w * 0.075f)
+                                    val flapWidth = (w * 0.24f * sin(progress * Math.PI).toFloat()).coerceAtLeast(12f)
+                                    val flapLeftX = (spineX - flapWidth).coerceAtLeast(0f)
+
+                                    val rightSidePath = Path().apply {
+                                        moveTo(spineX, 0f)
+                                        lineTo(w, 0f)
+                                        lineTo(w, h)
+                                        lineTo(spineX, h)
+                                        quadraticBezierTo(spineX + curveBow, h * 0.5f, spineX, 0f)
+                                        close()
+                                    }
+
+                                    clipPath(rightSidePath, ClipOp.Intersect) {
+                                        this@drawWithContent.drawContent()
+                                    }
+
+                                    val shadowEnd = (spineX + 48f).coerceAtMost(w)
+                                    drawRect(
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                Color.Black.copy(alpha = 0.38f),
+                                                Color.Transparent
+                                            ),
+                                            startX = spineX,
+                                            endX = shadowEnd.coerceAtLeast(spineX + 1f)
+                                        ),
+                                        topLeft = Offset(spineX, 0f),
+                                        size = Size((shadowEnd - spineX).coerceAtLeast(1f), h)
+                                    )
+
+                                    val backFlapPath = Path().apply {
+                                        moveTo(flapLeftX, 0f)
+                                        lineTo(spineX, 0f)
+                                        quadraticBezierTo(spineX + curveBow, h * 0.5f, spineX, h)
+                                        lineTo(flapLeftX, h)
+                                        close()
+                                    }
+                                    drawPath(
+                                        path = backFlapPath,
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                curlBackMidColor,
+                                                curlBackHighlightColor
+                                            ),
+                                            startX = flapLeftX,
+                                            endX = (spineX + curveBow).coerceAtLeast(flapLeftX + 1f)
+                                        )
+                                    )
+                                }
+                            }
+                    ) {
+                        val currSubPageText = subPages.getOrElse(subPageIndex) { "" }
+                        PageContentLayer(
+                            pageText = currSubPageText,
+                            showChapterHeading = subPageIndex == 0,
+                            headingText = currentChapter?.title ?: "",
+                            visualBitmap = renderedPageBitmap
+                        )
+                    }
+                }
+            }
+
+            // Bottom Page-Turn Bar inside BoxWithConstraints so Prev/Next buttons trigger the 3D Page-Curl!
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(bgColor.copy(alpha = 0.95f))
+            ) {
+                HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = { animatePageTurnBackward() },
+                        enabled = canGoPrev
+                    ) {
+                        Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
+                        Text("Prev", color = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
+                    }
+
+                    val statusLabel = if (isVisualPageMode) {
+                        "Page ${currentChapterIndex + 1} of ${chapters.size}"
+                    } else if (subPages.size > 1) {
+                        "Ch ${currentChapterIndex + 1}/${chapters.size} • Page ${subPageIndex + 1}/${subPages.size}"
+                    } else {
+                        "Chapter ${currentChapterIndex + 1} of ${chapters.size}"
+                    }
+
+                    Text(
+                        text = statusLabel,
+                        fontSize = 12.sp,
+                        color = textColor.copy(alpha = 0.85f),
+                        modifier = Modifier.clickable { showTocDialog = true }
+                    )
+
+                    TextButton(
+                        onClick = { animatePageTurnForward() },
+                        enabled = canGoNext
+                    ) {
+                        Text("Next", color = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
+                        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
+                    }
+                }
+            }
+        }
+    }
+
+    if (showTocDialog) {
+        val listHeader = if (isVisualPageMode) "Pages (${chapters.size})" else "Chapters (${chapters.size})"
+        AlertDialog(
+            onDismissRequest = { showTocDialog = false },
+            title = { Text(listHeader) },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    chapters.forEachIndexed { idx, chap ->
+                        val isCurr = idx == currentChapterIndex
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    subPageIndex = 0
+                                    onSelectChapter(idx)
+                                    showTocDialog = false
+                                }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (isVisualPageMode) chap.title else "${idx + 1}. ${chap.title}",
+                                fontWeight = if (isCurr) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isCurr) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showTocDialog = false }) { Text("Close") }
+            }
+        )
+    }
+
+    if (showReaderSettings) {
+        AlertDialog(
+            onDismissRequest = { showReaderSettings = false },
+            title = { Text("Reader Appearance") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(onClick = { onUpdateFontSize(fontSizeSp - 2f) }) { Text("A-") }
+                        Text("${fontSizeSp.toInt()} pt", fontWeight = FontWeight.Bold)
+                        OutlinedButton(onClick = { onUpdateFontSize(fontSizeSp + 2f) }) { Text("A+") }
+                    }
+
+                    Text("Reading Theme", fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf("FOREST" to "Forest", "SEPIA" to "Sepia", "LIGHT" to "Light").forEach { (key, label) ->
+                            FilterChip(
+                                selected = readerTheme == key,
+                                onClick = { onUpdateTheme(key) },
+                                label = { Text(label) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
+                    if (fmtUpper == "PDF") {
+                        HorizontalDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Reflow PDF like ePub", fontWeight = FontWeight.Bold)
+                                Text(
+                                    "Extract text for adjustable font sizes, or switch off for auto-cropped page view",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = !pdfOriginalPageMode,
+                                onCheckedChange = { reflowEnabled ->
+                                    pdfOriginalPageMode = !reflowEnabled
+                                    repository.getPreferences().edit()
+                                        .putBoolean("pdf_original_page_mode", pdfOriginalPageMode)
+                                        .apply()
+                                    onReloadEbook()
+                                }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showReaderSettings = false }) { Text("Done") }
+            }
+        )
+    }
+}
+
+@Composable
+fun BookCardWrapper(
+    book: Audiobook,
+    isSelected: Boolean,
+    liveProgress: Float?,
+    liveSubtitle: String?,
+    viewMode: String,
+    viewModel: LibraryViewModel,
+    onSelectBook: (Audiobook) -> Unit,
+    onLongPressBook: (Audiobook) -> Unit
+) {
+    var cardArt by remember(book.id, viewModel.coverRevision) { mutableStateOf<ImageBitmap?>(null) }
+    var savedProgress by remember(book.id, viewModel.progressRevision) { mutableFloatStateOf(0f) }
+    var savedSubtitle by remember(book.id, viewModel.progressRevision) { mutableStateOf("") }
+
+    LaunchedEffect(book.id, viewModel.coverRevision) {
+        val bmp = viewModel.repository.getOrFetchCoverArt(book)
+        cardArt = bmp?.asImageBitmap()
+    }
+
+    LaunchedEffect(book.id, viewModel.progressRevision) {
+        val isCompleted = viewModel.repository.loadCompletedBookIds().contains(book.id)
+        if (isCompleted) {
+            savedProgress = 1f
+            savedSubtitle = "Completed"
+        } else {
+            val savedPos = viewModel.repository.getBookPosition(book.id)
+            val savedTrackIdx = viewModel.repository.getBookTrackIndex(book.id)
+            val cachedDurations = viewModel.repository.getCachedTrackDurations(book.id)
+            var totalDur = viewModel.repository.getCachedBookDuration(book.id)
+
+            if (totalDur <= 0L && (savedPos > 0L || savedTrackIdx > 0)) {
+                val computed = viewModel.repository.getOrComputeTrackDurations(book)
+                totalDur = bookDurationMs(computed)
+            }
+
+            if (savedPos > 0L || savedTrackIdx > 0) {
+                if (totalDur > 0L) {
+                    val offsetMs = if (book.tracks.size > 1 && cachedDurations.isNotEmpty()) {
+                        bookOffsetMs(cachedDurations, savedTrackIdx, savedPos)
+                    } else {
+                        savedPos
+                    }
+                    savedProgress = (offsetMs.toFloat() / totalDur).coerceIn(0.01f, 0.99f)
+                    val remaining = (totalDur - offsetMs).coerceAtLeast(0L)
+                    savedSubtitle = "${formatTime(remaining)} left"
+                } else if (book.tracks.size > 1) {
+                    savedProgress = (savedTrackIdx.toFloat() / book.tracks.size).coerceIn(0.01f, 0.99f)
+                    savedSubtitle = "Part ${savedTrackIdx + 1} of ${book.tracks.size}"
+                } else {
+                    savedProgress = 0.05f
+                    savedSubtitle = "In Progress"
+                }
+            } else {
+                savedProgress = 0f
+                savedSubtitle = if (book.tracks.size == 1 && book.tracks.first().isM4b) "M4B Audiobook" else "${book.tracks.size} tracks"
+            }
+        }
+    }
+
+    val displayProgress = if (isSelected && liveProgress != null && liveProgress > 0f) liveProgress else savedProgress
+    val displaySubtitle = if (isSelected && !liveSubtitle.isNullOrEmpty()) liveSubtitle else savedSubtitle
+
+    if (viewMode == "GRID") {
+        GridBookCard(
+            book = book,
+            coverArt = cardArt,
+            progress = displayProgress,
+            subtitleText = displaySubtitle,
+            isSelected = isSelected,
+            onClick = { onSelectBook(book) },
+            onLongClick = { onLongPressBook(book) }
+        )
+    } else {
+        ListBookCard(
+            book = book,
+            coverArt = cardArt,
+            progress = displayProgress,
+            subtitleText = displaySubtitle,
+            isSelected = isSelected,
+            onClick = { onSelectBook(book) },
+            onLongClick = { onLongPressBook(book) }
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun GridBookCard(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    progress: Float,
+    subtitleText: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            if (coverArt != null) {
+                Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(4.dp)
+            ) {
+                Icon(Icons.Default.Headphones, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+
+            if (progress > 0f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth(progress)
+                        .height(4.dp)
+                        .background(MaterialTheme.colorScheme.tertiary)
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (subtitleText.isNotEmpty()) {
+            Text(
+                text = subtitleText,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ListBookCard(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    progress: Float,
+    subtitleText: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.primary),
+                contentAlignment = Alignment.Center
+            ) {
+                if (coverArt != null) {
+                    Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else {
+                    Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
+                }
+
+                if (progress > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth(progress)
+                            .height(4.dp)
+                            .background(MaterialTheme.colorScheme.tertiary)
+                    )
+                }
+            }
+
+            Spacer(Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (subtitleText.isNotEmpty()) {
+                    Text(
+                        text = subtitleText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Icon(
+                imageVector = Icons.Default.Headphones,
+                contentDescription = null,
+                tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+fun NowPlayingScreen(
+    book: Audiobook,
+    coverArt: ImageBitmap?,
+    chapterTitle: String,
+    isPlaying: Boolean,
+    currentPosition: Long,
+    duration: Long,
+    bookPositionMs: Long,
+    bookDurationMs: Long,
+    skipIntervalSeconds: Int,
+    silenceTrimEnabled: Boolean,
+    sleepTimerActive: Boolean,
+    sleepTimeRemaining: Long,
+    sleepEndAtChapter: Boolean,
+    isDarkTheme: Boolean,
+    playerVolume: Float,
+    playbackSpeed: Float,
+    isEmbeddedPane: Boolean = false,
+    onOpenDrawer: () -> Unit,
+    onBackToBookshelf: () -> Unit,
+    onPlayPause: () -> Unit,
+    onSeekLive: (Long) -> Unit,
+    onSeekFinished: (Long) -> Unit,
+    onSkipPrevChapter: () -> Unit,
+    onSkipNextChapter: () -> Unit,
+    onQuickRewind: () -> Unit,
+    onQuickForward: () -> Unit,
+    onToggleSilenceTrim: () -> Unit,
+    onOpenSleepMenu: () -> Unit,
+    onToggleTheme: () -> Unit,
+    onOpenAudioFX: () -> Unit,
+    onOpenChapters: () -> Unit,
+    onOpenBookmarks: () -> Unit,
+    onOpenSpeed: () -> Unit,
+    onEnterCarMode: () -> Unit,
+    onVolumeChange: (Float) -> Unit,
+    chapterStartMs: Long = 0L,
+    chapterDurationMs: Long = 0L
+) {
+    val totalDur = if (bookDurationMs > 0L) bookDurationMs else duration
+    val totalRead = if (bookDurationMs > 0L) bookPositionMs else currentPosition
+    val percentRead = if (totalDur > 0L) ((totalRead.toDouble() / totalDur.toDouble()) * 100).toInt().coerceIn(0, 100) else 0
+
+    val useChapterScrubber = chapterDurationMs > 0L
+    val sliderPositionMs = if (useChapterScrubber) {
+        (currentPosition - chapterStartMs).coerceIn(0L, chapterDurationMs)
+    } else {
+        currentPosition.coerceAtLeast(0L)
+    }
+    val sliderDurationMs = if (useChapterScrubber) {
+        chapterDurationMs.coerceAtLeast(1L)
+    } else {
+        duration.coerceAtLeast(1L)
+    }
+
+    var isDraggingSlider by remember { mutableStateOf(false) }
+    var dragSliderValue by remember { mutableFloatStateOf(0f) }
+    val activeSliderValue = if (isDraggingSlider) dragSliderValue else sliderPositionMs.toFloat()
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .let { if (!isEmbeddedPane) it.windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout)) else it }
+            .padding(16.dp)
+    ) {
+        val useBookSpread = !isEmbeddedPane && maxWidth >= 600.dp
+
+        @Composable
+        fun ControlsCard() {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(24.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = chapterTitle,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable { onOpenChapters() }
+                    )
+
+                    Spacer(Modifier.height(6.dp))
+
+                    Slider(
+                        value = activeSliderValue.coerceIn(0f, sliderDurationMs.toFloat()),
+                        onValueChange = { newSliderVal ->
+                            isDraggingSlider = true
+                            dragSliderValue = newSliderVal
+                            val targetMs = if (useChapterScrubber) {
+                                chapterStartMs + newSliderVal.toLong()
+                            } else {
+                                newSliderVal.toLong()
+                            }
+                            onSeekLive(targetMs)
+                        },
+                        onValueChangeFinished = {
+                            val finalMs = if (useChapterScrubber) {
+                                chapterStartMs + dragSliderValue.toLong()
+                            } else {
+                                dragSliderValue.toLong()
+                            }
+                            isDraggingSlider = false
+                            onSeekFinished(finalMs)
+                        },
+                        valueRange = 0f..sliderDurationMs.toFloat(),
+                        colors = SliderDefaults.colors(
+                            thumbColor = MaterialTheme.colorScheme.primary,
+                            activeTrackColor = MaterialTheme.colorScheme.primary,
+                            inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(formatTime(activeSliderValue.toLong()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("-${formatTime((sliderDurationMs - activeSliderValue.toLong()).coerceAtLeast(0L))}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onSkipPrevChapter) {
+                            Icon(Icons.Default.SkipPrevious, contentDescription = "Prev Chapter", modifier = Modifier.size(32.dp))
+                        }
+
+                        IconButton(onClick = onQuickRewind) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Replay, contentDescription = "Rewind", modifier = Modifier.size(38.dp))
+                                Text(text = "$skipIntervalSeconds", fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 2.dp))
+                            }
+                        }
+
+                        IconButton(onClick = onPlayPause, modifier = Modifier.size(60.dp)) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = "Play/Pause",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(52.dp)
+                            )
+                        }
+
+                        IconButton(onClick = onQuickForward) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.RotateRight, contentDescription = "Forward", modifier = Modifier.size(38.dp))
+                                Text(text = "$skipIntervalSeconds", fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 2.dp))
+                            }
+                        }
+
+                        IconButton(onClick = onSkipNextChapter) {
+                            Icon(Icons.Default.SkipNext, contentDescription = "Next Chapter", modifier = Modifier.size(32.dp))
+                        }
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onOpenSpeed) {
+                            Text(
+                                text = String.format(Locale.US, "%.1fx", playbackSpeed),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        IconButton(
+                            onClick = onToggleSilenceTrim,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (silenceTrimEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCut,
+                                contentDescription = "Trim Silence",
+                                tint = if (silenceTrimEnabled) Color.Black else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        IconButton(onClick = onOpenSleepMenu) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Bedtime,
+                                    contentDescription = "Sleep Timer",
+                                    tint = if (sleepTimerActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (sleepTimerActive) {
+                                    Badge(modifier = Modifier.offset(x = 10.dp, y = (-10).dp)) {
+                                        Text(if (sleepEndAtChapter) "End" else "${TimeUnit.MILLISECONDS.toMinutes(sleepTimeRemaining) + 1}m")
+                                    }
+                                }
+                            }
+                        }
+
+                        IconButton(onClick = onToggleTheme) {
+                            ContrastThemeIcon(tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+                        }
+
+                        IconButton(onClick = onOpenAudioFX) {
+                            Icon(Icons.Default.GraphicEq, contentDescription = stringResource(R.string.audio_fx), tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (useBookSpread) {
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f).fillMaxHeight().padding(end = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onOpenDrawer) {
+                            Icon(Icons.Default.Menu, contentDescription = "Open Drawer Menu")
+                        }
+                        IconButton(onClick = onBackToBookshelf) {
+                            Icon(Icons.Default.CloseFullscreen, contentDescription = "Split View", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .size(240.dp)
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (coverArt != null) {
+                            Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                        } else {
+                            Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(96.dp), tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(book.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 2)
+                        Text(
+                            text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text("Total: ${formatTime(totalDur)} • Read: $percentRead%", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+
+                FoldableSpineDivider()
+
+                Column(
+                    modifier = Modifier.weight(1f).fillMaxHeight().padding(start = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        OutlinedButton(onClick = onEnterCarMode) {
+                            Icon(Icons.Default.DirectionsCar, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Car")
+                        }
+                        OutlinedButton(onClick = onOpenChapters) {
+                            Icon(Icons.Default.FormatListNumbered, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Chapters")
+                        }
+                        OutlinedButton(onClick = onOpenBookmarks) {
+                            Icon(Icons.Default.Bookmark, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Pins")
+                        }
+                    }
+
+                    ControlsCard()
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (!isEmbeddedPane) {
+                        IconButton(onClick = onOpenDrawer) {
+                            Icon(Icons.Default.Menu, contentDescription = "Open Drawer Menu")
+                        }
+                    } else {
+                        Spacer(Modifier.width(12.dp))
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onEnterCarMode) {
+                            Icon(Icons.Default.DirectionsCar, contentDescription = "Car Mode", tint = MaterialTheme.colorScheme.primary)
+                        }
+                        IconButton(onClick = onOpenChapters) {
+                            Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters", tint = MaterialTheme.colorScheme.primary)
+                        }
+                        IconButton(onClick = onOpenBookmarks) {
+                            Icon(Icons.Default.Bookmark, contentDescription = "Bookmarks", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+
+                    IconButton(onClick = onBackToBookshelf) {
+                        Icon(
+                            imageVector = if (isEmbeddedPane) Icons.Default.OpenInFull else Icons.Default.Book,
+                            contentDescription = "Toggle Player View",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    Text(
+                        text = book.title,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = if (book.series.isNotEmpty()) "${book.series} • ${book.author}" else book.author,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(if (isEmbeddedPane) 185.dp else 220.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (coverArt != null) {
+                        Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    } else {
+                        Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(84.dp), tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
+
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Total Book: ${formatTime(totalDur)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Read: ${formatTime(totalRead)} ( $percentRead% )", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                ControlsCard()
+            }
+        }
+    }
+}
+// END OF FILE
