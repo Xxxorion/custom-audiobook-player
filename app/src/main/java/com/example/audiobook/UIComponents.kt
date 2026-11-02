@@ -126,18 +126,18 @@ private fun resolveSmartChapterTitles(
             rawTitle.ifBlank { "Chapter ${chap.index + 1}" }
         }
 
-        // Strip leading line if it duplicates the resolved chapter title
-        val rawLines = chap.bodyText.lines()
-        val firstNonBlankIdx = rawLines.indexOfFirst { it.trim().isNotEmpty() }
-        val cleanedBody = if (firstNonBlankIdx != -1 &&
-            rawLines[firstNonBlankIdx].trim().equals(resolvedTitle.trim(), ignoreCase = true)
-        ) {
-            rawLines.drop(firstNonBlankIdx + 1).joinToString("\n").trim()
-        } else {
-            chap.bodyText.trim()
+        // Strip any consecutive leading lines that duplicate the resolved chapter title
+        var remainingLines = chap.bodyText.lines()
+        while (remainingLines.isNotEmpty()) {
+            val firstIdx = remainingLines.indexOfFirst { it.trim().isNotEmpty() }
+            if (firstIdx != -1 && remainingLines[firstIdx].trim().equals(resolvedTitle.trim(), ignoreCase = true)) {
+                remainingLines = remainingLines.drop(firstIdx + 1)
+            } else {
+                break
+            }
         }
 
-        chap.copy(title = resolvedTitle, bodyText = cleanedBody)
+        chap.copy(title = resolvedTitle, bodyText = remainingLines.joinToString("\n").trim())
     }
 }
 
@@ -150,7 +150,6 @@ private fun matchLineToTargetChapterIndex(
 ): Int? {
     if (chapters.size <= 1) return null
 
-    // Clean leader dots and trailing page numbers (e.g. "Chapter 1 ....... 14" -> "Chapter 1")
     val cleaned = rawLine.trim()
         .replace(Regex("[.…_\\s]+\\d+\\s*$"), "")
         .replace(Regex("^\\d+\\.\\s+"), "")
@@ -158,7 +157,6 @@ private fun matchLineToTargetChapterIndex(
 
     if (cleaned.length !in 2..68) return null
 
-    // Avoid turning normal story sentences into links on non-TOC pages
     val looksLikeTocOrHeadingLink = cleaned.matches(
         Regex("(?i)^(cover|title\\s*page|dedication|epigraph|contents|table\\s+of\\s+contents|prologue|preface|foreword|introduction|chapter\\s+[0-9ivxlcdm]+.*|part\\s+[0-9ivxlcdm]+.*|book\\s+[0-9ivxlcdm]+.*|epilogue|afterword|acknowledgm?ents|about\\s+the\\s+author|about\\s+the\\s+publisher|copyright|index|glossary|notes|appendix.*)$")
     )
@@ -178,7 +176,6 @@ private fun matchLineToTargetChapterIndex(
         return if (titlePageIdx != -1 && titlePageIdx != currentChapterIndex) titlePageIdx else 0
     }
 
-    // 1. Exact match on chapter title or opening line of chapter body
     for (chap in chapters) {
         if (chap.index == currentChapterIndex) continue
         val cTitle = chap.title.trim().lowercase(Locale.ROOT)
@@ -192,12 +189,10 @@ private fun matchLineToTargetChapterIndex(
         }
     }
 
-    // 2. Match "Chapter N" by chapter number
     val chapNumMatch = Regex("(?i)^chapter\\s+(\\d+)\\b").find(cleaned)
     if (chapNumMatch != null) {
         val targetNum = chapNumMatch.groupValues[1].toIntOrNull()
         if (targetNum != null && targetNum > 0) {
-            // First look for a chapter whose title or opening lines explicitly say "Chapter N" or "N"
             val explicitMatch = chapters.firstOrNull { chap ->
                 if (chap.index == currentChapterIndex) false
                 else {
@@ -212,7 +207,6 @@ private fun matchLineToTargetChapterIndex(
             }
             if (explicitMatch != null) return explicitMatch.index
 
-            // Fallback: offset from the first story chapter after Prologue/Contents
             val firstStoryChapIdx = chapters.indexOfFirst {
                 it.index > currentChapterIndex &&
                     !it.title.contains("prologue", ignoreCase = true) &&
@@ -227,7 +221,6 @@ private fun matchLineToTargetChapterIndex(
         }
     }
 
-    // 3. Substring match on front/back matter keywords (Dedication, Prologue, Epilogue, Acknowledgments, About the Author, etc.)
     for (chap in chapters) {
         if (chap.index == currentChapterIndex) continue
         val cTitle = chap.title.trim().lowercase(Locale.ROOT)
@@ -240,99 +233,108 @@ private fun matchLineToTargetChapterIndex(
     return null
 }
 
-// Preserves single line breaks (so Table of Contents lists stay on separate lines)
-// and splits chapters into screen-fitted pages for the 3D page-curl engine.
-fun paginateChapterText(
+// Exact StaticLayout pixel-measured pagination so the bottom line is NEVER cut in half!
+fun paginateChapterByMeasuredLayout(
     bodyText: String,
-    charsPerLine: Int,
-    linesPerPage: Int
+    headingText: String,
+    widthPx: Int,
+    heightPx: Int,
+    fontSizePx: Float
 ): List<String> {
     val clean = bodyText.replace("\r\n", "\n").trim()
     if (clean.isEmpty()) return listOf("")
 
-    val safeCharsPerLine = charsPerLine.coerceIn(24, 90)
-    val safeLinesPerPage = linesPerPage.coerceIn(8, 42)
+    val w = widthPx.coerceAtLeast(120)
+    val h = heightPx.coerceAtLeast(160)
+    val padH = (w * 0.068f).coerceAtLeast(28f)
+    val padTop = (h * 0.045f).coerceAtLeast(24f)
+    val padBottom = (h * 0.045f).coerceAtLeast(28f)
+    val contentWidth = (w - (padH * 2f)).toInt().coerceAtLeast(60)
 
-    val pages = mutableListOf<String>()
-    val currentPage = StringBuilder()
-    var currentLines = 0
+    val serifBold = Typeface.create(Typeface.SERIF, Typeface.BOLD)
+    val serifRegular = Typeface.create(Typeface.SERIF, Typeface.NORMAL)
 
-    val rawLines = clean.lines()
-    var blankPending = false
-
-    for (rawLine in rawLines) {
-        val trimmedLine = rawLine.trim()
-        if (trimmedLine.isEmpty()) {
-            if (currentPage.isNotEmpty()) {
-                blankPending = true
-            }
-            continue
+    val headingHeightPx = if (headingText.isNotBlank()) {
+        val headingPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+            textSize = fontSizePx * 1.32f
+            typeface = serifBold
         }
+        val hLayout = StaticLayout.Builder
+            .obtain(headingText, 0, headingText.length, headingPaint, contentWidth)
+            .setAlignment(Layout.Alignment.ALIGN_CENTER)
+            .setLineSpacing(0f, 1.15f)
+            .setIncludePad(false)
+            .build()
+        hLayout.height + (fontSizePx * 1.1f).toInt()
+    } else 0
 
-        if (blankPending) {
-            if (currentLines + 1 >= safeLinesPerPage && currentPage.isNotEmpty()) {
-                pages.add(currentPage.toString().trimEnd())
-                currentPage.clear()
-                currentLines = 0
-            } else if (currentPage.isNotEmpty()) {
-                currentPage.append("\n\n")
-                currentLines++
-            }
-            blankPending = false
-        } else if (currentPage.isNotEmpty()) {
-            if (currentLines + 1 >= safeLinesPerPage) {
-                pages.add(currentPage.toString().trimEnd())
-                currentPage.clear()
-                currentLines = 0
-            } else {
-                currentPage.append('\n')
-            }
-        }
-
-        val words = trimmedLine.split(Regex("[ \\t]+"))
-        var lineChars = 0
-        val lineBuf = StringBuilder()
-
-        for (word in words) {
-            val wordLen = word.length + if (lineChars > 0) 1 else 0
-            if (lineChars + wordLen > safeCharsPerLine && lineBuf.isNotEmpty()) {
-                currentPage.append(lineBuf.toString())
-                lineBuf.clear()
-                currentLines++
-                lineChars = 0
-
-                if (currentLines >= safeLinesPerPage) {
-                    pages.add(currentPage.toString().trimEnd())
-                    currentPage.clear()
-                    currentLines = 0
-                } else {
-                    currentPage.append('\n')
-                }
-            }
-            if (lineBuf.isNotEmpty()) lineBuf.append(' ')
-            lineBuf.append(word)
-            lineChars += wordLen
-        }
-
-        if (lineBuf.isNotEmpty()) {
-            currentPage.append(lineBuf.toString())
-            currentLines++
-            if (currentLines >= safeLinesPerPage) {
-                pages.add(currentPage.toString().trimEnd())
-                currentPage.clear()
-                currentLines = 0
-            }
-        }
+    val bodyPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        textSize = fontSizePx
+        typeface = serifRegular
     }
 
-    if (currentPage.isNotEmpty()) {
-        pages.add(currentPage.toString().trimEnd())
+    val fullLayout = StaticLayout.Builder
+        .obtain(clean, 0, clean.length, bodyPaint, contentWidth)
+        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+        .setLineSpacing(0f, 1.42f)
+        .setIncludePad(true)
+        .build()
+
+    val totalLines = fullLayout.lineCount
+    if (totalLines <= 0) return listOf(clean)
+
+    val fullAvailHeight = (h - padTop - padBottom - 8f).toInt().coerceAtLeast(80)
+    val firstPageAvailHeight = (fullAvailHeight - headingHeightPx).coerceAtLeast(60)
+
+    val pages = mutableListOf<String>()
+    var startLine = 0
+    var isFirstPage = true
+
+    while (startLine < totalLines) {
+        val maxPageHeight = if (isFirstPage) firstPageAvailHeight else fullAvailHeight
+        val startTop = fullLayout.getLineTop(startLine)
+        var endLine = startLine
+
+        while (endLine + 1 < totalLines) {
+            val nextBottom = fullLayout.getLineBottom(endLine + 1) - startTop
+            if (nextBottom <= maxPageHeight) {
+                endLine++
+            } else {
+                break
+            }
+        }
+
+        val charStart = fullLayout.getLineStart(startLine)
+        val charEnd = fullLayout.getLineEnd(endLine)
+        val pageSlice = clean.substring(charStart, charEnd).trim()
+        if (pageSlice.isNotEmpty()) {
+            pages.add(pageSlice)
+        }
+
+        startLine = endLine + 1
+        isFirstPage = false
     }
 
     return if (pages.isEmpty()) listOf(clean) else pages
 }
 
-// Renders a book page onto an offscreen Bitmap AND computes clickable chapter link hotspots!
+// Kept for backward compatibility if called by any unit test
+fun paginateChapterText(
+    bodyText: String,
+    charsPerLine: Int,
+    linesPerPage: Int
+): List<String> {
+    return paginateChapterByMeasuredLayout(
+        bodyText = bodyText,
+        headingText = "",
+        widthPx = charsPerLine * 18,
+        heightPx = linesPerPage * 44,
+        fontSizePx = 32f
+    )
+}
+
+// Renders a book page onto an offscreen Bitmap AND computes clickable chapter link hotspots.
+// No duplicate bottom footer is drawn inside the bitmap so the bottom line has full breathing room!
 private fun renderBookPageToBitmap(
     widthPx: Int,
     heightPx: Int,
@@ -345,7 +347,6 @@ private fun renderBookPageToBitmap(
     bodyText: String,
     fontSizePx: Float,
     visualBitmap: Bitmap?,
-    pageFooterLabel: String,
     allChapters: List<EbookChapter>,
     currentChapterIndex: Int,
     isTocChapter: Boolean
@@ -359,7 +360,7 @@ private fun renderBookPageToBitmap(
 
     val padH = (w * 0.068f).coerceAtLeast(28f)
     val padTop = (h * 0.045f).coerceAtLeast(24f)
-    val padBottom = (h * 0.065f).coerceAtLeast(36f)
+    val padBottom = (h * 0.035f).coerceAtLeast(20f)
     val contentWidth = (w - (padH * 2f)).toInt().coerceAtLeast(40)
 
     if (visualBitmap != null && bodyText.isBlank()) {
@@ -407,7 +408,6 @@ private fun renderBookPageToBitmap(
                 typeface = serifRegular
             }
 
-            // Identify clickable chapter link lines and color them with ForegroundColorSpan
             val spannable = SpannableString(bodyText)
             data class MatchedSpan(val start: Int, val end: Int, val targetIdx: Int, val label: String)
             val matchedSpans = mutableListOf<MatchedSpan>()
@@ -438,44 +438,29 @@ private fun renderBookPageToBitmap(
             val bodyLayout = StaticLayout.Builder
                 .obtain(spannable, 0, spannable.length, bodyPaint, contentWidth)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                .setLineSpacing(0f, 1.44f)
-                .setIncludePad(false)
+                .setLineSpacing(0f, 1.42f)
+                .setIncludePad(true)
                 .build()
 
-            val maxBodyHeight = (h - padBottom - currentY).toInt().coerceAtLeast(20)
             canvas.save()
-            canvas.clipRect(padH, currentY, padH + contentWidth, currentY + maxBodyHeight)
             canvas.translate(padH, currentY)
             bodyLayout.draw(canvas)
             canvas.restore()
 
-            // Compute exact canvas touch bounding boxes for each matched chapter link
             for (ms in matchedSpans) {
                 val startLine = bodyLayout.getLineForOffset(ms.start)
                 val endLine = bodyLayout.getLineForOffset(ms.end.coerceAtLeast(ms.start))
                 val topPx = currentY + bodyLayout.getLineTop(startLine) - 8f
                 val bottomPx = currentY + bodyLayout.getLineBottom(endLine) + 8f
-                if (topPx < currentY + maxBodyHeight) {
-                    hotspots.add(
-                        PageLinkHotspot(
-                            rect = RectF(padH - 12f, topPx, padH + contentWidth + 12f, bottomPx),
-                            targetChapterIndex = ms.targetIdx,
-                            label = ms.label
-                        )
+                hotspots.add(
+                    PageLinkHotspot(
+                        rect = RectF(padH - 12f, topPx, padH + contentWidth + 12f, bottomPx),
+                        targetChapterIndex = ms.targetIdx,
+                        label = ms.label
                     )
-                }
+                )
             }
         }
-    }
-
-    if (pageFooterLabel.isNotBlank()) {
-        val footerPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
-            color = textColorArgb
-            alpha = 150
-            textSize = (fontSizePx * 0.68f).coerceIn(22f, 34f)
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
-        }
-        canvas.drawText(pageFooterLabel, padH, h - (padBottom * 0.35f), footerPaint)
     }
 
     return RenderedBookPage(bitmap = bmp, hotspots = hotspots)
@@ -632,6 +617,7 @@ private fun draw3DCurledPageMesh(
     }
 }
 
+// Always stays a rounded capsule pill—even on the narrow left pane of an unfolded Fold!
 @Composable
 fun ShelfModeTogglePill(
     shelfMode: String,
@@ -639,55 +625,62 @@ fun ShelfModeTogglePill(
 ) {
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(50))
+            .height(36.dp)
+            .clip(CircleShape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(50))
+            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), CircleShape)
             .padding(3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         val isAudio = shelfMode == "AUDIO"
         Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(50))
+                .fillMaxHeight()
+                .clip(CircleShape)
                 .background(if (isAudio) MaterialTheme.colorScheme.primary else Color.Transparent)
                 .clickable { onSelectMode("AUDIO") }
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
                 imageVector = Icons.Default.Headphones,
                 contentDescription = null,
                 tint = if (isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp)
+                modifier = Modifier.size(15.dp)
             )
-            Spacer(Modifier.width(5.dp))
+            Spacer(Modifier.width(4.dp))
             Text(
                 text = "Audio",
-                fontSize = 13.sp,
+                fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                softWrap = false,
                 color = if (isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
 
         Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(50))
+                .fillMaxHeight()
+                .clip(CircleShape)
                 .background(if (!isAudio) MaterialTheme.colorScheme.primary else Color.Transparent)
                 .clickable { onSelectMode("EBOOK") }
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
                 imageVector = Icons.Default.MenuBook,
                 contentDescription = null,
                 tint = if (!isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp)
+                modifier = Modifier.size(15.dp)
             )
-            Spacer(Modifier.width(5.dp))
+            Spacer(Modifier.width(4.dp))
             Text(
                 text = "eBooks",
-                fontSize = 13.sp,
+                fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                softWrap = false,
                 color = if (!isAudio) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
@@ -1263,7 +1256,6 @@ fun EpubReaderScreen(
     val currentChapter = resolvedChapters.getOrNull(currentChapterIndex)
     val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
 
-    // Detect if the active chapter is a Table of Contents / Contents chapter
     val isTocChapter = remember(currentChapter, resolvedChapters) {
         val t = currentChapter?.title?.trim() ?: ""
         t.equals("Contents", ignoreCase = true) ||
@@ -1288,7 +1280,6 @@ fun EpubReaderScreen(
         "LIGHT" -> Color(0xFF2D5A27)
         else -> Color(0xFFD4AF37)
     }
-    // Google Play Books style chapter link color
     val linkColor = when (readerTheme) {
         "SEPIA" -> Color(0xFF1B5E91)
         "LIGHT" -> Color(0xFF1558D6)
@@ -1405,20 +1396,28 @@ fun EpubReaderScreen(
                 .background(bgColor)
         ) {
             val density = LocalDensity.current
+            val bottomBarHeightDp = 46.dp
             val canvasWidthPx = with(density) { maxWidth.toPx().toInt().coerceAtLeast(100) }
-            val canvasHeightPx = with(density) { (maxHeight - 48.dp).toPx().toInt().coerceAtLeast(100) }
+            val canvasHeightPx = with(density) { (maxHeight - bottomBarHeightDp).toPx().toInt().coerceAtLeast(100) }
             val fontSizePx = with(density) { fontSizeSp.sp.toPx() }
 
-            val availWidthDp = maxWidth.value
-            val availHeightDp = (maxHeight - 48.dp).value
-
-            val charsPerLine = ((availWidthDp - 48f) / (fontSizeSp * 0.56f)).toInt().coerceIn(26, 85)
-            val lineHeightSp = fontSizeSp * 1.46f
-            val linesPerPage = ((availHeightDp - 64f) / (lineHeightSp * 1.08f)).toInt().coerceIn(8, 38)
-
-            val subPages = remember(currentChapter?.bodyText, charsPerLine, linesPerPage, isVisualPageMode) {
+            // True StaticLayout-measured pagination so no line is ever sliced in half at the bottom!
+            val subPages = remember(
+                currentChapter?.bodyText,
+                currentChapter?.title,
+                canvasWidthPx,
+                canvasHeightPx,
+                fontSizePx,
+                isVisualPageMode
+            ) {
                 if (isVisualPageMode) listOf("")
-                else paginateChapterText(currentChapter?.bodyText ?: "", charsPerLine, linesPerPage)
+                else paginateChapterByMeasuredLayout(
+                    bodyText = currentChapter?.bodyText ?: "",
+                    headingText = currentChapter?.title ?: "",
+                    widthPx = canvasWidthPx,
+                    heightPx = canvasHeightPx,
+                    fontSizePx = fontSizePx
+                )
             }
 
             LaunchedEffect(subPages.size, currentChapterIndex) {
@@ -1493,20 +1492,36 @@ fun EpubReaderScreen(
             }
 
             val currSubPageText = subPages.getOrElse(subPageIndex) { "" }
-            val nextPreviewText = remember(subPageIndex, subPages, currentChapterIndex, resolvedChapters) {
+            val nextPreviewText = remember(
+                subPageIndex, subPages, currentChapterIndex, resolvedChapters, canvasWidthPx, canvasHeightPx, fontSizePx
+            ) {
                 if (subPageIndex + 1 < subPages.size) {
                     subPages[subPageIndex + 1]
                 } else if (currentChapterIndex + 1 < resolvedChapters.size) {
                     val nextChap = resolvedChapters[currentChapterIndex + 1]
-                    paginateChapterText(nextChap.bodyText, charsPerLine, linesPerPage).firstOrNull() ?: ""
+                    paginateChapterByMeasuredLayout(
+                        bodyText = nextChap.bodyText,
+                        headingText = nextChap.title,
+                        widthPx = canvasWidthPx,
+                        heightPx = canvasHeightPx,
+                        fontSizePx = fontSizePx
+                    ).firstOrNull() ?: ""
                 } else ""
             }
-            val prevPreviewText = remember(subPageIndex, subPages, currentChapterIndex, resolvedChapters) {
+            val prevPreviewText = remember(
+                subPageIndex, subPages, currentChapterIndex, resolvedChapters, canvasWidthPx, canvasHeightPx, fontSizePx
+            ) {
                 if (subPageIndex > 0) {
                     subPages[subPageIndex - 1]
                 } else if (currentChapterIndex > 0) {
                     val prevChap = resolvedChapters[currentChapterIndex - 1]
-                    paginateChapterText(prevChap.bodyText, charsPerLine, linesPerPage).lastOrNull() ?: ""
+                    paginateChapterByMeasuredLayout(
+                        bodyText = prevChap.bodyText,
+                        headingText = prevChap.title,
+                        widthPx = canvasWidthPx,
+                        heightPx = canvasHeightPx,
+                        fontSizePx = fontSizePx
+                    ).lastOrNull() ?: ""
                 } else ""
             }
 
@@ -1523,7 +1538,7 @@ fun EpubReaderScreen(
 
             val currentRenderedPage = remember(
                 canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
-                currentChapter?.title, subPageIndex, currSubPageText, fontSizePx, renderedPageBitmap, currentFooter,
+                currentChapter?.title, subPageIndex, currSubPageText, fontSizePx, renderedPageBitmap,
                 resolvedChapters, currentChapterIndex, isTocChapter
             ) {
                 renderBookPageToBitmap(
@@ -1538,7 +1553,6 @@ fun EpubReaderScreen(
                     bodyText = currSubPageText,
                     fontSizePx = fontSizePx,
                     visualBitmap = if (isVisualPageMode) renderedPageBitmap else null,
-                    pageFooterLabel = currentFooter,
                     allChapters = resolvedChapters,
                     currentChapterIndex = currentChapterIndex,
                     isTocChapter = isTocChapter
@@ -1565,7 +1579,6 @@ fun EpubReaderScreen(
                     bodyText = nextPreviewText,
                     fontSizePx = fontSizePx,
                     visualBitmap = if (isVisualPageMode) (nextPageBitmap ?: renderedPageBitmap) else null,
-                    pageFooterLabel = "",
                     allChapters = resolvedChapters,
                     currentChapterIndex = if (isNextNewChapter) currentChapterIndex + 1 else currentChapterIndex,
                     isTocChapter = isTocChapter && !isNextNewChapter
@@ -1589,7 +1602,6 @@ fun EpubReaderScreen(
                     bodyText = prevPreviewText,
                     fontSizePx = fontSizePx,
                     visualBitmap = if (isVisualPageMode) (prevPageBitmap ?: renderedPageBitmap) else null,
-                    pageFooterLabel = "",
                     allChapters = resolvedChapters,
                     currentChapterIndex = currentChapterIndex,
                     isTocChapter = isTocChapter
@@ -1655,7 +1667,6 @@ fun EpubReaderScreen(
                                     }
                                 }
 
-                                // Finger released: Check if user tapped an in-book Chapter Link first!
                                 if (dragDirection == 0 && abs(totalDragX) < 14f && abs(totalDragY) < 18f) {
                                     val tappedHotspot = currentRenderedPage.hotspots.firstOrNull { spot ->
                                         spot.rect.contains(startX, startY)
@@ -1734,24 +1745,27 @@ fun EpubReaderScreen(
                 }
             }
 
-            // Bottom Navigation Bar
+            // Single Clean Bottom Navigation Bar
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .background(bgColor)
+                    .height(bottomBarHeightDp)
+                    .background(bgColor),
+                verticalArrangement = Arrangement.Center
             ) {
                 HorizontalDivider(color = accentColor.copy(alpha = 0.18f))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                        .padding(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(
                         onClick = { animatePageTurnBackward() },
-                        enabled = canGoPrev
+                        enabled = canGoPrev,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                     ) {
                         Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
                         Text("Prev", color = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
@@ -1765,12 +1779,14 @@ fun EpubReaderScreen(
                         text = "$currentFooter ($pct%)",
                         fontSize = 12.sp,
                         color = textColor.copy(alpha = 0.85f),
+                        maxLines = 1,
                         modifier = Modifier.clickable { showTocDialog = true }
                     )
 
                     TextButton(
                         onClick = { animatePageTurnForward() },
-                        enabled = canGoNext
+                        enabled = canGoNext,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                     ) {
                         Text("Next", color = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
                         Icon(Icons.Default.ChevronRight, contentDescription = null, tint = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))

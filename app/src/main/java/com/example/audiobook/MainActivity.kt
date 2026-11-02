@@ -462,7 +462,6 @@ fun FablewoodAudiobookApp(
     var liveCoverSearchQuery by remember { mutableStateOf("") }
     var showAllFilesPermissionPrompt by remember { mutableStateOf(false) }
 
-    // Phase 3: Discovery & Affiliate Store Sheet State
     var showDiscoveryDialog by remember { mutableStateOf(false) }
     var discoverySearchInput by remember { mutableStateOf("") }
     var showStoreLinksDialog by remember { mutableStateOf(false) }
@@ -951,100 +950,76 @@ fun FablewoodAudiobookApp(
         }
     }
 
+    // Streamlined, Daily-Use Side Navigation Drawer
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
-            ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
-                Spacer(Modifier.height(24.dp))
-                Text(
-                    text = stringResource(R.string.app_header_title),
-                    style = MaterialTheme.typography.headlineSmall,
-                    modifier = Modifier.padding(16.dp),
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                HorizontalDivider()
+            ModalDrawerSheet(modifier = Modifier.width(280.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 24.dp)
+                ) {
+                    Text(
+                        text = stringResource(R.string.app_header_title),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "${viewModel.books.size} Audiobooks  •  ${viewModel.ebooks.size} eBooks",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                Spacer(Modifier.height(12.dp))
+
                 NavigationDrawerItem(
                     icon = { Icon(Icons.Default.Explore, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                    label = { Text("Discover & Library Hub", fontWeight = FontWeight.Bold) },
+                    label = { Text("Discover & Library Hub", fontWeight = FontWeight.SemiBold) },
                     selected = false,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
                         openDiscoveryWithQuery("")
                     }
                 )
                 NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
-                    label = { Text(stringResource(R.string.scan_device_audiobooks)) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        if (!hasAllFilesAccess()) {
-                            showAllFilesPermissionPrompt = true
-                        }
-                        triggerAutoScanWithPermission()
-                    }
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.FileOpen, contentDescription = null) },
-                    label = { Text("Import eBook File(s)") },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        epubFilePicker.launch(arrayOf("*/*"))
-                    }
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
-                    label = { Text(stringResource(R.string.select_audiobook_folder)) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        folderPicker.launch(null)
-                    }
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.ImageSearch, contentDescription = null) },
-                    label = {
-                        Text(
-                            if (viewModel.isBatchFetchingCovers) "Finding Missing Covers..."
-                            else "Auto-Find Missing Covers"
-                        )
-                    },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        Toast.makeText(context, "Searching online for missing covers...", Toast.LENGTH_SHORT).show()
-                        viewModel.autoFillMissingCovers { count ->
-                            Toast.makeText(context, "Updated $count book cover(s)", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                )
-                NavigationDrawerItem(
                     icon = { Icon(Icons.Default.GraphicEq, contentDescription = null) },
                     label = { Text(stringResource(R.string.audio_fx)) },
                     selected = false,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
                         showAudioFXDialog = true
                     }
                 )
                 NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                    label = { Text(stringResource(R.string.settings)) },
-                    selected = false,
-                    onClick = {
-                        coroutineScope.launch { drawerState.close() }
-                        showSettingsDialog = true
-                    }
-                )
-                NavigationDrawerItem(
                     icon = { Icon(Icons.Default.Analytics, contentDescription = null) },
                     label = { Text(stringResource(R.string.listening_stats)) },
                     selected = false,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
                         showAnalyticsDialog = true
+                    }
+                )
+
+                Spacer(Modifier.height(8.dp))
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                Spacer(Modifier.height(8.dp))
+
+                NavigationDrawerItem(
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    label = { Text(stringResource(R.string.settings)) },
+                    selected = false,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+                    onClick = {
+                        coroutineScope.launch { drawerState.close() }
+                        showSettingsDialog = true
                     }
                 )
             }
@@ -1168,19 +1143,8 @@ fun FablewoodAudiobookApp(
                                     Icon(Icons.Default.Menu, contentDescription = "Menu")
                                 }
                             },
+                            // Identical 3-icon action bar on both Audio and eBooks so the center pill never gets squished!
                             actions = {
-                                IconButton(onClick = { openDiscoveryWithQuery("") }) {
-                                    Icon(
-                                        Icons.Default.Explore,
-                                        contentDescription = "Discover & Library Hub",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                                if (viewModel.shelfMode == "EBOOK") {
-                                    IconButton(onClick = { epubFilePicker.launch(arrayOf("*/*")) }) {
-                                        Icon(Icons.Default.FileOpen, contentDescription = "Import eBook", tint = MaterialTheme.colorScheme.primary)
-                                    }
-                                }
                                 IconButton(onClick = {
                                     viewModel.isSearching = !viewModel.isSearching
                                     if (!viewModel.isSearching) viewModel.searchQuery = ""
@@ -1505,7 +1469,6 @@ fun FablewoodAudiobookApp(
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    // Quick genre / free-download chips
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1558,7 +1521,7 @@ fun FablewoodAudiobookApp(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp)
                         )
                     } else {
-                        viewModel.discoveryBooks.forEach { item ->
+                        for (item in viewModel.discoveryBooks) {
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(14.dp),
@@ -1614,7 +1577,6 @@ fun FablewoodAudiobookApp(
 
                                     Spacer(Modifier.height(10.dp))
 
-                                    // Dual-Button UI Flow: Free Library Deep-Link + Multi-Store Affiliate Sheet
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1683,7 +1645,7 @@ fun FablewoodAudiobookApp(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    partnerLinks.forEach { option ->
+                    for (option in partnerLinks) {
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1783,7 +1745,6 @@ fun FablewoodAudiobookApp(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Phase 3: Quick Discovery & Store Action Row for any book on the shelf
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -2165,12 +2126,18 @@ fun FablewoodAudiobookApp(
         )
     }
 
+    // Settings Dialog now houses all Library & Cover Management tools so the Side Drawer stays ultra-clean!
     if (showSettingsDialog) {
         AlertDialog(
             onDismissRequest = { showSettingsDialog = false },
             title = { Text(stringResource(R.string.settings)) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -2193,7 +2160,13 @@ fun FablewoodAudiobookApp(
                     HorizontalDivider()
 
                     Column {
-                        Text(stringResource(R.string.skip_interval_label), fontWeight = FontWeight.Bold)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(stringResource(R.string.skip_interval_label), fontWeight = FontWeight.Bold)
+                            Text("${viewModel.skipIntervalSeconds}s", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        }
                         Slider(
                             value = viewModel.skipIntervalSeconds.toFloat(),
                             onValueChange = {
@@ -2203,7 +2176,71 @@ fun FablewoodAudiobookApp(
                             valueRange = 5f..60f,
                             steps = 10
                         )
-                        Text("${viewModel.skipIntervalSeconds}s", modifier = Modifier.align(Alignment.End))
+                    }
+
+                    HorizontalDivider()
+
+                    Text(
+                        text = "Library & Cover Management",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsDialog = false
+                            if (!hasAllFilesAccess()) {
+                                showAllFilesPermissionPrompt = true
+                            }
+                            triggerAutoScanWithPermission()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.LibraryMusic, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.scan_device_audiobooks))
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsDialog = false
+                            epubFilePicker.launch(arrayOf("*/*"))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Import eBook File(s)")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsDialog = false
+                            folderPicker.launch(null)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.select_audiobook_folder))
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsDialog = false
+                            Toast.makeText(context, "Searching online for missing covers...", Toast.LENGTH_SHORT).show()
+                            viewModel.autoFillMissingCovers { count ->
+                                Toast.makeText(context, "Updated $count book cover(s)", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.ImageSearch, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (viewModel.isBatchFetchingCovers) "Finding Missing Covers..."
+                            else "Auto-Find Missing Covers"
+                        )
                     }
                 }
             },
