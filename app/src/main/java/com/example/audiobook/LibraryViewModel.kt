@@ -11,7 +11,111 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+
+enum class ProFeature(val title: String, val description: String) {
+    DUAL_PAGE_FOLDABLE("Foldable Dual-Page Spread", "Read across a 2-column open-book layout on foldables and tablets."),
+    CUSTOM_THEMES("Custom Theme Builder", "Design your own custom background and ink hex color palettes."),
+    QUOTE_CARDS("Shareable Quote Cards", "Turn favorite passages into high-res, stylized social quote cards."),
+    QUOTES_HUB("Global Quotes & Notes Hub", "Search and filter every highlight and note across your entire library."),
+    TTS_READ_ALOUD("AI Read-Aloud (TTS)", "Listen to any eBook with live sentence highlighting and background playback."),
+    READING_STATS("Reading Streaks & Insights", "Track daily reading minutes, pages turned, and long-term streaks.")
+}
+
+/**
+ * Centralized Paywall-Ready State Manager.
+ * Currently unlocked (`true`) so you can test the full Pro experience.
+ * Flip ` MutableStateFlow(false)` when ready to gate Pro features behind billing.
+ */
+object ProFeatureManager {
+    private val _isProUser = MutableStateFlow(true)
+    val isProUser: StateFlow<Boolean> = _isProUser.asStateFlow()
+
+    var activePaywallPromptFeature by mutableStateOf<ProFeature?>(null)
+
+    fun setProStatus(unlocked: Boolean) {
+        _isProUser.value = unlocked
+    }
+
+    fun isUnlocked(feature: ProFeature): Boolean {
+        return _isProUser.value
+    }
+
+    fun runIfPro(feature: ProFeature, action: () -> Unit) {
+        if (isUnlocked(feature)) {
+            action()
+        } else {
+            activePaywallPromptFeature = feature
+        }
+    }
+}
+
+data class ReaderPreset(
+    val id: String,
+    val name: String,
+    val subtitle: String,
+    val themeKey: String,
+    val fontFamilyKey: String,
+    val fontSizeSp: Float,
+    val lineHeightMultiplier: Float,
+    val paragraphSpacingDp: Float,
+    val marginScale: Float,
+    val isJustified: Boolean
+)
+
+val DESIGNER_READER_PRESETS = listOf(
+    ReaderPreset(
+        id = "EDITORIAL",
+        name = "Editorial",
+        subtitle = "Classic Serif • Warm Paper",
+        themeKey = "SEPIA",
+        fontFamilyKey = "SERIF",
+        fontSizeSp = 19f,
+        lineHeightMultiplier = 1.48f,
+        paragraphSpacingDp = 14f,
+        marginScale = 1.20f,
+        isJustified = true
+    ),
+    ReaderPreset(
+        id = "MODERN_CLEAN",
+        name = "Modern Clean",
+        subtitle = "Crisp Sans • Day White",
+        themeKey = "LIGHT",
+        fontFamilyKey = "SANS",
+        fontSizeSp = 17.5f,
+        lineHeightMultiplier = 1.42f,
+        paragraphSpacingDp = 12f,
+        marginScale = 1.0f,
+        isJustified = false
+    ),
+    ReaderPreset(
+        id = "COZY_PAPERBACK",
+        name = "Cozy Paperback",
+        subtitle = "Book Serif • Soft Sepia",
+        themeKey = "SEPIA",
+        fontFamilyKey = "BOOK",
+        fontSizeSp = 18f,
+        lineHeightMultiplier = 1.36f,
+        paragraphSpacingDp = 8f,
+        marginScale = 0.85f,
+        isJustified = true
+    ),
+    ReaderPreset(
+        id = "NIGHT_OWL",
+        name = "Night Owl",
+        subtitle = "Dimmed Serif • True OLED",
+        themeKey = "OLED",
+        fontFamilyKey = "SERIF",
+        fontSizeSp = 18.5f,
+        lineHeightMultiplier = 1.46f,
+        paragraphSpacingDp = 12f,
+        marginScale = 1.05f,
+        isJustified = false
+    )
+)
 
 class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var books by mutableStateOf<List<Audiobook>>(repository.loadBooksCache())
@@ -27,8 +131,19 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var currentEbookChapterIndex by mutableIntStateOf(0)
     var isLoadingEbook by mutableStateOf(false)
     var isEbookReaderFullScreen by mutableStateOf(false)
+
+    // Module A: Advanced Typography, Presets & Custom Theme State
     var ebookFontSizeSp by mutableFloatStateOf(repository.getPreferences().getFloat("ebook_font_sp", 18f))
-    var ebookReaderTheme by mutableStateOf(repository.getPreferences().getString("ebook_reader_theme", "FOREST") ?: "FOREST")
+    var ebookReaderTheme by mutableStateOf(repository.getPreferences().getString("ebook_reader_theme", "SEPIA") ?: "SEPIA")
+    var ebookPresetId by mutableStateOf(repository.getPreferences().getString("ebook_preset_id", "EDITORIAL") ?: "EDITORIAL")
+    var ebookFontFamily by mutableStateOf(repository.getPreferences().getString("ebook_font_family", "SERIF") ?: "SERIF")
+    var ebookLineHeightMultiplier by mutableFloatStateOf(repository.getPreferences().getFloat("ebook_line_height_mult", 1.42f))
+    var ebookParagraphSpacingDp by mutableFloatStateOf(repository.getPreferences().getFloat("ebook_para_spacing_dp", 12f))
+    var ebookMarginScale by mutableFloatStateOf(repository.getPreferences().getFloat("ebook_margin_scale", 1.0f))
+    var ebookTextJustified by mutableStateOf(repository.getPreferences().getBoolean("ebook_text_justified", true))
+    var ebookRespectPublisherCss by mutableStateOf(repository.getPreferences().getBoolean("ebook_respect_css", false))
+    var ebookCustomBgHex by mutableStateOf(repository.getPreferences().getString("ebook_custom_bg_hex", "#121E18") ?: "#121E18")
+    var ebookCustomTextHex by mutableStateOf(repository.getPreferences().getString("ebook_custom_text_hex", "#E6EFEA") ?: "#E6EFEA")
 
     // Phase 3: Book Discovery & Affiliate Hub State
     var discoveryQuery by mutableStateOf("")
@@ -85,6 +200,103 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     private var coverSearchJob: Job? = null
     private var ebookLoadJob: Job? = null
     private var discoveryJob: Job? = null
+
+    fun applyReaderPreset(preset: ReaderPreset) {
+        ebookPresetId = preset.id
+        ebookReaderTheme = preset.themeKey
+        ebookFontFamily = preset.fontFamilyKey
+        ebookFontSizeSp = preset.fontSizeSp
+        ebookLineHeightMultiplier = preset.lineHeightMultiplier
+        ebookParagraphSpacingDp = preset.paragraphSpacingDp
+        ebookMarginScale = preset.marginScale
+        ebookTextJustified = preset.isJustified
+
+        repository.getPreferences().edit()
+            .putString("ebook_preset_id", preset.id)
+            .putString("ebook_reader_theme", preset.themeKey)
+            .putString("ebook_font_family", preset.fontFamilyKey)
+            .putFloat("ebook_font_sp", preset.fontSizeSp)
+            .putFloat("ebook_line_height_mult", preset.lineHeightMultiplier)
+            .putFloat("ebook_para_spacing_dp", preset.paragraphSpacingDp)
+            .putFloat("ebook_margin_scale", preset.marginScale)
+            .putBoolean("ebook_text_justified", preset.isJustified)
+            .apply()
+    }
+
+    fun updateEbookFontFamily(familyKey: String) {
+        ebookFontFamily = familyKey
+        ebookPresetId = "CUSTOM"
+        repository.getPreferences().edit()
+            .putString("ebook_font_family", familyKey)
+            .putString("ebook_preset_id", "CUSTOM")
+            .apply()
+    }
+
+    fun updateEbookLineHeight(multiplier: Float) {
+        val clamped = multiplier.coerceIn(1.15f, 2.0f)
+        ebookLineHeightMultiplier = clamped
+        ebookPresetId = "CUSTOM"
+        repository.getPreferences().edit()
+            .putFloat("ebook_line_height_mult", clamped)
+            .putString("ebook_preset_id", "CUSTOM")
+            .apply()
+    }
+
+    fun updateEbookParagraphSpacing(spacingDp: Float) {
+        val clamped = spacingDp.coerceIn(0f, 28f)
+        ebookParagraphSpacingDp = clamped
+        ebookPresetId = "CUSTOM"
+        repository.getPreferences().edit()
+            .putFloat("ebook_para_spacing_dp", clamped)
+            .putString("ebook_preset_id", "CUSTOM")
+            .apply()
+    }
+
+    fun updateEbookMarginScale(scale: Float) {
+        val clamped = scale.coerceIn(0.60f, 1.60f)
+        ebookMarginScale = clamped
+        ebookPresetId = "CUSTOM"
+        repository.getPreferences().edit()
+            .putFloat("ebook_margin_scale", clamped)
+            .putString("ebook_preset_id", "CUSTOM")
+            .apply()
+    }
+
+    fun updateEbookTextJustified(justified: Boolean) {
+        ebookTextJustified = justified
+        ebookPresetId = "CUSTOM"
+        repository.getPreferences().edit()
+            .putBoolean("ebook_text_justified", justified)
+            .putString("ebook_preset_id", "CUSTOM")
+            .apply()
+    }
+
+    fun updateEbookRespectCss(respect: Boolean) {
+        ebookRespectPublisherCss = respect
+        if (respect) {
+            ebookLineHeightMultiplier = 1.38f
+            ebookParagraphSpacingDp = 10f
+            ebookMarginScale = 1.0f
+        }
+        repository.getPreferences().edit()
+            .putBoolean("ebook_respect_css", respect)
+            .apply()
+    }
+
+    fun updateCustomThemeHex(bgHex: String, textHex: String) {
+        ProFeatureManager.runIfPro(ProFeature.CUSTOM_THEMES) {
+            ebookCustomBgHex = bgHex
+            ebookCustomTextHex = textHex
+            ebookReaderTheme = "CUSTOM"
+            ebookPresetId = "CUSTOM"
+            repository.getPreferences().edit()
+                .putString("ebook_custom_bg_hex", bgHex)
+                .putString("ebook_custom_text_hex", textHex)
+                .putString("ebook_reader_theme", "CUSTOM")
+                .putString("ebook_preset_id", "CUSTOM")
+                .apply()
+        }
+    }
 
     fun searchDiscoveryCatalog(query: String) {
         val effectiveQuery = query.trim().ifBlank {
@@ -147,12 +359,20 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     fun updateEbookFontSize(newSizeSp: Float) {
         val clamped = newSizeSp.coerceIn(13f, 30f)
         ebookFontSizeSp = clamped
-        repository.getPreferences().edit().putFloat("ebook_font_sp", clamped).apply()
+        ebookPresetId = "CUSTOM"
+        repository.getPreferences().edit()
+            .putFloat("ebook_font_sp", clamped)
+            .putString("ebook_preset_id", "CUSTOM")
+            .apply()
     }
 
     fun updateEbookReaderTheme(theme: String) {
         ebookReaderTheme = theme
-        repository.getPreferences().edit().putString("ebook_reader_theme", theme).apply()
+        ebookPresetId = "CUSTOM"
+        repository.getPreferences().edit()
+            .putString("ebook_reader_theme", theme)
+            .putString("ebook_preset_id", "CUSTOM")
+            .apply()
     }
 
     fun selectBookMetadata(book: Audiobook, isDifferentBook: Boolean) {

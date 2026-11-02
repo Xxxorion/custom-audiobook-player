@@ -2,6 +2,7 @@ package com.example.audiobook
 
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
+import android.graphics.Color as AndroidColor
 import android.graphics.LinearGradient
 import android.graphics.Matrix as AndroidMatrix
 import android.graphics.Paint as AndroidPaint
@@ -9,12 +10,14 @@ import android.graphics.Path as AndroidPath
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.os.Build
 import android.text.Layout
 import android.text.Spannable
 import android.text.SpannableString
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.style.ForegroundColorSpan
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -27,6 +30,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -57,6 +61,7 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -70,6 +75,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 fun formatTime(ms: Long): String {
@@ -96,6 +102,25 @@ private data class RenderedBookPage(
     val bitmap: Bitmap,
     val hotspots: List<PageLinkHotspot>
 )
+
+private fun parseSafeHexColor(hexStr: String, fallback: Color): Color {
+    return try {
+        val cleaned = hexStr.trim().let { if (it.startsWith("#")) it else "#$it" }
+        Color(AndroidColor.parseColor(cleaned))
+    } catch (_: Throwable) {
+        fallback
+    }
+}
+
+private fun resolveNativeTypeface(fontFamilyKey: String, bold: Boolean): Typeface {
+    val style = if (bold) Typeface.BOLD else Typeface.NORMAL
+    return when (fontFamilyKey.uppercase(Locale.ROOT)) {
+        "SANS" -> Typeface.create(Typeface.SANS_SERIF, style)
+        "MONO" -> Typeface.create(Typeface.MONOSPACE, style)
+        "BOOK" -> Typeface.create("serif", style)
+        else -> Typeface.create(Typeface.SERIF, style)
+    }
+}
 
 // Normalizes chapter titles using the first heading line of each chapter when needed,
 // and strips duplicate leading title lines from the body text so headings don't print twice.
@@ -126,7 +151,6 @@ private fun resolveSmartChapterTitles(
             rawTitle.ifBlank { "Chapter ${chap.index + 1}" }
         }
 
-        // Strip any consecutive leading lines that duplicate the resolved chapter title
         var remainingLines = chap.bodyText.lines()
         while (remainingLines.isNotEmpty()) {
             val firstIdx = remainingLines.indexOfFirst { it.trim().isNotEmpty() }
@@ -141,7 +165,7 @@ private fun resolveSmartChapterTitles(
     }
 }
 
-// Matches a Table of Contents line (e.g., "Cover", "Dedication", "Prologue", "Chapter 1") to its target chapter index
+// Matches a Table of Contents line to its target chapter index
 private fun matchLineToTargetChapterIndex(
     rawLine: String,
     chapters: List<EbookChapter>,
@@ -233,31 +257,44 @@ private fun matchLineToTargetChapterIndex(
     return null
 }
 
-// Exact StaticLayout pixel-measured pagination so the bottom line is NEVER cut in half!
+private fun formatBodyWithParagraphSpacing(rawBody: String, paragraphSpacingDp: Float): String {
+    val clean = rawBody.replace("\r\n", "\n").trim()
+    if (paragraphSpacingDp <= 4f) {
+        return clean.replace(Regex("\\n\\s*\\n"), "\n")
+    }
+    return clean
+}
+
+// Exact StaticLayout pixel-measured pagination honoring Module A Font Family, Line Height, Margins & Justification!
 fun paginateChapterByMeasuredLayout(
     bodyText: String,
     headingText: String,
     widthPx: Int,
     heightPx: Int,
-    fontSizePx: Float
+    fontSizePx: Float,
+    fontFamilyKey: String = "SERIF",
+    lineHeightMultiplier: Float = 1.42f,
+    marginScale: Float = 1.0f,
+    isJustified: Boolean = true,
+    paragraphSpacingDp: Float = 12f
 ): List<String> {
-    val clean = bodyText.replace("\r\n", "\n").trim()
+    val clean = formatBodyWithParagraphSpacing(bodyText, paragraphSpacingDp)
     if (clean.isEmpty()) return listOf("")
 
     val w = widthPx.coerceAtLeast(120)
     val h = heightPx.coerceAtLeast(160)
-    val padH = (w * 0.068f).coerceAtLeast(28f)
+    val padH = (w * 0.068f * marginScale.coerceIn(0.6f, 1.6f)).coerceAtLeast(20f)
     val padTop = (h * 0.045f).coerceAtLeast(24f)
-    val padBottom = (h * 0.045f).coerceAtLeast(28f)
+    val padBottom = (h * 0.050f).coerceAtLeast(30f)
     val contentWidth = (w - (padH * 2f)).toInt().coerceAtLeast(60)
 
-    val serifBold = Typeface.create(Typeface.SERIF, Typeface.BOLD)
-    val serifRegular = Typeface.create(Typeface.SERIF, Typeface.NORMAL)
+    val headingTypeface = resolveNativeTypeface(fontFamilyKey, bold = true)
+    val bodyTypeface = resolveNativeTypeface(fontFamilyKey, bold = false)
 
     val headingHeightPx = if (headingText.isNotBlank()) {
         val headingPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
             textSize = fontSizePx * 1.32f
-            typeface = serifBold
+            typeface = headingTypeface
         }
         val hLayout = StaticLayout.Builder
             .obtain(headingText, 0, headingText.length, headingPaint, contentWidth)
@@ -270,16 +307,22 @@ fun paginateChapterByMeasuredLayout(
 
     val bodyPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
         textSize = fontSizePx
-        typeface = serifRegular
+        typeface = bodyTypeface
     }
 
-    val fullLayout = StaticLayout.Builder
+    val extraSpacingPx = ((paragraphSpacingDp - 10f).coerceAtLeast(0f)) * 0.45f
+    val fullLayoutBuilder = StaticLayout.Builder
         .obtain(clean, 0, clean.length, bodyPaint, contentWidth)
         .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-        .setLineSpacing(0f, 1.42f)
+        .setLineSpacing(extraSpacingPx, lineHeightMultiplier.coerceIn(1.15f, 2.0f))
         .setIncludePad(true)
-        .build()
 
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isJustified) {
+        fullLayoutBuilder.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD)
+        fullLayoutBuilder.setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NORMAL)
+    }
+
+    val fullLayout = fullLayoutBuilder.build()
     val totalLines = fullLayout.lineCount
     if (totalLines <= 0) return listOf(clean)
 
@@ -318,7 +361,6 @@ fun paginateChapterByMeasuredLayout(
     return if (pages.isEmpty()) listOf(clean) else pages
 }
 
-// Kept for backward compatibility if called by any unit test
 fun paginateChapterText(
     bodyText: String,
     charsPerLine: Int,
@@ -333,8 +375,7 @@ fun paginateChapterText(
     )
 }
 
-// Renders a book page onto an offscreen Bitmap AND computes clickable chapter link hotspots.
-// No duplicate bottom footer is drawn inside the bitmap so the bottom line has full breathing room!
+// Renders a book page onto an offscreen Bitmap honoring Module A Typography, Margins, Justification & Link Hotspots
 private fun renderBookPageToBitmap(
     widthPx: Int,
     heightPx: Int,
@@ -346,6 +387,11 @@ private fun renderBookPageToBitmap(
     showHeading: Boolean,
     bodyText: String,
     fontSizePx: Float,
+    fontFamilyKey: String,
+    lineHeightMultiplier: Float,
+    marginScale: Float,
+    isJustified: Boolean,
+    paragraphSpacingDp: Float,
     visualBitmap: Bitmap?,
     allChapters: List<EbookChapter>,
     currentChapterIndex: Int,
@@ -358,9 +404,9 @@ private fun renderBookPageToBitmap(
     canvas.drawColor(bgColorArgb)
     val hotspots = mutableListOf<PageLinkHotspot>()
 
-    val padH = (w * 0.068f).coerceAtLeast(28f)
+    val padH = (w * 0.068f * marginScale.coerceIn(0.6f, 1.6f)).coerceAtLeast(20f)
     val padTop = (h * 0.045f).coerceAtLeast(24f)
-    val padBottom = (h * 0.035f).coerceAtLeast(20f)
+    val padBottom = (h * 0.040f).coerceAtLeast(22f)
     val contentWidth = (w - (padH * 2f)).toInt().coerceAtLeast(40)
 
     if (visualBitmap != null && bodyText.isBlank()) {
@@ -378,14 +424,14 @@ private fun renderBookPageToBitmap(
         canvas.drawBitmap(visualBitmap, matrix, paint)
     } else {
         var currentY = padTop
-        val serifBold = Typeface.create(Typeface.SERIF, Typeface.BOLD)
-        val serifRegular = Typeface.create(Typeface.SERIF, Typeface.NORMAL)
+        val headingTypeface = resolveNativeTypeface(fontFamilyKey, bold = true)
+        val bodyTypeface = resolveNativeTypeface(fontFamilyKey, bold = false)
 
         if (showHeading && headingText.isNotBlank()) {
             val headingPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
                 color = accentColorArgb
                 textSize = fontSizePx * 1.32f
-                typeface = serifBold
+                typeface = headingTypeface
             }
             val headingLayout = StaticLayout.Builder
                 .obtain(headingText, 0, headingText.length, headingPaint, contentWidth)
@@ -405,7 +451,7 @@ private fun renderBookPageToBitmap(
             val bodyPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
                 color = textColorArgb
                 textSize = fontSizePx
-                typeface = serifRegular
+                typeface = bodyTypeface
             }
 
             val spannable = SpannableString(bodyText)
@@ -435,12 +481,19 @@ private fun renderBookPageToBitmap(
                 }
             }
 
-            val bodyLayout = StaticLayout.Builder
+            val extraSpacingPx = ((paragraphSpacingDp - 10f).coerceAtLeast(0f)) * 0.45f
+            val bodyLayoutBuilder = StaticLayout.Builder
                 .obtain(spannable, 0, spannable.length, bodyPaint, contentWidth)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                .setLineSpacing(0f, 1.42f)
+                .setLineSpacing(extraSpacingPx, lineHeightMultiplier.coerceIn(1.15f, 2.0f))
                 .setIncludePad(true)
-                .build()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isJustified && !isTocChapter) {
+                bodyLayoutBuilder.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD)
+                bodyLayoutBuilder.setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NORMAL)
+            }
+
+            val bodyLayout = bodyLayoutBuilder.build()
 
             canvas.save()
             canvas.translate(padH, currentY)
@@ -617,7 +670,6 @@ private fun draw3DCurledPageMesh(
     }
 }
 
-// Always stays a rounded capsule pill—even on the narrow left pane of an unfolded Fold!
 @Composable
 fun ShelfModeTogglePill(
     shelfMode: String,
@@ -1231,6 +1283,7 @@ fun EbookCardWrapper(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EpubReaderScreen(
     ebook: Ebook,
@@ -1249,12 +1302,26 @@ fun EpubReaderScreen(
     onUpdateTheme: (String) -> Unit,
     onReloadEbook: () -> Unit = {}
 ) {
+    val prefs = remember { repository.getPreferences() }
     val fmtUpper = ebook.format.uppercase(Locale.ROOT)
     val resolvedChapters = remember(chapters, ebook.title) {
         resolveSmartChapterTitles(chapters, ebook.title)
     }
     val currentChapter = resolvedChapters.getOrNull(currentChapterIndex)
     val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
+
+    // Module A: Reactive Typography, Preset & Custom Theme State
+    var activePresetId by remember { mutableStateOf(prefs.getString("ebook_preset_id", "EDITORIAL") ?: "EDITORIAL") }
+    var fontFamilyKey by remember { mutableStateOf(prefs.getString("ebook_font_family", "SERIF") ?: "SERIF") }
+    var lineHeightMultiplier by remember { mutableFloatStateOf(prefs.getFloat("ebook_line_height_mult", 1.42f)) }
+    var paragraphSpacingDp by remember { mutableFloatStateOf(prefs.getFloat("ebook_para_spacing_dp", 12f)) }
+    var marginScale by remember { mutableFloatStateOf(prefs.getFloat("ebook_margin_scale", 1.0f)) }
+    var isJustified by remember { mutableStateOf(prefs.getBoolean("ebook_text_justified", true)) }
+    var respectPublisherCss by remember { mutableStateOf(prefs.getBoolean("ebook_respect_css", false)) }
+    var customBgHex by remember { mutableStateOf(prefs.getString("ebook_custom_bg_hex", "#121E18") ?: "#121E18") }
+    var customTextHex by remember { mutableStateOf(prefs.getString("ebook_custom_text_hex", "#E6EFEA") ?: "#E6EFEA") }
+    var showCustomizeLayoutDrawer by remember { mutableStateOf(false) }
+    var showCustomThemeBuilder by remember { mutableStateOf(false) }
 
     val isTocChapter = remember(currentChapter, resolvedChapters) {
         val t = currentChapter?.title?.trim() ?: ""
@@ -1268,16 +1335,24 @@ fun EpubReaderScreen(
     val bgColor = when (readerTheme) {
         "SEPIA" -> Color(0xFFF4ECD8)
         "LIGHT" -> Color(0xFFFAFAFA)
-        else -> Color(0xFF060E0A)
+        "DUSK" -> Color(0xFF22272E)
+        "OLED" -> Color(0xFF000000)
+        "CUSTOM" -> parseSafeHexColor(customBgHex, Color(0xFF121E18))
+        else -> Color(0xFF0A140F) // Forest Dark
     }
     val textColor = when (readerTheme) {
         "SEPIA" -> Color(0xFF3B2F2F)
         "LIGHT" -> Color(0xFF1C2420)
+        "DUSK" -> Color(0xFFD5DCE4)
+        "OLED" -> Color(0xFFB5BDC4) // Dimmed low-contrast text for Night Owl OLED
+        "CUSTOM" -> parseSafeHexColor(customTextHex, Color(0xFFE6EFEA))
         else -> Color(0xFFE8F0EC)
     }
     val accentColor = when (readerTheme) {
         "SEPIA" -> Color(0xFF8B5A2B)
         "LIGHT" -> Color(0xFF2D5A27)
+        "DUSK" -> Color(0xFF79C0FF)
+        "OLED" -> Color(0xFFD4AF37)
         else -> Color(0xFFD4AF37)
     }
     val linkColor = when (readerTheme) {
@@ -1289,7 +1364,7 @@ fun EpubReaderScreen(
     var showTocDialog by remember { mutableStateOf(false) }
     var showReaderSettings by remember { mutableStateOf(false) }
     var pdfOriginalPageMode by remember {
-        mutableStateOf(repository.getPreferences().getBoolean("pdf_original_page_mode", false))
+        mutableStateOf(prefs.getBoolean("pdf_original_page_mode", false))
     }
 
     var subPageIndex by remember(ebook.id, currentChapterIndex) { mutableIntStateOf(0) }
@@ -1324,10 +1399,10 @@ fun EpubReaderScreen(
             .background(bgColor)
             .let { if (!isEmbeddedPane) it.windowInsetsPadding(WindowInsets.systemBars) else it }
     ) {
-        // Top Reader Bar
+        // Minimalist Apple Books-style Top Bar
         Surface(
             color = bgColor,
-            tonalElevation = 2.dp,
+            tonalElevation = 0.dp,
             modifier = Modifier.fillMaxWidth()
         ) {
             Row(
@@ -1360,15 +1435,15 @@ fun EpubReaderScreen(
                 ) {
                     Text(
                         text = ebook.title,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp,
                         color = textColor,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = currentChapter?.title ?: if (isVisualPageMode) "Page ${currentChapterIndex + 1}" else "Loading...",
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         color = accentColor,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -1377,18 +1452,28 @@ fun EpubReaderScreen(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { showTocDialog = true }) {
-                        Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters / Pages", tint = accentColor)
+                        Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters", tint = accentColor)
                     }
-                    IconButton(onClick = { showReaderSettings = true }) {
-                        Icon(Icons.Default.FormatSize, contentDescription = "Reader Appearance", tint = accentColor)
+                    // Sleek "Aa" Typography Button
+                    TextButton(
+                        onClick = { showReaderSettings = true },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "Aa",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Serif,
+                            color = accentColor
+                        )
                     }
                 }
             }
         }
 
-        HorizontalDivider(color = accentColor.copy(alpha = 0.18f))
+        HorizontalDivider(color = accentColor.copy(alpha = 0.14f))
 
-        // Main Interactive 3D Mesh Page-Curl Reading Area
+        // Main Interactive 3D Mesh Page-Curl Reading Canvas
         BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
@@ -1401,13 +1486,17 @@ fun EpubReaderScreen(
             val canvasHeightPx = with(density) { (maxHeight - bottomBarHeightDp).toPx().toInt().coerceAtLeast(100) }
             val fontSizePx = with(density) { fontSizeSp.sp.toPx() }
 
-            // True StaticLayout-measured pagination so no line is ever sliced in half at the bottom!
             val subPages = remember(
                 currentChapter?.bodyText,
                 currentChapter?.title,
                 canvasWidthPx,
                 canvasHeightPx,
                 fontSizePx,
+                fontFamilyKey,
+                lineHeightMultiplier,
+                marginScale,
+                isJustified,
+                paragraphSpacingDp,
                 isVisualPageMode
             ) {
                 if (isVisualPageMode) listOf("")
@@ -1416,7 +1505,12 @@ fun EpubReaderScreen(
                     headingText = currentChapter?.title ?: "",
                     widthPx = canvasWidthPx,
                     heightPx = canvasHeightPx,
-                    fontSizePx = fontSizePx
+                    fontSizePx = fontSizePx,
+                    fontFamilyKey = fontFamilyKey,
+                    lineHeightMultiplier = lineHeightMultiplier,
+                    marginScale = marginScale,
+                    isJustified = isJustified,
+                    paragraphSpacingDp = paragraphSpacingDp
                 )
             }
 
@@ -1493,7 +1587,8 @@ fun EpubReaderScreen(
 
             val currSubPageText = subPages.getOrElse(subPageIndex) { "" }
             val nextPreviewText = remember(
-                subPageIndex, subPages, currentChapterIndex, resolvedChapters, canvasWidthPx, canvasHeightPx, fontSizePx
+                subPageIndex, subPages, currentChapterIndex, resolvedChapters,
+                canvasWidthPx, canvasHeightPx, fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp
             ) {
                 if (subPageIndex + 1 < subPages.size) {
                     subPages[subPageIndex + 1]
@@ -1504,12 +1599,18 @@ fun EpubReaderScreen(
                         headingText = nextChap.title,
                         widthPx = canvasWidthPx,
                         heightPx = canvasHeightPx,
-                        fontSizePx = fontSizePx
+                        fontSizePx = fontSizePx,
+                        fontFamilyKey = fontFamilyKey,
+                        lineHeightMultiplier = lineHeightMultiplier,
+                        marginScale = marginScale,
+                        isJustified = isJustified,
+                        paragraphSpacingDp = paragraphSpacingDp
                     ).firstOrNull() ?: ""
                 } else ""
             }
             val prevPreviewText = remember(
-                subPageIndex, subPages, currentChapterIndex, resolvedChapters, canvasWidthPx, canvasHeightPx, fontSizePx
+                subPageIndex, subPages, currentChapterIndex, resolvedChapters,
+                canvasWidthPx, canvasHeightPx, fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp
             ) {
                 if (subPageIndex > 0) {
                     subPages[subPageIndex - 1]
@@ -1520,7 +1621,12 @@ fun EpubReaderScreen(
                         headingText = prevChap.title,
                         widthPx = canvasWidthPx,
                         heightPx = canvasHeightPx,
-                        fontSizePx = fontSizePx
+                        fontSizePx = fontSizePx,
+                        fontFamilyKey = fontFamilyKey,
+                        lineHeightMultiplier = lineHeightMultiplier,
+                        marginScale = marginScale,
+                        isJustified = isJustified,
+                        paragraphSpacingDp = paragraphSpacingDp
                     ).lastOrNull() ?: ""
                 } else ""
             }
@@ -1533,13 +1639,19 @@ fun EpubReaderScreen(
             val currentFooter = if (isVisualPageMode) {
                 "Page ${currentChapterIndex + 1} of ${resolvedChapters.size}"
             } else {
-                "Page ${subPageIndex + 1} of ${subPages.size}  •  Ch ${currentChapterIndex + 1}/${resolvedChapters.size}"
+                val pagesLeftInChap = (subPages.size - 1 - subPageIndex).coerceAtLeast(0)
+                if (pagesLeftInChap == 0) {
+                    "Last page of chapter  •  Ch ${currentChapterIndex + 1}/${resolvedChapters.size}"
+                } else {
+                    "$pagesLeftInChap pg left in chapter  •  Ch ${currentChapterIndex + 1}/${resolvedChapters.size}"
+                }
             }
 
             val currentRenderedPage = remember(
                 canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
-                currentChapter?.title, subPageIndex, currSubPageText, fontSizePx, renderedPageBitmap,
-                resolvedChapters, currentChapterIndex, isTocChapter
+                currentChapter?.title, subPageIndex, currSubPageText, fontSizePx,
+                fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
+                renderedPageBitmap, resolvedChapters, currentChapterIndex, isTocChapter
             ) {
                 renderBookPageToBitmap(
                     widthPx = canvasWidthPx,
@@ -1552,6 +1664,11 @@ fun EpubReaderScreen(
                     showHeading = subPageIndex == 0,
                     bodyText = currSubPageText,
                     fontSizePx = fontSizePx,
+                    fontFamilyKey = fontFamilyKey,
+                    lineHeightMultiplier = lineHeightMultiplier,
+                    marginScale = marginScale,
+                    isJustified = isJustified,
+                    paragraphSpacingDp = paragraphSpacingDp,
                     visualBitmap = if (isVisualPageMode) renderedPageBitmap else null,
                     allChapters = resolvedChapters,
                     currentChapterIndex = currentChapterIndex,
@@ -1561,7 +1678,9 @@ fun EpubReaderScreen(
 
             val nextRenderedPage = remember(
                 canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
-                currentChapterIndex, subPageIndex, nextPreviewText, fontSizePx, nextPageBitmap, resolvedChapters, isTocChapter
+                currentChapterIndex, subPageIndex, nextPreviewText, fontSizePx,
+                fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
+                nextPageBitmap, resolvedChapters, isTocChapter
             ) {
                 val isNextNewChapter = subPageIndex + 1 >= subPages.size
                 val nextHeading = if (isNextNewChapter && currentChapterIndex + 1 < resolvedChapters.size) {
@@ -1578,6 +1697,11 @@ fun EpubReaderScreen(
                     showHeading = isNextNewChapter,
                     bodyText = nextPreviewText,
                     fontSizePx = fontSizePx,
+                    fontFamilyKey = fontFamilyKey,
+                    lineHeightMultiplier = lineHeightMultiplier,
+                    marginScale = marginScale,
+                    isJustified = isJustified,
+                    paragraphSpacingDp = paragraphSpacingDp,
                     visualBitmap = if (isVisualPageMode) (nextPageBitmap ?: renderedPageBitmap) else null,
                     allChapters = resolvedChapters,
                     currentChapterIndex = if (isNextNewChapter) currentChapterIndex + 1 else currentChapterIndex,
@@ -1587,7 +1711,9 @@ fun EpubReaderScreen(
 
             val prevRenderedPage = remember(
                 canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
-                currentChapterIndex, subPageIndex, prevPreviewText, fontSizePx, prevPageBitmap, resolvedChapters, isTocChapter
+                currentChapterIndex, subPageIndex, prevPreviewText, fontSizePx,
+                fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
+                prevPageBitmap, resolvedChapters, isTocChapter
             ) {
                 val isPrevFirstSubPage = subPageIndex == 1
                 renderBookPageToBitmap(
@@ -1601,6 +1727,11 @@ fun EpubReaderScreen(
                     showHeading = isPrevFirstSubPage,
                     bodyText = prevPreviewText,
                     fontSizePx = fontSizePx,
+                    fontFamilyKey = fontFamilyKey,
+                    lineHeightMultiplier = lineHeightMultiplier,
+                    marginScale = marginScale,
+                    isJustified = isJustified,
+                    paragraphSpacingDp = paragraphSpacingDp,
                     visualBitmap = if (isVisualPageMode) (prevPageBitmap ?: renderedPageBitmap) else null,
                     allChapters = resolvedChapters,
                     currentChapterIndex = currentChapterIndex,
@@ -1745,7 +1876,7 @@ fun EpubReaderScreen(
                 }
             }
 
-            // Single Clean Bottom Navigation Bar
+            // Dedicated Safe Bottom Status Footer
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1754,7 +1885,7 @@ fun EpubReaderScreen(
                     .background(bgColor),
                 verticalArrangement = Arrangement.Center
             ) {
-                HorizontalDivider(color = accentColor.copy(alpha = 0.18f))
+                HorizontalDivider(color = accentColor.copy(alpha = 0.14f))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1777,8 +1908,8 @@ fun EpubReaderScreen(
 
                     Text(
                         text = "$currentFooter ($pct%)",
-                        fontSize = 12.sp,
-                        color = textColor.copy(alpha = 0.85f),
+                        fontSize = 11.5.sp,
+                        color = textColor.copy(alpha = 0.78f),
                         maxLines = 1,
                         modifier = Modifier.clickable { showTocDialog = true }
                     )
@@ -1836,68 +1967,507 @@ fun EpubReaderScreen(
         )
     }
 
+    // MODULE A: The "Aa" Appearance ModalBottomSheet & 1-Tap Designer Presets
     if (showReaderSettings) {
-        AlertDialog(
+        ModalBottomSheet(
             onDismissRequest = { showReaderSettings = false },
-            title = { Text("Reader Appearance") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedButton(onClick = { onUpdateFontSize(fontSizeSp - 2f) }) { Text("A-") }
-                        Text("${fontSizeSp.toInt()} pt", fontWeight = FontWeight.Bold)
-                        OutlinedButton(onClick = { onUpdateFontSize(fontSizeSp + 2f) }) { Text("A+") }
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Reading Appearance",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(onClick = { showReaderSettings = false }) {
+                        Text("Done", fontWeight = FontWeight.Bold)
                     }
+                }
 
-                    Text("Reading Theme", fontWeight = FontWeight.Bold)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        listOf("FOREST" to "Forest", "SEPIA" to "Sepia", "LIGHT" to "Light").forEach { (key, label) ->
-                            FilterChip(
-                                selected = readerTheme == key,
-                                onClick = { onUpdateTheme(key) },
-                                label = { Text(label) },
-                                modifier = Modifier.weight(1f)
-                            )
+                // 1. 1-Tap Designer Presets (Top Row)
+                Text(
+                    text = "DESIGNER PRESETS",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    DESIGNER_READER_PRESETS.forEach { preset ->
+                        val isSelected = activePresetId == preset.id
+                        val cardBg = when (preset.themeKey) {
+                            "SEPIA" -> Color(0xFFF4ECD8)
+                            "LIGHT" -> Color(0xFFFAFAFA)
+                            "OLED" -> Color(0xFF050505)
+                            else -> Color(0xFF0C1A14)
                         }
-                    }
+                        val cardFg = when (preset.themeKey) {
+                            "SEPIA" -> Color(0xFF3B2F2F)
+                            "LIGHT" -> Color(0xFF1C2420)
+                            else -> Color(0xFFE0E6E3)
+                        }
 
-                    if (fmtUpper == "PDF") {
-                        HorizontalDivider()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                        Surface(
+                            color = cardBg,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier
+                                .width(142.dp)
+                                .border(
+                                    width = if (isSelected) 2.5.dp else 1.dp,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Gray.copy(alpha = 0.35f),
+                                    shape = RoundedCornerShape(16.dp)
+                                )
+                                .clickable {
+                                    activePresetId = preset.id
+                                    fontFamilyKey = preset.fontFamilyKey
+                                    lineHeightMultiplier = preset.lineHeightMultiplier
+                                    paragraphSpacingDp = preset.paragraphSpacingDp
+                                    marginScale = preset.marginScale
+                                    isJustified = preset.isJustified
+                                    onUpdateFontSize(preset.fontSizeSp)
+                                    onUpdateTheme(preset.themeKey)
+                                    prefs.edit()
+                                        .putString("ebook_preset_id", preset.id)
+                                        .putString("ebook_font_family", preset.fontFamilyKey)
+                                        .putFloat("ebook_line_height_mult", preset.lineHeightMultiplier)
+                                        .putFloat("ebook_para_spacing_dp", preset.paragraphSpacingDp)
+                                        .putFloat("ebook_margin_scale", preset.marginScale)
+                                        .putBoolean("ebook_text_justified", preset.isJustified)
+                                        .apply()
+                                }
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Reflow PDF like ePub", fontWeight = FontWeight.Bold)
+                            Column(modifier = Modifier.padding(12.dp)) {
                                 Text(
-                                    "Extract text for adjustable font sizes, or switch off for auto-cropped page view",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    text = "Aa",
+                                    fontSize = 22.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = if (preset.fontFamilyKey == "SANS") FontFamily.SansSerif else FontFamily.Serif,
+                                    color = cardFg
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = preset.name,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = cardFg,
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = preset.subtitle,
+                                    fontSize = 10.5.sp,
+                                    color = cardFg.copy(alpha = 0.72f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
-                            Switch(
-                                checked = !pdfOriginalPageMode,
-                                onCheckedChange = { reflowEnabled ->
-                                    pdfOriginalPageMode = !reflowEnabled
-                                    repository.getPreferences().edit()
-                                        .putBoolean("pdf_original_page_mode", pdfOriginalPageMode)
-                                        .apply()
-                                    onReloadEbook()
-                                }
+                        }
+                    }
+                }
+
+                // 2. Core Reading Themes + [PRO] Custom Theme Builder
+                Text(
+                    text = "COLOR THEME",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val coreThemes = listOf(
+                        Triple("LIGHT", "Day", Color(0xFFFAFAFA) to Color(0xFF1C2420)),
+                        Triple("SEPIA", "Paper", Color(0xFFF4ECD8) to Color(0xFF3B2F2F)),
+                        Triple("DUSK", "Dusk", Color(0xFF22272E) to Color(0xFFD5DCE4)),
+                        Triple("FOREST", "Forest", Color(0xFF0C1A14) to Color(0xFFE8F0EC)),
+                        Triple("OLED", "OLED", Color(0xFF000000) to Color(0xFFB5BDC4))
+                    )
+                    coreThemes.forEach { (key, label, colors) ->
+                        val selected = readerTheme == key
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable {
+                                    activePresetId = "CUSTOM"
+                                    onUpdateTheme(key)
+                                },
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .background(colors.first)
+                                    .border(
+                                        width = if (selected) 2.5.dp else 1.dp,
+                                        color = if (selected) MaterialTheme.colorScheme.primary else Color.Gray.copy(alpha = 0.4f),
+                                        shape = CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("Aa", color = colors.second, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = label,
+                                fontSize = 11.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
                             )
                         }
                     }
                 }
+
+                // [PRO] Custom Theme Builder Toggle
+                OutlinedButton(
+                    onClick = {
+                        ProFeatureManager.runIfPro(ProFeature.CUSTOM_THEMES) {
+                            showCustomThemeBuilder = !showCustomThemeBuilder
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (readerTheme == "CUSTOM") "Custom Hex Theme Active" else "Custom Theme Builder")
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = "PRO",
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+
+                AnimatedVisibility(visible = showCustomThemeBuilder) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                OutlinedTextField(
+                                    value = customBgHex,
+                                    onValueChange = { customBgHex = it },
+                                    label = { Text("Paper Hex") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = customTextHex,
+                                    onValueChange = { customTextHex = it },
+                                    label = { Text("Ink Hex") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Button(
+                                onClick = {
+                                    prefs.edit()
+                                        .putString("ebook_custom_bg_hex", customBgHex)
+                                        .putString("ebook_custom_text_hex", customTextHex)
+                                        .apply()
+                                    onUpdateTheme("CUSTOM")
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Apply Custom Palette")
+                            }
+                        }
+                    }
+                }
+
+                // 3. Quick Font Size Stepper
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilledTonalButton(
+                        onClick = {
+                            activePresetId = "CUSTOM"
+                            onUpdateFontSize((fontSizeSp - 1.5f).coerceAtLeast(13f))
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("A-", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Text(
+                        text = "${fontSizeSp.roundToInt()} pt",
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 20.dp)
+                    )
+                    FilledTonalButton(
+                        onClick = {
+                            activePresetId = "CUSTOM"
+                            onUpdateFontSize((fontSizeSp + 1.5f).coerceAtMost(30f))
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("A+", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                // 4. Expandable "Customize Layout" Progressive Disclosure Drawer
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showCustomizeLayoutDrawer = !showCustomizeLayoutDrawer },
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.width(10.dp))
+                                Text("Customize Typography & Layout", fontWeight = FontWeight.Bold)
+                            }
+                            Icon(
+                                imageVector = if (showCustomizeLayoutDrawer) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null
+                            )
+                        }
+
+                        AnimatedVisibility(visible = showCustomizeLayoutDrawer) {
+                            Column(
+                                modifier = Modifier.padding(top = 16.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp)
+                            ) {
+                                // Font Family Selector
+                                Text("Typeface", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    listOf(
+                                        "SERIF" to "Classic Serif",
+                                        "BOOK" to "Bookerly",
+                                        "SANS" to "Clean Sans"
+                                    ).forEach { (key, label) ->
+                                        FilterChip(
+                                            selected = fontFamilyKey == key,
+                                            onClick = {
+                                                fontFamilyKey = key
+                                                activePresetId = "CUSTOM"
+                                                prefs.edit().putString("ebook_font_family", key).apply()
+                                            },
+                                            label = { Text(label, fontSize = 12.sp, maxLines = 1) },
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                }
+
+                                // Text Alignment (Justified with Auto-Hyphenation vs. Left Aligned)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Justified Book Alignment", fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            "Crisp right edges with automatic hyphenation",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = isJustified,
+                                        onCheckedChange = {
+                                            isJustified = it
+                                            activePresetId = "CUSTOM"
+                                            prefs.edit().putBoolean("ebook_text_justified", it).apply()
+                                        }
+                                    )
+                                }
+
+                                // Line Height Slider
+                                Column {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Line Spacing", fontWeight = FontWeight.SemiBold)
+                                        Text(String.format(Locale.US, "%.2fx", lineHeightMultiplier), color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    Slider(
+                                        value = lineHeightMultiplier,
+                                        onValueChange = {
+                                            lineHeightMultiplier = it
+                                            activePresetId = "CUSTOM"
+                                            prefs.edit().putFloat("ebook_line_height_mult", it).apply()
+                                        },
+                                        valueRange = 1.15f..1.90f
+                                    )
+                                }
+
+                                // Paragraph Spacing Slider
+                                Column {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Paragraph Spacing", fontWeight = FontWeight.SemiBold)
+                                        Text("${paragraphSpacingDp.roundToInt()} pt", color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    Slider(
+                                        value = paragraphSpacingDp,
+                                        onValueChange = {
+                                            paragraphSpacingDp = it
+                                            activePresetId = "CUSTOM"
+                                            prefs.edit().putFloat("ebook_para_spacing_dp", it).apply()
+                                        },
+                                        valueRange = 0f..24f
+                                    )
+                                }
+
+                                // Margin Width Slider
+                                Column {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("Page Margins", fontWeight = FontWeight.SemiBold)
+                                        Text("${(marginScale * 100).roundToInt()}%", color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    Slider(
+                                        value = marginScale,
+                                        onValueChange = {
+                                            marginScale = it
+                                            activePresetId = "CUSTOM"
+                                            prefs.edit().putFloat("ebook_margin_scale", it).apply()
+                                        },
+                                        valueRange = 0.65f..1.50f
+                                    )
+                                }
+
+                                // Respect Publisher Styles (CSS) Toggle
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Respect Publisher Styles (CSS)", fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            "Use book's native paragraph and spacing defaults",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = respectPublisherCss,
+                                        onCheckedChange = {
+                                            respectPublisherCss = it
+                                            if (it) {
+                                                lineHeightMultiplier = 1.38f
+                                                paragraphSpacingDp = 10f
+                                                marginScale = 1.0f
+                                            }
+                                            prefs.edit().putBoolean("ebook_respect_css", it).apply()
+                                        }
+                                    )
+                                }
+
+                                if (fmtUpper == "PDF") {
+                                    HorizontalDivider()
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("Reflow PDF like ePub", fontWeight = FontWeight.SemiBold)
+                                            Text(
+                                                "Extract text for custom fonts, or turn off for auto-cropped page view",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = !pdfOriginalPageMode,
+                                            onCheckedChange = { reflowEnabled ->
+                                                pdfOriginalPageMode = !reflowEnabled
+                                                prefs.edit()
+                                                    .putBoolean("pdf_original_page_mode", pdfOriginalPageMode)
+                                                    .apply()
+                                                onReloadEbook()
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Paywall Upgrade Sheet (Triggered automatically when ProFeatureManager.isProUser is set to false)
+    val lockedFeature = ProFeatureManager.activePaywallPromptFeature
+    if (lockedFeature != null) {
+        AlertDialog(
+            onDismissRequest = { ProFeatureManager.activePaywallPromptFeature = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.WorkspacePremium, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Fablewood Pro", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(lockedFeature.title, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Text(lockedFeature.description)
+                }
             },
             confirmButton = {
-                TextButton(onClick = { showReaderSettings = false }) { Text("Done") }
+                Button(onClick = {
+                    ProFeatureManager.setProStatus(true)
+                    ProFeatureManager.activePaywallPromptFeature = null
+                }) {
+                    Text("Unlock Pro")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { ProFeatureManager.activePaywallPromptFeature = null }) {
+                    Text("Not Now")
+                }
             }
         )
     }
