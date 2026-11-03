@@ -18,12 +18,9 @@ import android.text.SpannableString
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.style.ForegroundColorSpan
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -167,7 +164,6 @@ private fun deriveSeriesName(rawSeries: String, rawTitle: String): String {
     return ""
 }
 
-// Module C: Searches the bottom of the current chapter or Endnotes chapter for a matching footnote definition
 private fun findFootnoteDefinition(
     markerNumOrSymbol: String,
     currentChapter: EbookChapter?,
@@ -177,7 +173,6 @@ private fun findFootnoteDefinition(
     val escaped = Regex.escape(cleanKey)
     val linePattern = Regex("(?m)^\\s*(?:\\[$escaped\\]|$escaped[.)]|\\*$escaped)\\s+(.+)$")
 
-    // 1. Search current chapter lines first (from bottom up so we hit the footnote definition, not the inline callout)
     if (currentChapter != null) {
         val lines = currentChapter.bodyText.lines().map { it.trim() }.filter { it.isNotEmpty() }
         for (i in lines.indices.reversed()) {
@@ -194,7 +189,6 @@ private fun findFootnoteDefinition(
         }
     }
 
-    // 2. Search dedicated Notes / Endnotes / Footnotes chapters at the back of the book
     val notesChapters = allChapters.filter {
         it.title.contains("note", ignoreCase = true) ||
             it.title.contains("reference", ignoreCase = true) ||
@@ -666,7 +660,6 @@ private fun formatBodyWithParagraphSpacing(rawBody: String, paragraphSpacingDp: 
     return clean
 }
 
-// Guaranteed Safe Text Bounds: Reserves generous bottom padding so the last line is never clipped
 fun paginateChapterByMeasuredLayout(
     bodyText: String,
     headingText: String,
@@ -776,7 +769,6 @@ fun paginateChapterText(
     )
 }
 
-// Renders a single book page AND detects both TOC Chapter Links and Inline Footnote Markers (`[1]`, `[2]`, `[note]`)
 private fun renderBookPageToBitmap(
     widthPx: Int,
     heightPx: Int,
@@ -884,7 +876,6 @@ private fun renderBookPageToBitmap(
                 }
             }
 
-            // Detect inline footnote references like [1], [2], [14], [note 1]
             val fnRegex = Regex("\\[(?:note\\s*)?(\\d{1,3}|[*†‡])\\]", RegexOption.IGNORE_CASE)
             for (fnMatch in fnRegex.findAll(bodyText)) {
                 val s = fnMatch.range.first
@@ -955,7 +946,6 @@ private fun renderBookPageToBitmap(
     return RenderedBookPage(bitmap = bmp, hotspots = hotspots)
 }
 
-// Module C: [PRO] Dual-Page Open-Book Spread Renderer for Foldables & Landscape
 private fun renderDualSpreadBookPageToBitmap(
     totalWidthPx: Int,
     heightPx: Int,
@@ -1034,7 +1024,6 @@ private fun renderDualSpreadBookPageToBitmap(
     canvas.drawBitmap(leftRendered.bitmap, 0f, 0f, null)
     canvas.drawBitmap(rightRendered.bitmap, rightOffsetX, 0f, null)
 
-    // Realistic center book-spine gutter crease shadow
     val spineLeft = (pageW - 14).toFloat()
     val spineRight = (pageW + spineW + 14).toFloat()
     val spinePaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
@@ -1957,7 +1946,7 @@ fun EpubReaderScreen(
     var showCustomizeLayoutDrawer by remember { mutableStateOf(false) }
     var showCustomThemeBuilder by remember { mutableStateOf(false) }
 
-    // Module C State: Dual-Page Spread, Footnote Popup, 8-Second Return Pill & Left-Edge Brightness Gesture
+    // Module C State
     var dualPageSpreadEnabled by remember { mutableStateOf(prefs.getBoolean("ebook_dual_page_spread", true)) }
     var edgeBrightnessEnabled by remember { mutableStateOf(prefs.getBoolean("ebook_edge_brightness", true)) }
     var readerBrightness by remember { mutableFloatStateOf(prefs.getFloat("ebook_brightness_level", 0.80f)) }
@@ -1965,7 +1954,6 @@ fun EpubReaderScreen(
     var activeFootnotePopup by remember { mutableStateOf<Pair<String, String>?>(null) }
     var returnBookmark by remember { mutableStateOf<ReaderReturnBookmark?>(null) }
 
-    // Auto-hide the "Return to Page X" pill after 8 seconds
     LaunchedEffect(returnBookmark) {
         val currentBm = returnBookmark ?: return@LaunchedEffect
         delay(8000L)
@@ -1974,7 +1962,6 @@ fun EpubReaderScreen(
         }
     }
 
-    // Apply hardware window brightness when adjusted via the left-edge gesture
     LaunchedEffect(readerBrightness, isDraggingBrightness) {
         if (isDraggingBrightness) {
             val activity = context as? Activity
@@ -2564,7 +2551,7 @@ fun EpubReaderScreen(
 
                                     var totalDragX = 0f
                                     var totalDragY = 0f
-                                    var gestureMode = 0 // 0 = Undecided, 1 = Next Curl, -1 = Prev Curl, 2 = Left-Edge Brightness
+                                    var gestureMode = 0
                                     var lastDx = 0f
 
                                     while (true) {
@@ -2707,7 +2694,7 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Module C: Extra-Dim Dark Room Overlay when brightness is dragged below 25%
+                // Extra-Dim Dark Room Overlay when brightness is dragged below 25%
                 if (readerBrightness < 0.25f) {
                     val dimAlpha = ((0.25f - readerBrightness) / 0.20f * 0.62f).coerceIn(0f, 0.65f)
                     Box(
@@ -2718,52 +2705,48 @@ fun EpubReaderScreen(
                     )
                 }
 
-                // Module C: Floating Brightness HUD Pill during Left-Edge Vertical Swipe
-                AnimatedVisibility(
-                    visible = isDraggingBrightness,
-                    enter = fadeIn(),
-                    exit = fadeOut(),
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 18.dp)
-                ) {
-                    Surface(
-                        color = Color.Black.copy(alpha = 0.82f),
-                        shape = RoundedCornerShape(50),
-                        tonalElevation = 8.dp
+                // Floating Brightness HUD Pill during Left-Edge Vertical Swipe
+                if (isDraggingBrightness) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 18.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.82f),
+                            shape = RoundedCornerShape(50),
+                            tonalElevation = 8.dp
                         ) {
-                            Icon(
-                                imageVector = if (readerBrightness < 0.3f) Icons.Default.BrightnessLow else Icons.Default.BrightnessHigh,
-                                contentDescription = null,
-                                tint = Color(0xFFD4AF37),
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = "Brightness ${(readerBrightness * 100).roundToInt()}%",
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (readerBrightness < 0.3f) Icons.Default.BrightnessLow else Icons.Default.BrightnessHigh,
+                                    contentDescription = null,
+                                    tint = Color(0xFFD4AF37),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = "Brightness ${(readerBrightness * 100).roundToInt()}%",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
 
-                // Module C: Floating 8-Second "Return to Page X" Pill after internal chapter jumps
-                AnimatedVisibility(
-                    visible = returnBookmark != null,
-                    enter = fadeIn(),
-                    exit = fadeOut(),
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = bottomBarHeightDp + 12.dp)
-                ) {
-                    val bm = returnBookmark
-                    if (bm != null) {
+                // Floating 8-Second "Return to Page X" Pill after internal chapter jumps
+                val activeReturnBm = returnBookmark
+                if (activeReturnBm != null) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = bottomBarHeightDp + 12.dp)
+                    ) {
                         Surface(
                             color = MaterialTheme.colorScheme.primary,
                             shape = RoundedCornerShape(50),
@@ -2772,8 +2755,8 @@ fun EpubReaderScreen(
                             Row(
                                 modifier = Modifier
                                     .clickable {
-                                        val targetChap = bm.chapterIndex
-                                        val targetSub = bm.subPageIndex
+                                        val targetChap = activeReturnBm.chapterIndex
+                                        val targetSub = activeReturnBm.subPageIndex
                                         returnBookmark = null
                                         animateJumpToChapter(targetChap, targetSub, recordReturnPill = false)
                                     }
@@ -2788,7 +2771,7 @@ fun EpubReaderScreen(
                                 )
                                 Spacer(Modifier.width(6.dp))
                                 Text(
-                                    text = "Return to ${bm.label}",
+                                    text = "Return to ${activeReturnBm.label}",
                                     color = MaterialTheme.colorScheme.onPrimary,
                                     fontSize = 12.5.sp,
                                     fontWeight = FontWeight.Bold
@@ -2862,7 +2845,7 @@ fun EpubReaderScreen(
         }
     }
 
-    // Module C: Inline Footnote Preview Popup
+    // Inline Footnote Preview Popup
     if (activeFootnotePopup != null) {
         val (fnTitle, fnBody) = activeFootnotePopup!!
         AlertDialog(
@@ -3129,7 +3112,7 @@ fun EpubReaderScreen(
                     }
                 }
 
-                AnimatedVisibility(visible = showCustomThemeBuilder) {
+                if (showCustomThemeBuilder) {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                         shape = RoundedCornerShape(14.dp),
@@ -3225,7 +3208,7 @@ fun EpubReaderScreen(
                             )
                         }
 
-                        AnimatedVisibility(visible = showCustomizeLayoutDrawer) {
+                        if (showCustomizeLayoutDrawer) {
                             Column(
                                 modifier = Modifier.padding(top = 16.dp),
                                 verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -3253,7 +3236,6 @@ fun EpubReaderScreen(
                                     }
                                 }
 
-                                // [PRO] Dual-Page Spread for Foldables & Landscape
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -3293,7 +3275,6 @@ fun EpubReaderScreen(
                                     )
                                 }
 
-                                // Left-Edge Brightness Gesture Toggle
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
