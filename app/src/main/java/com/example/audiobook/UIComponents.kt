@@ -1,6 +1,12 @@
 package com.example.audiobook
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Color as AndroidColor
@@ -12,18 +18,19 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.text.Layout
 import android.text.Spannable
 import android.text.SpannableString
 import android.text.StaticLayout
 import android.text.TextPaint
+import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
-import androidx.compose.animation.AnimatedVisibility
+import android.widget.Toast
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -69,6 +76,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -79,7 +87,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.math.PI
 import kotlin.math.abs
@@ -103,6 +116,264 @@ fun formatTime(ms: Long): String {
     }
 }
 
+// Module D: Highlight & Quote Data Model + JSON Persistence
+data class EbookHighlight(
+    val id: String = UUID.randomUUID().toString(),
+    val ebookId: String,
+    val bookTitle: String,
+    val bookAuthor: String,
+    val chapterIndex: Int,
+    val chapterTitle: String,
+    val text: String,
+    val colorHex: String = "#F5C542",
+    val note: String = "",
+    val timestampStr: String = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()).format(Date())
+)
+
+val HIGHLIGHT_COLOR_PALETTE = listOf(
+    "#F5C542" to "Amber Gold",
+    "#52B788" to "Sage Mint",
+    "#4EA8DE" to "Sky Blue",
+    "#F28482" to "Rose Coral"
+)
+
+data class QuoteCardTemplate(
+    val id: String,
+    val name: String,
+    val bgTopArgb: Int,
+    val bgBottomArgb: Int,
+    val textArgb: Int,
+    val accentArgb: Int,
+    val useSerif: Boolean
+)
+
+val QUOTE_CARD_TEMPLATES = listOf(
+    QuoteCardTemplate(
+        id = "FOREST",
+        name = "Fablewood",
+        bgTopArgb = 0xFF0C1A14.toInt(),
+        bgBottomArgb = 0xFF183528.toInt(),
+        textArgb = 0xFFF2F6F4.toInt(),
+        accentArgb = 0xFFD4AF37.toInt(),
+        useSerif = true
+    ),
+    QuoteCardTemplate(
+        id = "EDITORIAL",
+        name = "Editorial",
+        bgTopArgb = 0xFFF6EFE2.toInt(),
+        bgBottomArgb = 0xFFE8DEC8.toInt(),
+        textArgb = 0xFF2B221E.toInt(),
+        accentArgb = 0xFF8B5A2B.toInt(),
+        useSerif = true
+    ),
+    QuoteCardTemplate(
+        id = "MIDNIGHT",
+        name = "Midnight",
+        bgTopArgb = 0xFF08090C.toInt(),
+        bgBottomArgb = 0xFF161B22.toInt(),
+        textArgb = 0xFFE6EDF3.toInt(),
+        accentArgb = 0xFF58A6FF.toInt(),
+        useSerif = false
+    ),
+    QuoteCardTemplate(
+        id = "SUNSET",
+        name = "Terracotta",
+        bgTopArgb = 0xFF3D1E18.toInt(),
+        bgBottomArgb = 0xFF1F110E.toInt(),
+        textArgb = 0xFFFDF0E6.toInt(),
+        accentArgb = 0xFFF4A261.toInt(),
+        useSerif = true
+    )
+)
+
+private fun loadAllEbookHighlights(prefs: SharedPreferences): List<EbookHighlight> {
+    val raw = prefs.getString("ebook_highlights_v1", "[]") ?: "[]"
+    val list = mutableListOf<EbookHighlight>()
+    try {
+        val arr = JSONArray(raw)
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            list.add(
+                EbookHighlight(
+                    id = obj.optString("id", UUID.randomUUID().toString()),
+                    ebookId = obj.optString("ebookId", ""),
+                    bookTitle = obj.optString("bookTitle", ""),
+                    bookAuthor = obj.optString("bookAuthor", ""),
+                    chapterIndex = obj.optInt("chapterIndex", 0),
+                    chapterTitle = obj.optString("chapterTitle", ""),
+                    text = obj.optString("text", ""),
+                    colorHex = obj.optString("colorHex", "#F5C542"),
+                    note = obj.optString("note", ""),
+                    timestampStr = obj.optString("timestampStr", "")
+                )
+            )
+        }
+    } catch (_: Throwable) {}
+    return list
+}
+
+private fun saveAllEbookHighlights(prefs: SharedPreferences, list: List<EbookHighlight>) {
+    try {
+        val arr = JSONArray()
+        for (item in list) {
+            arr.put(
+                JSONObject().apply {
+                    put("id", item.id)
+                    put("ebookId", item.ebookId)
+                    put("bookTitle", item.bookTitle)
+                    put("bookAuthor", item.bookAuthor)
+                    put("chapterIndex", item.chapterIndex)
+                    put("chapterTitle", item.chapterTitle)
+                    put("text", item.text)
+                    put("colorHex", item.colorHex)
+                    put("note", item.note)
+                    put("timestampStr", item.timestampStr)
+                }
+            )
+        }
+        prefs.edit().putString("ebook_highlights_v1", arr.toString()).apply()
+    } catch (_: Throwable) {}
+}
+
+// Module D: High-Resolution 1080x1350 Shareable Quote Card Bitmap Generator
+private fun renderShareableQuoteCardBitmap(
+    quoteText: String,
+    bookTitle: String,
+    bookAuthor: String,
+    template: QuoteCardTemplate
+): Bitmap {
+    val w = 1080
+    val h = 1350
+    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    val canvas = AndroidCanvas(bmp)
+
+    // 1. Background Gradient
+    val bgPaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        shader = LinearGradient(
+            0f, 0f, w.toFloat(), h.toFloat(),
+            template.bgTopArgb, template.bgBottomArgb,
+            Shader.TileMode.CLAMP
+        )
+    }
+    canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), bgPaint)
+
+    // 2. Subtle Outer Frame Border
+    val borderPaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        color = template.accentArgb
+        alpha = 90
+        style = AndroidPaint.Style.STROKE
+        strokeWidth = 3f
+    }
+    canvas.drawRoundRect(RectF(56f, 56f, w - 56f, h - 56f), 36f, 36f, borderPaint)
+
+    // 3. Decorative Opening Quote Mark
+    val quoteMarkPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        color = template.accentArgb
+        alpha = 190
+        textSize = 180f
+        typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
+    }
+    canvas.drawText("“", 110f, 270f, quoteMarkPaint)
+
+    // 4. Main Passage Text (Auto-sized so short & long quotes both look balanced)
+    val cleanQuote = quoteText.trim().take(520)
+    val dynamicFontSize = when {
+        cleanQuote.length < 110 -> 54f
+        cleanQuote.length < 220 -> 46f
+        cleanQuote.length < 340 -> 39f
+        else -> 34f
+    }
+    val bodyTypeface = if (template.useSerif) {
+        Typeface.create(Typeface.SERIF, Typeface.ITALIC)
+    } else {
+        Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+    }
+    val bodyPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        color = template.textArgb
+        textSize = dynamicFontSize
+        typeface = bodyTypeface
+    }
+    val contentWidth = w - 240
+    val quoteLayout = StaticLayout.Builder
+        .obtain(cleanQuote, 0, cleanQuote.length, bodyPaint, contentWidth)
+        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+        .setLineSpacing(0f, 1.42f)
+        .setIncludePad(true)
+        .build()
+
+    val quoteTopY = ((h - quoteLayout.height) * 0.44f).coerceIn(280f, 540f)
+    canvas.save()
+    canvas.translate(120f, quoteTopY)
+    quoteLayout.draw(canvas)
+    canvas.restore()
+
+    // 5. Accent Divider Line & Book Metadata Footer
+    val footerY = (quoteTopY + quoteLayout.height + 90f).coerceAtMost(h - 220f)
+    val accentLinePaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        color = template.accentArgb
+        strokeWidth = 5f
+    }
+    canvas.drawLine(120f, footerY, 240f, footerY, accentLinePaint)
+
+    val titlePaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        color = template.textArgb
+        textSize = 36f
+        typeface = Typeface.create(if (template.useSerif) Typeface.SERIF else Typeface.SANS_SERIF, Typeface.BOLD)
+    }
+    val cleanTitle = if (bookTitle.length > 42) bookTitle.take(40) + "…" else bookTitle
+    canvas.drawText(cleanTitle, 120f, footerY + 64f, titlePaint)
+
+    val authorPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        color = template.accentArgb
+        textSize = 30f
+        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+    }
+    canvas.drawText(bookAuthor, 120f, footerY + 112f, authorPaint)
+
+    // 6. Subtle Fablewood Watermark
+    val brandPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        color = template.textArgb
+        alpha = 120
+        textSize = 24f
+        letterSpacing = 0.15f
+        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+    }
+    canvas.drawText("FABLEWOOD", 120f, h - 100f, brandPaint)
+
+    return bmp
+}
+
+private fun saveAndShareQuoteBitmap(context: Context, bitmap: Bitmap, shareImmediately: Boolean) {
+    try {
+        val filename = "Fablewood_Quote_${System.currentTimeMillis()}.png"
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Fablewood")
+            }
+        }
+        val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        if (uri != null) {
+            context.contentResolver.openOutputStream(uri)?.use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            }
+            if (shareImmediately) {
+                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "image/png"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                context.startActivity(Intent.createChooser(shareIntent, "Share Quote Card"))
+            } else {
+                Toast.makeText(context, "Quote Card saved to Pictures/Fablewood!", Toast.LENGTH_SHORT).show()
+            }
+        }
+    } catch (t: Throwable) {
+        Toast.makeText(context, "Could not save image: ${t.localizedMessage}", Toast.LENGTH_SHORT).show()
+    }
+}
+
 private data class PageLinkHotspot(
     val rect: RectF,
     val targetChapterIndex: Int? = null,
@@ -111,9 +382,15 @@ private data class PageLinkHotspot(
     val footnoteBody: String? = null
 )
 
+private data class PageParagraphBlock(
+    val rect: RectF,
+    val text: String
+)
+
 private data class RenderedBookPage(
     val bitmap: Bitmap,
-    val hotspots: List<PageLinkHotspot>
+    val hotspots: List<PageLinkHotspot>,
+    val paragraphs: List<PageParagraphBlock> = emptyList()
 )
 
 private data class ReaderReturnBookmark(
@@ -129,6 +406,17 @@ private fun parseSafeHexColor(hexStr: String, fallback: Color): Color {
         Color(AndroidColor.parseColor(cleaned))
     } catch (_: Throwable) {
         fallback
+    }
+}
+
+private fun parseHighlightSpanArgb(hexStr: String, isDarkReader: Boolean): Int {
+    return try {
+        val cleaned = hexStr.trim().let { if (it.startsWith("#")) it else "#$it" }
+        val base = AndroidColor.parseColor(cleaned)
+        val alpha = if (isDarkReader) 0x66 else 0x88
+        (alpha shl 24) or (base and 0x00FFFFFF)
+    } catch (_: Throwable) {
+        0x77F5C542
     }
 }
 
@@ -488,7 +776,8 @@ fun CurrentlyReadingHeroCard(
 @Composable
 fun SmartShelfFilterRow(
     selectedFilter: String,
-    onSelectFilter: (String) -> Unit
+    onSelectFilter: (String) -> Unit,
+    onOpenQuotesHub: (() -> Unit)? = null
 ) {
     val filters = listOf(
         "ALL" to "All",
@@ -520,7 +809,389 @@ fun SmartShelfFilterRow(
                 shape = RoundedCornerShape(50)
             )
         }
+        if (onOpenQuotesHub != null) {
+            AssistChip(
+                onClick = {
+                    ProFeatureManager.runIfPro(ProFeature.QUOTES_HUB) {
+                        onOpenQuotesHub()
+                    }
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.FormatQuote,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                },
+                label = {
+                    Text(
+                        text = "Quotes Hub",
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                },
+                shape = RoundedCornerShape(50)
+            )
+        }
     }
+}
+
+// Module D: Global Quotes & Notes Hub Modal Sheet + Shareable Quote Card Studio
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun GlobalQuotesHubSheet(
+    prefs: SharedPreferences,
+    filterEbookId: String? = null,
+    onDismiss: () -> Unit,
+    onJumpToHighlight: ((EbookHighlight) -> Unit)? = null,
+    onOpenQuoteCardStudio: (EbookHighlight) -> Unit
+) {
+    var allHighlights by remember { mutableStateOf(loadAllEbookHighlights(prefs)) }
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedBookFilter by remember { mutableStateOf(filterEbookId ?: "ALL") }
+
+    val distinctBooks = remember(allHighlights) {
+        allHighlights.map { it.ebookId to it.bookTitle }.distinctBy { it.first }
+    }
+
+    val displayedHighlights = remember(allHighlights, searchQuery, selectedBookFilter) {
+        allHighlights.filter { item ->
+            val matchesBook = selectedBookFilter == "ALL" || item.ebookId == selectedBookFilter
+            val matchesQuery = searchQuery.isBlank() ||
+                item.text.contains(searchQuery, ignoreCase = true) ||
+                item.note.contains(searchQuery, ignoreCase = true) ||
+                item.bookTitle.contains(searchQuery, ignoreCase = true) ||
+                item.bookAuthor.contains(searchQuery, ignoreCase = true)
+            matchesBook && matchesQuery
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 380.dp, max = 640.dp)
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.FormatQuote, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Quotes & Notes Hub", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = "PRO",
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Done", fontWeight = FontWeight.Bold)
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = { Text("Search highlights, notes, or books...") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                singleLine = true,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            if (distinctBooks.size > 1) {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = selectedBookFilter == "ALL",
+                        onClick = { selectedBookFilter = "ALL" },
+                        label = { Text("All Books (${allHighlights.size})", fontSize = 12.sp) }
+                    )
+                    distinctBooks.forEach { (ebId, ebTitle) ->
+                        FilterChip(
+                            selected = selectedBookFilter == ebId,
+                            onClick = { selectedBookFilter = ebId },
+                            label = {
+                                Text(
+                                    text = ebTitle.take(24),
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            if (displayedHighlights.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Default.FormatQuote,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "No highlights or notes yet.\nLong-press any paragraph while reading an eBook to highlight or share a quote card.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(count = displayedHighlights.size, key = { displayedHighlights[it].id }) { idx ->
+                        val item = displayedHighlights[idx]
+                        val swatchColor = parseSafeHexColor(item.colorHex, Color(0xFFF5C542))
+
+                        Card(
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (onJumpToHighlight != null) {
+                                        onJumpToHighlight(item)
+                                    }
+                                }
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(12.dp)
+                                                .clip(CircleShape)
+                                                .background(swatchColor)
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = "${item.bookTitle} • ${item.chapterTitle}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Text(
+                                        text = item.timestampStr,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+
+                                Spacer(Modifier.height(8.dp))
+
+                                Text(
+                                    text = "“${item.text}”",
+                                    fontFamily = FontFamily.Serif,
+                                    fontStyle = FontStyle.Italic,
+                                    fontSize = 14.5.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+
+                                if (item.note.isNotBlank()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.surface,
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = "Note: ${item.note}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(10.dp)
+                                        )
+                                    }
+                                }
+
+                                Spacer(Modifier.height(10.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    TextButton(
+                                        onClick = {
+                                            ProFeatureManager.runIfPro(ProFeature.QUOTE_CARDS) {
+                                                onOpenQuoteCardStudio(item)
+                                            }
+                                        }
+                                    ) {
+                                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(5.dp))
+                                        Text("Quote Card", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    }
+
+                                    IconButton(
+                                        onClick = {
+                                            val updated = allHighlights.filterNot { it.id == item.id }
+                                            allHighlights = updated
+                                            saveAllEbookHighlights(prefs, updated)
+                                        }
+                                    ) {
+                                        Icon(
+                                            Icons.Default.DeleteOutline,
+                                            contentDescription = "Delete Highlight",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Module D: [PRO] Shareable Quote Card Studio Dialog
+@Composable
+fun ShareableQuoteCardStudioDialog(
+    quoteText: String,
+    bookTitle: String,
+    bookAuthor: String,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var selectedTemplate by remember { mutableStateOf(QUOTE_CARD_TEMPLATES.first()) }
+    val previewBitmap = remember(quoteText, bookTitle, bookAuthor, selectedTemplate) {
+        renderShareableQuoteCardBitmap(
+            quoteText = quoteText,
+            bookTitle = bookTitle,
+            bookAuthor = bookAuthor,
+            template = selectedTemplate
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Shareable Quote Card", fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Image(
+                    bitmap = previewBitmap.asImageBitmap(),
+                    contentDescription = "Quote Card Preview",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1080f / 1350f)
+                        .clip(RoundedCornerShape(16.dp))
+                        .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    QUOTE_CARD_TEMPLATES.forEach { tmpl ->
+                        FilterChip(
+                            selected = selectedTemplate.id == tmpl.id,
+                            onClick = { selectedTemplate = tmpl },
+                            label = { Text(tmpl.name, fontSize = 12.sp) }
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            saveAndShareQuoteBitmap(context, previewBitmap, shareImmediately = false)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Save Image", fontSize = 12.sp)
+                    }
+                    Button(
+                        onClick = {
+                            saveAndShareQuoteBitmap(context, previewBitmap, shareImmediately = true)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Share Card", fontSize = 12.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
 }
 
 private fun resolveSmartChapterTitles(
@@ -791,7 +1462,9 @@ private fun renderBookPageToBitmap(
     visualBitmap: Bitmap?,
     allChapters: List<EbookChapter>,
     currentChapterIndex: Int,
-    isTocChapter: Boolean
+    isTocChapter: Boolean,
+    chapterHighlights: List<EbookHighlight> = emptyList(),
+    isDarkReader: Boolean = true
 ): RenderedBookPage {
     val w = widthPx.coerceAtLeast(64)
     val h = heightPx.coerceAtLeast(64)
@@ -799,6 +1472,7 @@ private fun renderBookPageToBitmap(
     val canvas = AndroidCanvas(bmp)
     canvas.drawColor(bgColorArgb)
     val hotspots = mutableListOf<PageLinkHotspot>()
+    val paragraphBlocks = mutableListOf<PageParagraphBlock>()
 
     val padH = (w * 0.068f * marginScale.coerceIn(0.6f, 1.6f)).coerceAtLeast(20f)
     val padTop = (h * 0.045f).coerceAtLeast(24f)
@@ -851,6 +1525,25 @@ private fun renderBookPageToBitmap(
             }
 
             val spannable = SpannableString(bodyText)
+
+            // Module D: Render saved highlights directly onto the SpannableString so they bend in 3D!
+            for (hl in chapterHighlights) {
+                if (hl.text.length >= 4) {
+                    var startIdx = bodyText.indexOf(hl.text, ignoreCase = true)
+                    while (startIdx >= 0) {
+                        val endIdx = (startIdx + hl.text.length).coerceAtMost(bodyText.length)
+                        val spanColor = parseHighlightSpanArgb(hl.colorHex, isDarkReader)
+                        spannable.setSpan(
+                            BackgroundColorSpan(spanColor),
+                            startIdx,
+                            endIdx,
+                            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                        )
+                        startIdx = bodyText.indexOf(hl.text, startIdx + hl.text.length, ignoreCase = true)
+                    }
+                }
+            }
+
             data class MatchedChapterSpan(val start: Int, val end: Int, val targetIdx: Int, val label: String)
             data class MatchedFootnoteSpan(val start: Int, val end: Int, val marker: String)
             val matchedChapters = mutableListOf<MatchedChapterSpan>()
@@ -911,6 +1604,27 @@ private fun renderBookPageToBitmap(
             bodyLayout.draw(canvas)
             canvas.restore()
 
+            // Compute paragraph bounding boxes for Long-Press Selection
+            var pOffset = 0
+            for (rawPara in bodyText.split('\n')) {
+                val pStart = pOffset
+                val pEnd = pStart + rawPara.length
+                pOffset = pEnd + 1
+                val trimmed = rawPara.trim()
+                if (trimmed.length >= 8) {
+                    val sLine = bodyLayout.getLineForOffset(pStart.coerceIn(0, bodyText.length))
+                    val eLine = bodyLayout.getLineForOffset(pEnd.coerceIn(0, bodyText.length))
+                    val topY = currentY + bodyLayout.getLineTop(sLine) - 6f
+                    val bottomY = currentY + bodyLayout.getLineBottom(eLine) + 6f
+                    paragraphBlocks.add(
+                        PageParagraphBlock(
+                            rect = RectF(padH - 12f, topY, padH + contentWidth + 12f, bottomY),
+                            text = trimmed
+                        )
+                    )
+                }
+            }
+
             for (ms in matchedChapters) {
                 val startLine = bodyLayout.getLineForOffset(ms.start)
                 val endLine = bodyLayout.getLineForOffset(ms.end.coerceAtLeast(ms.start))
@@ -946,7 +1660,7 @@ private fun renderBookPageToBitmap(
         }
     }
 
-    return RenderedBookPage(bitmap = bmp, hotspots = hotspots)
+    return RenderedBookPage(bitmap = bmp, hotspots = hotspots, paragraphs = paragraphBlocks)
 }
 
 private fun renderDualSpreadBookPageToBitmap(
@@ -968,7 +1682,9 @@ private fun renderDualSpreadBookPageToBitmap(
     paragraphSpacingDp: Float,
     allChapters: List<EbookChapter>,
     currentChapterIndex: Int,
-    isTocChapter: Boolean
+    isTocChapter: Boolean,
+    chapterHighlights: List<EbookHighlight> = emptyList(),
+    isDarkReader: Boolean = true
 ): RenderedBookPage {
     val totalW = totalWidthPx.coerceAtLeast(200)
     val h = heightPx.coerceAtLeast(120)
@@ -994,7 +1710,9 @@ private fun renderDualSpreadBookPageToBitmap(
         visualBitmap = null,
         allChapters = allChapters,
         currentChapterIndex = currentChapterIndex,
-        isTocChapter = isTocChapter
+        isTocChapter = isTocChapter,
+        chapterHighlights = chapterHighlights,
+        isDarkReader = isDarkReader
     )
 
     val rightRendered = renderBookPageToBitmap(
@@ -1016,7 +1734,9 @@ private fun renderDualSpreadBookPageToBitmap(
         visualBitmap = null,
         allChapters = allChapters,
         currentChapterIndex = currentChapterIndex,
-        isTocChapter = isTocChapter
+        isTocChapter = isTocChapter,
+        chapterHighlights = chapterHighlights,
+        isDarkReader = isDarkReader
     )
 
     val combinedBmp = Bitmap.createBitmap(totalW, h, Bitmap.Config.ARGB_8888)
@@ -1060,7 +1780,19 @@ private fun renderDualSpreadBookPageToBitmap(
         combinedHotspots.add(spot.copy(rect = shiftedRect))
     }
 
-    return RenderedBookPage(bitmap = combinedBmp, hotspots = combinedHotspots)
+    val combinedParagraphs = ArrayList<PageParagraphBlock>(leftRendered.paragraphs.size + rightRendered.paragraphs.size)
+    combinedParagraphs.addAll(leftRendered.paragraphs)
+    for (para in rightRendered.paragraphs) {
+        val shiftedRect = RectF(
+            para.rect.left + rightOffsetX,
+            para.rect.top,
+            para.rect.right + rightOffsetX,
+            para.rect.bottom
+        )
+        combinedParagraphs.add(para.copy(rect = shiftedRect))
+    }
+
+    return RenderedBookPage(bitmap = combinedBmp, hotspots = combinedHotspots, paragraphs = combinedParagraphs)
 }
 
 private fun draw3DCurledPageMesh(
@@ -1520,6 +2252,9 @@ fun BookshelfContent(
     onSelectBook: (Audiobook) -> Unit,
     onLongPressBook: (Audiobook) -> Unit
 ) {
+    var showQuotesHub by remember { mutableStateOf(false) }
+    var studioQuoteHighlight by remember { mutableStateOf<EbookHighlight?>(null) }
+
     if (books.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1583,7 +2318,8 @@ fun BookshelfContent(
     Column(modifier = Modifier.fillMaxSize()) {
         SmartShelfFilterRow(
             selectedFilter = viewModel.smartShelfFilter,
-            onSelectFilter = { viewModel.updateSmartShelfFilter(it) }
+            onSelectFilter = { viewModel.updateSmartShelfFilter(it) },
+            onOpenQuotesHub = { showQuotesHub = true }
         )
 
         if (viewMode == "GRID") {
@@ -1661,6 +2397,27 @@ fun BookshelfContent(
             }
         }
     }
+
+    if (showQuotesHub) {
+        GlobalQuotesHubSheet(
+            prefs = viewModel.repository.getPreferences(),
+            onDismiss = { showQuotesHub = false },
+            onOpenQuoteCardStudio = { hl ->
+                showQuotesHub = false
+                studioQuoteHighlight = hl
+            }
+        )
+    }
+
+    if (studioQuoteHighlight != null) {
+        val hl = studioQuoteHighlight!!
+        ShareableQuoteCardStudioDialog(
+            quoteText = hl.text,
+            bookTitle = hl.bookTitle,
+            bookAuthor = hl.bookAuthor,
+            onDismiss = { studioQuoteHighlight = null }
+        )
+    }
 }
 
 @Composable
@@ -1674,6 +2431,9 @@ fun EbookShelfContent(
     onSelectEbook: (Ebook) -> Unit,
     onLongPressEbook: (Ebook) -> Unit
 ) {
+    var showQuotesHub by remember { mutableStateOf(false) }
+    var studioQuoteHighlight by remember { mutableStateOf<EbookHighlight?>(null) }
+
     if (ebooks.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1742,7 +2502,8 @@ fun EbookShelfContent(
     Column(modifier = Modifier.fillMaxSize()) {
         SmartShelfFilterRow(
             selectedFilter = viewModel.smartShelfFilter,
-            onSelectFilter = { viewModel.updateSmartShelfFilter(it) }
+            onSelectFilter = { viewModel.updateSmartShelfFilter(it) },
+            onOpenQuotesHub = { showQuotesHub = true }
         )
 
         if (viewMode == "GRID") {
@@ -1813,6 +2574,35 @@ fun EbookShelfContent(
                 }
             }
         }
+    }
+
+    if (showQuotesHub) {
+        GlobalQuotesHubSheet(
+            prefs = viewModel.repository.getPreferences(),
+            onDismiss = { showQuotesHub = false },
+            onJumpToHighlight = { hl ->
+                showQuotesHub = false
+                val targetEb = ebooks.find { it.id == hl.ebookId }
+                if (targetEb != null) {
+                    viewModel.repository.saveEbookProgress(targetEb.id, hl.chapterIndex, 100)
+                    onSelectEbook(targetEb)
+                }
+            },
+            onOpenQuoteCardStudio = { hl ->
+                showQuotesHub = false
+                studioQuoteHighlight = hl
+            }
+        )
+    }
+
+    if (studioQuoteHighlight != null) {
+        val hl = studioQuoteHighlight!!
+        ShareableQuoteCardStudioDialog(
+            quoteText = hl.text,
+            bookTitle = hl.bookTitle,
+            bookAuthor = hl.bookAuthor,
+            onDismiss = { studioQuoteHighlight = null }
+        )
     }
 }
 
@@ -1936,6 +2726,7 @@ fun EpubReaderScreen(
     val currentChapter = resolvedChapters.getOrNull(currentChapterIndex)
     val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
 
+    // Module A State
     var activePresetId by remember { mutableStateOf(prefs.getString("ebook_preset_id", "EDITORIAL") ?: "EDITORIAL") }
     var fontFamilyKey by remember { mutableStateOf(prefs.getString("ebook_font_family", "SERIF") ?: "SERIF") }
     var lineHeightMultiplier by remember { mutableFloatStateOf(prefs.getFloat("ebook_line_height_mult", 1.42f)) }
@@ -1948,12 +2739,25 @@ fun EpubReaderScreen(
     var showCustomizeLayoutDrawer by remember { mutableStateOf(false) }
     var showCustomThemeBuilder by remember { mutableStateOf(false) }
 
+    // Module C State
     var dualPageSpreadEnabled by remember { mutableStateOf(prefs.getBoolean("ebook_dual_page_spread", true)) }
     var edgeBrightnessEnabled by remember { mutableStateOf(prefs.getBoolean("ebook_edge_brightness", true)) }
     var readerBrightness by remember { mutableFloatStateOf(prefs.getFloat("ebook_brightness_level", 0.80f)) }
     var isDraggingBrightness by remember { mutableStateOf(false) }
     var activeFootnotePopup by remember { mutableStateOf<Pair<String, String>?>(null) }
     var returnBookmark by remember { mutableStateOf<ReaderReturnBookmark?>(null) }
+
+    // Module D State: In-Book Selection Pill, Highlights, Notes & Shareable Quote Cards
+    var allHighlights by remember { mutableStateOf(loadAllEbookHighlights(prefs)) }
+    val currentChapterHighlights = remember(allHighlights, ebook.id, currentChapterIndex) {
+        allHighlights.filter { it.ebookId == ebook.id && it.chapterIndex == currentChapterIndex }
+    }
+    var selectedPassageText by remember { mutableStateOf<String?>(null) }
+    var showAddNoteDialogForPassage by remember { mutableStateOf(false) }
+    var noteDraftText by remember { mutableStateOf("") }
+    var pendingHighlightColorHex by remember { mutableStateOf("#F5C542") }
+    var showQuotesHubSheet by remember { mutableStateOf(false) }
+    var activeQuoteStudioPassage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(returnBookmark) {
         val currentBm = returnBookmark ?: return@LaunchedEffect
@@ -1983,6 +2787,7 @@ fun EpubReaderScreen(
             } ?: 0) >= 3)
     }
 
+    val isDarkReader = readerTheme != "SEPIA" && readerTheme != "LIGHT"
     val bgColor = when (readerTheme) {
         "SEPIA" -> Color(0xFFF4ECD8)
         "LIGHT" -> Color(0xFFFAFAFA)
@@ -2031,6 +2836,27 @@ fun EpubReaderScreen(
     val curlAnim = remember { Animatable(0f) }
     var touchYNorm by remember { mutableFloatStateOf(0.55f) }
 
+    fun saveHighlightForPassage(passage: String, colorHex: String, noteText: String = "") {
+        val clean = passage.trim()
+        if (clean.isEmpty()) return
+        val existingFiltered = allHighlights.filterNot {
+            it.ebookId == ebook.id && it.chapterIndex == currentChapterIndex && it.text.equals(clean, ignoreCase = true)
+        }
+        val newEntry = EbookHighlight(
+            ebookId = ebook.id,
+            bookTitle = ebook.title,
+            bookAuthor = ebook.author,
+            chapterIndex = currentChapterIndex,
+            chapterTitle = currentChapter?.title ?: "Chapter ${currentChapterIndex + 1}",
+            text = clean,
+            colorHex = colorHex,
+            note = noteText.trim()
+        )
+        val updated = listOf(newEntry) + existingFiltered
+        allHighlights = updated
+        saveAllEbookHighlights(prefs, updated)
+    }
+
     LaunchedEffect(currentChapterIndex, ebook.id, isVisualPageMode, readerTheme) {
         if (isVisualPageMode) {
             isRenderingVisualPage = true
@@ -2057,6 +2883,7 @@ fun EpubReaderScreen(
         val pageStep = if (useDualSpread) 2 else 1
 
         Column(modifier = Modifier.fillMaxSize()) {
+            // Top Reader Bar
             Surface(
                 color = bgColor,
                 tonalElevation = 0.dp,
@@ -2065,7 +2892,7 @@ fun EpubReaderScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
@@ -2086,7 +2913,7 @@ fun EpubReaderScreen(
                     Column(
                         modifier = Modifier
                             .weight(1f)
-                            .padding(horizontal = 8.dp)
+                            .padding(horizontal = 6.dp)
                             .clickable { showTocDialog = true },
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
@@ -2124,12 +2951,22 @@ fun EpubReaderScreen(
                                 )
                             }
                         }
+                        // Module D: Quotes & Highlights Hub Button
+                        IconButton(
+                            onClick = {
+                                ProFeatureManager.runIfPro(ProFeature.QUOTES_HUB) {
+                                    showQuotesHubSheet = true
+                                }
+                            }
+                        ) {
+                            Icon(Icons.Default.FormatQuote, contentDescription = "Quotes & Highlights Hub", tint = accentColor)
+                        }
                         IconButton(onClick = { showTocDialog = true }) {
                             Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters", tint = accentColor)
                         }
                         TextButton(
                             onClick = { showReaderSettings = true },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                         ) {
                             Text(
                                 text = "Aa",
@@ -2203,6 +3040,7 @@ fun EpubReaderScreen(
                 val canGoPrev = (subPageIndex > 0) || (currentChapterIndex > 0)
 
                 fun commitNextPage() {
+                    selectedPassageText = null
                     if (subPageIndex + pageStep < subPages.size) {
                         subPageIndex += pageStep
                     } else if (currentChapterIndex + 1 < resolvedChapters.size) {
@@ -2213,6 +3051,7 @@ fun EpubReaderScreen(
                 }
 
                 fun commitPrevPage() {
+                    selectedPassageText = null
                     if (subPageIndex > 0) {
                         subPageIndex = (subPageIndex - pageStep).coerceAtLeast(0)
                     } else if (currentChapterIndex > 0) {
@@ -2245,6 +3084,7 @@ fun EpubReaderScreen(
 
                 fun animateJumpToChapter(targetIdx: Int, targetSubPage: Int = 0, recordReturnPill: Boolean = true) {
                     if (targetIdx !in resolvedChapters.indices || curlAnim.isRunning) return
+                    selectedPassageText = null
                     if (recordReturnPill && abs(targetIdx - currentChapterIndex) >= 1) {
                         returnBookmark = ReaderReturnBookmark(
                             chapterIndex = currentChapterIndex,
@@ -2334,7 +3174,8 @@ fun EpubReaderScreen(
                     canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
                     currentChapter?.title, subPageIndex, currLeftText, currRightText, useDualSpread,
                     fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
-                    renderedPageBitmap, resolvedChapters, currentChapterIndex, isTocChapter
+                    renderedPageBitmap, resolvedChapters, currentChapterIndex, isTocChapter,
+                    currentChapterHighlights, isDarkReader
                 ) {
                     if (useDualSpread) {
                         renderDualSpreadBookPageToBitmap(
@@ -2356,7 +3197,9 @@ fun EpubReaderScreen(
                             paragraphSpacingDp = paragraphSpacingDp,
                             allChapters = resolvedChapters,
                             currentChapterIndex = currentChapterIndex,
-                            isTocChapter = isTocChapter
+                            isTocChapter = isTocChapter,
+                            chapterHighlights = currentChapterHighlights,
+                            isDarkReader = isDarkReader
                         )
                     } else {
                         renderBookPageToBitmap(
@@ -2378,7 +3221,9 @@ fun EpubReaderScreen(
                             visualBitmap = if (isVisualPageMode) renderedPageBitmap else null,
                             allChapters = resolvedChapters,
                             currentChapterIndex = currentChapterIndex,
-                            isTocChapter = isTocChapter
+                            isTocChapter = isTocChapter,
+                            chapterHighlights = currentChapterHighlights,
+                            isDarkReader = isDarkReader
                         )
                     }
                 }
@@ -2387,7 +3232,7 @@ fun EpubReaderScreen(
                     canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
                     currentChapterIndex, subPageIndex, subPages, nextChapSubPages, useDualSpread,
                     fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
-                    nextPageBitmap, resolvedChapters, isTocChapter
+                    nextPageBitmap, resolvedChapters, isTocChapter, currentChapterHighlights, isDarkReader
                 ) {
                     val isNextNewChapter = subPageIndex + pageStep >= subPages.size
                     val nextHeading = if (isNextNewChapter && currentChapterIndex + 1 < resolvedChapters.size) {
@@ -2423,7 +3268,9 @@ fun EpubReaderScreen(
                             paragraphSpacingDp = paragraphSpacingDp,
                             allChapters = resolvedChapters,
                             currentChapterIndex = if (isNextNewChapter) currentChapterIndex + 1 else currentChapterIndex,
-                            isTocChapter = isTocChapter && !isNextNewChapter
+                            isTocChapter = isTocChapter && !isNextNewChapter,
+                            chapterHighlights = if (isNextNewChapter) emptyList() else currentChapterHighlights,
+                            isDarkReader = isDarkReader
                         )
                     } else {
                         renderBookPageToBitmap(
@@ -2445,7 +3292,9 @@ fun EpubReaderScreen(
                             visualBitmap = if (isVisualPageMode) (nextPageBitmap ?: renderedPageBitmap) else null,
                             allChapters = resolvedChapters,
                             currentChapterIndex = if (isNextNewChapter) currentChapterIndex + 1 else currentChapterIndex,
-                            isTocChapter = isTocChapter && !isNextNewChapter
+                            isTocChapter = isTocChapter && !isNextNewChapter,
+                            chapterHighlights = if (isNextNewChapter) emptyList() else currentChapterHighlights,
+                            isDarkReader = isDarkReader
                         )
                     }
                 }
@@ -2454,7 +3303,7 @@ fun EpubReaderScreen(
                     canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
                     currentChapterIndex, subPageIndex, subPages, prevChapSubPages, useDualSpread,
                     fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
-                    prevPageBitmap, resolvedChapters, isTocChapter
+                    prevPageBitmap, resolvedChapters, isTocChapter, currentChapterHighlights, isDarkReader
                 ) {
                     val isPrevChap = subPageIndex == 0
                     val prevStartIdx = if (!isPrevChap) {
@@ -2498,7 +3347,9 @@ fun EpubReaderScreen(
                             paragraphSpacingDp = paragraphSpacingDp,
                             allChapters = resolvedChapters,
                             currentChapterIndex = if (isPrevChap) (currentChapterIndex - 1).coerceAtLeast(0) else currentChapterIndex,
-                            isTocChapter = isTocChapter
+                            isTocChapter = isTocChapter,
+                            chapterHighlights = if (isPrevChap) emptyList() else currentChapterHighlights,
+                            isDarkReader = isDarkReader
                         )
                     } else {
                         renderBookPageToBitmap(
@@ -2520,7 +3371,9 @@ fun EpubReaderScreen(
                             visualBitmap = if (isVisualPageMode) (prevPageBitmap ?: renderedPageBitmap) else null,
                             allChapters = resolvedChapters,
                             currentChapterIndex = currentChapterIndex,
-                            isTocChapter = isTocChapter
+                            isTocChapter = isTocChapter,
+                            chapterHighlights = if (isPrevChap) emptyList() else currentChapterHighlights,
+                            isDarkReader = isDarkReader
                         )
                     }
                 }
@@ -2538,10 +3391,11 @@ fun EpubReaderScreen(
                             .pointerInput(
                                 currentChapterIndex, subPageIndex, subPages.size,
                                 resolvedChapters.size, currentRenderedPage.hotspots,
-                                edgeBrightnessEnabled, useDualSpread
+                                currentRenderedPage.paragraphs, edgeBrightnessEnabled, useDualSpread
                             ) {
                                 awaitEachGesture {
                                     val down = awaitFirstDown(requireUnconsumed = false)
+                                    val downTimeMs = System.currentTimeMillis()
                                     val w = size.width.toFloat().coerceAtLeast(1f)
                                     val h = size.height.toFloat().coerceAtLeast(1f)
                                     val startX = down.position.x
@@ -2602,17 +3456,26 @@ fun EpubReaderScreen(
                                         }
                                     }
 
+                                    val pressDurationMs = System.currentTimeMillis() - downTimeMs
+
                                     if (gestureMode == 2) {
                                         prefs.edit().putFloat("ebook_brightness_level", readerBrightness).apply()
                                         coroutineScope.launch {
                                             delay(650L)
                                             isDraggingBrightness = false
                                         }
-                                    } else if (gestureMode == 0 && abs(totalDragX) < 14f && abs(totalDragY) < 18f) {
+                                    } else if (gestureMode == 0 && abs(totalDragX) < 16f && abs(totalDragY) < 18f) {
                                         val tappedHotspot = currentRenderedPage.hotspots.firstOrNull { spot ->
                                             spot.rect.contains(startX, startY)
                                         }
-                                        if (tappedHotspot != null) {
+                                        val tappedPara = currentRenderedPage.paragraphs.firstOrNull { para ->
+                                            para.rect.contains(startX, startY)
+                                        }
+
+                                        // Module D: Long-Press (or center tap on paragraph) opens the In-Book Selection Pill!
+                                        if (pressDurationMs >= 360L && tappedPara != null) {
+                                            selectedPassageText = tappedPara.text
+                                        } else if (tappedHotspot != null) {
                                             if (tappedHotspot.footnoteBody != null) {
                                                 activeFootnotePopup = Pair(
                                                     tappedHotspot.footnoteTitle ?: "Footnote",
@@ -2621,10 +3484,15 @@ fun EpubReaderScreen(
                                             } else if (tappedHotspot.targetChapterIndex != null) {
                                                 animateJumpToChapter(tappedHotspot.targetChapterIndex, 0, recordReturnPill = true)
                                             }
-                                        } else if (startX > w * 0.72f && canGoNext) {
+                                        } else if (selectedPassageText != null) {
+                                            selectedPassageText = null
+                                        } else if (startX > w * 0.70f && canGoNext) {
                                             animatePageTurnForward()
-                                        } else if (startX < w * 0.28f && canGoPrev) {
+                                        } else if (startX < w * 0.30f && canGoPrev) {
                                             animatePageTurnBackward()
+                                        } else if (tappedPara != null) {
+                                            // Center-page tap on a paragraph also surfaces the quick highlight/quote pill
+                                            selectedPassageText = tappedPara.text
                                         }
                                     } else {
                                         val c = curlAnim.value
@@ -2693,6 +3561,7 @@ fun EpubReaderScreen(
                     }
                 }
 
+                // Extra-Dim Dark Room Overlay when brightness is dragged below 25%
                 if (readerBrightness < 0.25f) {
                     val dimAlpha = ((0.25f - readerBrightness) / 0.20f * 0.62f).coerceIn(0f, 0.65f)
                     Box(
@@ -2703,6 +3572,7 @@ fun EpubReaderScreen(
                     )
                 }
 
+                // Floating Brightness HUD Pill
                 if (isDraggingBrightness) {
                     Box(
                         modifier = Modifier
@@ -2736,8 +3606,128 @@ fun EpubReaderScreen(
                     }
                 }
 
+                // Module D: Sleek In-Book Floating Selection Pill (4 Highlight Colors + Add Note + Copy + Share Quote)
+                val activePassage = selectedPassageText
+                if (activePassage != null) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(horizontal = 14.dp)
+                            .padding(bottom = bottomBarHeightDp + 12.dp)
+                    ) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            shape = RoundedCornerShape(22.dp),
+                            tonalElevation = 10.dp,
+                            shadowElevation = 14.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(22.dp))
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "“${activePassage.take(90)}${if (activePassage.length > 90) "…" else ""}”",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontStyle = FontStyle.Italic,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    IconButton(
+                                        onClick = { selectedPassageText = null },
+                                        modifier = Modifier.size(26.dp)
+                                    ) {
+                                        Icon(Icons.Default.Close, contentDescription = "Dismiss", modifier = Modifier.size(16.dp))
+                                    }
+                                }
+
+                                Spacer(Modifier.height(10.dp))
+
+                                // 4 Highlight Color Swatches + Remove Highlight
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        HIGHLIGHT_COLOR_PALETTE.forEach { (hex, label) ->
+                                            val swatchColor = parseSafeHexColor(hex, Color(0xFFF5C542))
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(32.dp)
+                                                    .clip(CircleShape)
+                                                    .background(swatchColor)
+                                                    .border(1.5.dp, Color.White.copy(alpha = 0.7f), CircleShape)
+                                                    .clickable {
+                                                        pendingHighlightColorHex = hex
+                                                        saveHighlightForPassage(activePassage, hex)
+                                                        Toast.makeText(context, "Highlighted ($label)", Toast.LENGTH_SHORT).show()
+                                                        selectedPassageText = null
+                                                    }
+                                            )
+                                        }
+                                    }
+
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        // Add Note
+                                        FilledTonalIconButton(
+                                            onClick = {
+                                                noteDraftText = ""
+                                                showAddNoteDialogForPassage = true
+                                            },
+                                            modifier = Modifier.size(34.dp)
+                                        ) {
+                                            Icon(Icons.Default.EditNote, contentDescription = "Add Note", modifier = Modifier.size(18.dp))
+                                        }
+
+                                        // Copy
+                                        FilledTonalIconButton(
+                                            onClick = {
+                                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                                clipboard?.setPrimaryClip(
+                                                    ClipData.newPlainText("Book Quote", "“$activePassage” — ${ebook.title}, ${ebook.author}")
+                                                )
+                                                Toast.makeText(context, "Quote copied to clipboard", Toast.LENGTH_SHORT).show()
+                                                selectedPassageText = null
+                                            },
+                                            modifier = Modifier.size(34.dp)
+                                        ) {
+                                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp))
+                                        }
+
+                                        // Share Quote Card [PRO]
+                                        Button(
+                                            onClick = {
+                                                val passageToShare = activePassage
+                                                selectedPassageText = null
+                                                ProFeatureManager.runIfPro(ProFeature.QUOTE_CARDS) {
+                                                    saveHighlightForPassage(passageToShare, pendingHighlightColorHex)
+                                                    activeQuoteStudioPassage = passageToShare
+                                                }
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(34.dp)
+                                        ) {
+                                            Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(15.dp))
+                                            Spacer(Modifier.width(5.dp))
+                                            Text("Share Quote", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Floating 8-Second "Return to Page X" Pill
                 val activeReturnBm = returnBookmark
-                if (activeReturnBm != null) {
+                if (activeReturnBm != null && selectedPassageText == null) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -2789,6 +3779,7 @@ fun EpubReaderScreen(
                     }
                 }
 
+                // Dedicated Safe Bottom Status Footer
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -2838,6 +3829,78 @@ fun EpubReaderScreen(
                 }
             }
         }
+    }
+
+    // Module D: Add Note to Highlight Dialog
+    if (showAddNoteDialogForPassage && selectedPassageText != null) {
+        val passage = selectedPassageText!!
+        AlertDialog(
+            onDismissRequest = { showAddNoteDialogForPassage = false },
+            title = { Text("Add Note to Highlight", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "“${passage.take(120)}${if (passage.length > 120) "…" else ""}”",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontStyle = FontStyle.Italic,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = noteDraftText,
+                        onValueChange = { noteDraftText = it },
+                        label = { Text("Your thoughts or note") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        saveHighlightForPassage(passage, pendingHighlightColorHex, noteDraftText)
+                        showAddNoteDialogForPassage = false
+                        selectedPassageText = null
+                        Toast.makeText(context, "Highlight & note saved!", Toast.LENGTH_SHORT).show()
+                    }
+                ) {
+                    Text("Save Note")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddNoteDialogForPassage = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Module D: Global Quotes & Notes Hub Sheet (Opened from Reader Top Bar)
+    if (showQuotesHubSheet) {
+        GlobalQuotesHubSheet(
+            prefs = prefs,
+            filterEbookId = ebook.id,
+            onDismiss = { showQuotesHubSheet = false },
+            onJumpToHighlight = { hl ->
+                showQuotesHubSheet = false
+                if (hl.ebookId == ebook.id && hl.chapterIndex in resolvedChapters.indices) {
+                    subPageIndex = 0
+                    onSelectChapter(hl.chapterIndex)
+                }
+            },
+            onOpenQuoteCardStudio = { hl ->
+                showQuotesHubSheet = false
+                activeQuoteStudioPassage = hl.text
+            }
+        )
+    }
+
+    // Module D: Shareable Quote Card Studio
+    if (activeQuoteStudioPassage != null) {
+        ShareableQuoteCardStudioDialog(
+            quoteText = activeQuoteStudioPassage!!,
+            bookTitle = ebook.title,
+            bookAuthor = ebook.author,
+            onDismiss = { activeQuoteStudioPassage = null }
+        )
     }
 
     if (activeFootnotePopup != null) {
