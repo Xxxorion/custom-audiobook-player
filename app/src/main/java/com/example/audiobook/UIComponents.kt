@@ -18,9 +18,12 @@ import android.text.SpannableString
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.style.ForegroundColorSpan
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -1933,7 +1936,6 @@ fun EpubReaderScreen(
     val currentChapter = resolvedChapters.getOrNull(currentChapterIndex)
     val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
 
-    // Module A State
     var activePresetId by remember { mutableStateOf(prefs.getString("ebook_preset_id", "EDITORIAL") ?: "EDITORIAL") }
     var fontFamilyKey by remember { mutableStateOf(prefs.getString("ebook_font_family", "SERIF") ?: "SERIF") }
     var lineHeightMultiplier by remember { mutableFloatStateOf(prefs.getFloat("ebook_line_height_mult", 1.42f)) }
@@ -1946,7 +1948,6 @@ fun EpubReaderScreen(
     var showCustomizeLayoutDrawer by remember { mutableStateOf(false) }
     var showCustomThemeBuilder by remember { mutableStateOf(false) }
 
-    // Module C State
     var dualPageSpreadEnabled by remember { mutableStateOf(prefs.getBoolean("ebook_dual_page_spread", true)) }
     var edgeBrightnessEnabled by remember { mutableStateOf(prefs.getBoolean("ebook_edge_brightness", true)) }
     var readerBrightness by remember { mutableFloatStateOf(prefs.getFloat("ebook_brightness_level", 0.80f)) }
@@ -2056,7 +2057,6 @@ fun EpubReaderScreen(
         val pageStep = if (useDualSpread) 2 else 1
 
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top Reader Bar
             Surface(
                 color = bgColor,
                 tonalElevation = 0.dp,
@@ -2145,7 +2145,6 @@ fun EpubReaderScreen(
 
             HorizontalDivider(color = accentColor.copy(alpha = 0.14f))
 
-            // Main Interactive 3D Mesh Page-Curl Reading Area
             BoxWithConstraints(
                 modifier = Modifier
                     .weight(1f)
@@ -2694,7 +2693,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Extra-Dim Dark Room Overlay when brightness is dragged below 25%
                 if (readerBrightness < 0.25f) {
                     val dimAlpha = ((0.25f - readerBrightness) / 0.20f * 0.62f).coerceIn(0f, 0.65f)
                     Box(
@@ -2705,7 +2703,6 @@ fun EpubReaderScreen(
                     )
                 }
 
-                // Floating Brightness HUD Pill during Left-Edge Vertical Swipe
                 if (isDraggingBrightness) {
                     Box(
                         modifier = Modifier
@@ -2739,7 +2736,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Floating 8-Second "Return to Page X" Pill after internal chapter jumps
                 val activeReturnBm = returnBookmark
                 if (activeReturnBm != null) {
                     Box(
@@ -2793,7 +2789,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Dedicated Safe Bottom Status Footer
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -2845,7 +2840,6 @@ fun EpubReaderScreen(
         }
     }
 
-    // Inline Footnote Preview Popup
     if (activeFootnotePopup != null) {
         val (fnTitle, fnBody) = activeFootnotePopup!!
         AlertDialog(
