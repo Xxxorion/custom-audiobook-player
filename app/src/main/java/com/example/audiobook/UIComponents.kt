@@ -17,9 +17,13 @@ import android.graphics.Path as AndroidPath
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.media.AudioAttributes
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.text.Layout
 import android.text.Spannable
 import android.text.SpannableString
@@ -90,6 +94,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
@@ -114,6 +119,291 @@ fun formatTime(ms: Long): String {
     } else {
         String.format(Locale.US, "%02d:%02d", remainingMinutes, seconds)
     }
+}
+
+// Module F: Reading Insights & Daily Streak Persistence Engine
+data class ReadingStreakSnapshot(
+    val streakDays: Int,
+    val bestStreakDays: Int,
+    val todayMinutes: Int,
+    val todayPages: Int,
+    val totalPagesRead: Int,
+    val totalEbookMinutes: Int
+)
+
+private fun currentDayKey(cal: Calendar = Calendar.getInstance()): String {
+    return String.format(
+        Locale.US,
+        "%04d-%02d-%02d",
+        cal.get(Calendar.YEAR),
+        cal.get(Calendar.MONTH) + 1,
+        cal.get(Calendar.DAY_OF_MONTH)
+    )
+}
+
+private fun yesterdayDayKey(): String {
+    val cal = Calendar.getInstance()
+    cal.add(Calendar.DAY_OF_YEAR, -1)
+    return currentDayKey(cal)
+}
+
+fun loadReadingStreakSnapshot(prefs: SharedPreferences): ReadingStreakSnapshot {
+    val today = currentDayKey()
+    val yesterday = yesterdayDayKey()
+    val lastDay = prefs.getString("stats_last_read_day", "") ?: ""
+
+    var streak = prefs.getInt("stats_current_streak_days", 0)
+    if (lastDay.isNotEmpty() && lastDay != today && lastDay != yesterday) {
+        streak = 0
+    }
+    val best = prefs.getInt("stats_best_streak_days", streak).coerceAtLeast(streak)
+    val todayMins = if (lastDay == today) prefs.getInt("stats_today_minutes", 0) else 0
+    val todayPgs = if (lastDay == today) prefs.getInt("stats_today_pages", 0) else 0
+    val totalPgs = prefs.getInt("stats_total_pages", 0)
+    val totalMins = prefs.getInt("stats_total_ebook_minutes", 0)
+
+    return ReadingStreakSnapshot(
+        streakDays = streak,
+        bestStreakDays = best,
+        todayMinutes = todayMins,
+        todayPages = todayPgs,
+        totalPagesRead = totalPgs,
+        totalEbookMinutes = totalMins
+    )
+}
+
+fun recordReadingActivity(
+    prefs: SharedPreferences,
+    pagesAdded: Int = 0,
+    minutesAdded: Int = 0
+): ReadingStreakSnapshot {
+    val today = currentDayKey()
+    val yesterday = yesterdayDayKey()
+    val lastDay = prefs.getString("stats_last_read_day", "") ?: ""
+
+    var streak = prefs.getInt("stats_current_streak_days", 0)
+    var todayMins = if (lastDay == today) prefs.getInt("stats_today_minutes", 0) else 0
+    var todayPgs = if (lastDay == today) prefs.getInt("stats_today_pages", 0) else 0
+
+    if (lastDay != today) {
+        streak = if (lastDay == yesterday) streak + 1 else 1
+    } else if (streak <= 0) {
+        streak = 1
+    }
+
+    todayMins = (todayMins + minutesAdded).coerceAtLeast(0)
+    todayPgs = (todayPgs + pagesAdded).coerceAtLeast(0)
+    val totalPgs = (prefs.getInt("stats_total_pages", 0) + pagesAdded).coerceAtLeast(0)
+    val totalMins = (prefs.getInt("stats_total_ebook_minutes", 0) + minutesAdded).coerceAtLeast(0)
+    val best = max(prefs.getInt("stats_best_streak_days", 1), streak)
+
+    prefs.edit()
+        .putString("stats_last_read_day", today)
+        .putInt("stats_current_streak_days", streak)
+        .putInt("stats_best_streak_days", best)
+        .putInt("stats_today_minutes", todayMins)
+        .putInt("stats_today_pages", todayPgs)
+        .putInt("stats_total_pages", totalPgs)
+        .putInt("stats_total_ebook_minutes", totalMins)
+        .apply()
+
+    return ReadingStreakSnapshot(
+        streakDays = streak,
+        bestStreakDays = best,
+        todayMinutes = todayMins,
+        todayPages = todayPgs,
+        totalPagesRead = totalPgs,
+        totalEbookMinutes = totalMins
+    )
+}
+
+// Module F: Minimalist Home "Reading Streak & Insights" Card
+@Composable
+fun ReadingStreakStatsCard(
+    snapshot: ReadingStreakSnapshot,
+    totalAudioListenMs: Long,
+    completedAudioBooks: Int,
+    onClick: () -> Unit
+) {
+    val totalCombinedMinutes = snapshot.totalEbookMinutes + (totalAudioListenMs / 60_000L).toInt()
+    val activeStreak = snapshot.streakDays.coerceAtLeast(1)
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
+                shape = RoundedCornerShape(18.dp)
+            )
+            .clickable {
+                ProFeatureManager.runIfPro(ProFeature.READING_STATS) {
+                    onClick()
+                }
+            }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.LocalFireDepartment,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "$activeStreak Day Reading Streak",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary,
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "PRO",
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
+                    Text(
+                        text = "Today: ${snapshot.todayMinutes}m • ${snapshot.todayPages} pgs  |  Total: ${totalCombinedMinutes}m",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = "Reading Insights",
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+// Module F: Detailed Reading Insights Dialog
+@Composable
+fun ReadingInsightsDialog(
+    snapshot: ReadingStreakSnapshot,
+    totalAudioListenMs: Long,
+    completedAudioBooks: Int,
+    ebooksCount: Int,
+    onDismiss: () -> Unit
+) {
+    val audioMins = (totalAudioListenMs / 60_000L).toInt()
+    val combinedMins = snapshot.totalEbookMinutes + audioMins
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.LocalFireDepartment, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Reading Streak & Insights", fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "${snapshot.streakDays.coerceAtLeast(1)} Days",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text("Current Streak", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "${snapshot.bestStreakDays.coerceAtLeast(1)} Days",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text("Best Streak", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                Text("Today's Activity", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                Text("• Reading Time Today: ${snapshot.todayMinutes} min")
+                Text("• Pages Turned Today: ${snapshot.todayPages} pages")
+
+                HorizontalDivider()
+
+                Text("All-Time Library Totals", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                Text("• Combined Reading & Listening: $combinedMins min")
+                Text("• Total eBook Pages Turned: ${snapshot.totalPagesRead} pages")
+                Text("• Audiobook Listen Time: ${formatTime(totalAudioListenMs)}")
+                Text("• Completed Audiobooks: $completedAudioBooks  •  eBooks on Shelf: $ebooksCount")
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Done", fontWeight = FontWeight.Bold)
+            }
+        }
+    )
+}
+
+// Module F: Splits visible page text into clean sentences for Hybrid TTS Read-Aloud
+private fun extractSentencesFromPage(leftText: String, rightText: String = ""): List<String> {
+    val combined = if (rightText.isNotBlank()) "$leftText\n$rightText" else leftText
+    if (combined.isBlank()) return emptyList()
+    return combined
+        .split(Regex("(?<=[.!?…])\\s+|\\n+"))
+        .map { it.trim() }
+        .filter { it.length >= 2 }
 }
 
 // Module D: Highlight & Quote Data Model + JSON Persistence
@@ -235,7 +525,6 @@ private fun saveAllEbookHighlights(prefs: SharedPreferences, list: List<EbookHig
     } catch (_: Throwable) {}
 }
 
-// Module D: High-Resolution 1080x1350 Shareable Quote Card Bitmap Generator
 private fun renderShareableQuoteCardBitmap(
     quoteText: String,
     bookTitle: String,
@@ -247,7 +536,6 @@ private fun renderShareableQuoteCardBitmap(
     val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
     val canvas = AndroidCanvas(bmp)
 
-    // 1. Background Gradient
     val bgPaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
         shader = LinearGradient(
             0f, 0f, w.toFloat(), h.toFloat(),
@@ -257,7 +545,6 @@ private fun renderShareableQuoteCardBitmap(
     }
     canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), bgPaint)
 
-    // 2. Subtle Outer Frame Border
     val borderPaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
         color = template.accentArgb
         alpha = 90
@@ -266,7 +553,6 @@ private fun renderShareableQuoteCardBitmap(
     }
     canvas.drawRoundRect(RectF(56f, 56f, w - 56f, h - 56f), 36f, 36f, borderPaint)
 
-    // 3. Decorative Opening Quote Mark
     val quoteMarkPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
         color = template.accentArgb
         alpha = 190
@@ -275,7 +561,6 @@ private fun renderShareableQuoteCardBitmap(
     }
     canvas.drawText("“", 110f, 270f, quoteMarkPaint)
 
-    // 4. Main Passage Text (Auto-sized so short & long quotes both look balanced)
     val cleanQuote = quoteText.trim().take(520)
     val dynamicFontSize = when {
         cleanQuote.length < 110 -> 54f
@@ -307,7 +592,6 @@ private fun renderShareableQuoteCardBitmap(
     quoteLayout.draw(canvas)
     canvas.restore()
 
-    // 5. Accent Divider Line & Book Metadata Footer
     val footerY = (quoteTopY + quoteLayout.height + 90f).coerceAtMost(h - 220f)
     val accentLinePaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
         color = template.accentArgb
@@ -330,7 +614,6 @@ private fun renderShareableQuoteCardBitmap(
     }
     canvas.drawText(bookAuthor, 120f, footerY + 112f, authorPaint)
 
-    // 6. Subtle Fablewood Watermark
     val brandPaint = TextPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
         color = template.textArgb
         alpha = 120
@@ -838,7 +1121,6 @@ fun SmartShelfFilterRow(
     }
 }
 
-// Module D: Global Quotes & Notes Hub Modal Sheet + Shareable Quote Card Studio
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GlobalQuotesHubSheet(
@@ -1097,7 +1379,6 @@ fun GlobalQuotesHubSheet(
     }
 }
 
-// Module D: [PRO] Shareable Quote Card Studio Dialog
 @Composable
 fun ShareableQuoteCardStudioDialog(
     quoteText: String,
@@ -1464,7 +1745,8 @@ private fun renderBookPageToBitmap(
     currentChapterIndex: Int,
     isTocChapter: Boolean,
     chapterHighlights: List<EbookHighlight> = emptyList(),
-    isDarkReader: Boolean = true
+    isDarkReader: Boolean = true,
+    activeTtsSentence: String? = null
 ): RenderedBookPage {
     val w = widthPx.coerceAtLeast(64)
     val h = heightPx.coerceAtLeast(64)
@@ -1526,7 +1808,6 @@ private fun renderBookPageToBitmap(
 
             val spannable = SpannableString(bodyText)
 
-            // Module D: Render saved highlights directly onto the SpannableString so they bend in 3D!
             for (hl in chapterHighlights) {
                 if (hl.text.length >= 4) {
                     var startIdx = bodyText.indexOf(hl.text, ignoreCase = true)
@@ -1541,6 +1822,21 @@ private fun renderBookPageToBitmap(
                         )
                         startIdx = bodyText.indexOf(hl.text, startIdx + hl.text.length, ignoreCase = true)
                     }
+                }
+            }
+
+            // Module F: Live Active Sentence Highlighting during TTS Read-Aloud!
+            if (!activeTtsSentence.isNullOrBlank() && activeTtsSentence.length >= 3) {
+                val ttsIdx = bodyText.indexOf(activeTtsSentence)
+                if (ttsIdx >= 0) {
+                    val ttsEnd = (ttsIdx + activeTtsSentence.length).coerceAtMost(bodyText.length)
+                    val ttsBgColor = if (isDarkReader) 0x77D4AF37 else 0x88F5C542.toInt()
+                    spannable.setSpan(
+                        BackgroundColorSpan(ttsBgColor),
+                        ttsIdx,
+                        ttsEnd,
+                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
                 }
             }
 
@@ -1604,7 +1900,6 @@ private fun renderBookPageToBitmap(
             bodyLayout.draw(canvas)
             canvas.restore()
 
-            // Compute paragraph bounding boxes for Long-Press Selection
             var pOffset = 0
             for (rawPara in bodyText.split('\n')) {
                 val pStart = pOffset
@@ -1684,7 +1979,8 @@ private fun renderDualSpreadBookPageToBitmap(
     currentChapterIndex: Int,
     isTocChapter: Boolean,
     chapterHighlights: List<EbookHighlight> = emptyList(),
-    isDarkReader: Boolean = true
+    isDarkReader: Boolean = true,
+    activeTtsSentence: String? = null
 ): RenderedBookPage {
     val totalW = totalWidthPx.coerceAtLeast(200)
     val h = heightPx.coerceAtLeast(120)
@@ -1712,7 +2008,8 @@ private fun renderDualSpreadBookPageToBitmap(
         currentChapterIndex = currentChapterIndex,
         isTocChapter = isTocChapter,
         chapterHighlights = chapterHighlights,
-        isDarkReader = isDarkReader
+        isDarkReader = isDarkReader,
+        activeTtsSentence = activeTtsSentence
     )
 
     val rightRendered = renderBookPageToBitmap(
@@ -1736,7 +2033,8 @@ private fun renderDualSpreadBookPageToBitmap(
         currentChapterIndex = currentChapterIndex,
         isTocChapter = isTocChapter,
         chapterHighlights = chapterHighlights,
-        isDarkReader = isDarkReader
+        isDarkReader = isDarkReader,
+        activeTtsSentence = activeTtsSentence
     )
 
     val combinedBmp = Bitmap.createBitmap(totalW, h, Bitmap.Config.ARGB_8888)
@@ -2254,6 +2552,10 @@ fun BookshelfContent(
 ) {
     var showQuotesHub by remember { mutableStateOf(false) }
     var studioQuoteHighlight by remember { mutableStateOf<EbookHighlight?>(null) }
+    var showReadingInsightsDialog by remember { mutableStateOf(false) }
+    val streakSnapshot = remember(viewModel.progressRevision, viewModel.totalListenMs) {
+        loadReadingStreakSnapshot(viewModel.repository.getPreferences())
+    }
 
     if (books.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
@@ -2330,16 +2632,26 @@ fun BookshelfContent(
                 verticalArrangement = Arrangement.spacedBy(18.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                if (heroBook != null && viewModel.smartShelfFilter == "ALL") {
-                    item(span = { GridItemSpan(maxLineSpan) }, key = "hero_${heroBook.id}") {
-                        CurrentlyReadingHeroCard(
-                            title = heroBook.title,
-                            author = heroBook.author,
-                            subtitle = activeBookSubtitle.ifBlank { "${heroBook.tracks.size} track(s)" },
-                            progressFraction = activeBookProgress,
-                            coverBitmap = viewModel.currentCoverArt,
-                            isAudio = true,
-                            onContinueClick = { onSelectBook(heroBook) }
+                if (viewModel.smartShelfFilter == "ALL") {
+                    if (heroBook != null) {
+                        item(span = { GridItemSpan(maxLineSpan) }, key = "hero_${heroBook.id}") {
+                            CurrentlyReadingHeroCard(
+                                title = heroBook.title,
+                                author = heroBook.author,
+                                subtitle = activeBookSubtitle.ifBlank { "${heroBook.tracks.size} track(s)" },
+                                progressFraction = activeBookProgress,
+                                coverBitmap = viewModel.currentCoverArt,
+                                isAudio = true,
+                                onContinueClick = { onSelectBook(heroBook) }
+                            )
+                        }
+                    }
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "streak_audio_card") {
+                        ReadingStreakStatsCard(
+                            snapshot = streakSnapshot,
+                            totalAudioListenMs = viewModel.totalListenMs,
+                            completedAudioBooks = viewModel.completedBooksCount,
+                            onClick = { showReadingInsightsDialog = true }
                         )
                     }
                 }
@@ -2365,18 +2677,27 @@ fun BookshelfContent(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                if (heroBook != null && viewModel.smartShelfFilter == "ALL") {
-                    item(key = "hero_${heroBook.id}") {
-                        CurrentlyReadingHeroCard(
-                            title = heroBook.title,
-                            author = heroBook.author,
-                            subtitle = activeBookSubtitle.ifBlank { "${heroBook.tracks.size} track(s)" },
-                            progressFraction = activeBookProgress,
-                            coverBitmap = viewModel.currentCoverArt,
-                            isAudio = true,
-                            onContinueClick = { onSelectBook(heroBook) }
+                if (viewModel.smartShelfFilter == "ALL") {
+                    if (heroBook != null) {
+                        item(key = "hero_${heroBook.id}") {
+                            CurrentlyReadingHeroCard(
+                                title = heroBook.title,
+                                author = heroBook.author,
+                                subtitle = activeBookSubtitle.ifBlank { "${heroBook.tracks.size} track(s)" },
+                                progressFraction = activeBookProgress,
+                                coverBitmap = viewModel.currentCoverArt,
+                                isAudio = true,
+                                onContinueClick = { onSelectBook(heroBook) }
+                            )
+                        }
+                    }
+                    item(key = "streak_audio_list") {
+                        ReadingStreakStatsCard(
+                            snapshot = streakSnapshot,
+                            totalAudioListenMs = viewModel.totalListenMs,
+                            completedAudioBooks = viewModel.completedBooksCount,
+                            onClick = { showReadingInsightsDialog = true }
                         )
-                        Spacer(Modifier.height(4.dp))
                     }
                 }
 
@@ -2396,6 +2717,16 @@ fun BookshelfContent(
                 }
             }
         }
+    }
+
+    if (showReadingInsightsDialog) {
+        ReadingInsightsDialog(
+            snapshot = streakSnapshot,
+            totalAudioListenMs = viewModel.totalListenMs,
+            completedAudioBooks = viewModel.completedBooksCount,
+            ebooksCount = viewModel.ebooks.size,
+            onDismiss = { showReadingInsightsDialog = false }
+        )
     }
 
     if (showQuotesHub) {
@@ -2433,6 +2764,10 @@ fun EbookShelfContent(
 ) {
     var showQuotesHub by remember { mutableStateOf(false) }
     var studioQuoteHighlight by remember { mutableStateOf<EbookHighlight?>(null) }
+    var showReadingInsightsDialog by remember { mutableStateOf(false) }
+    val streakSnapshot = remember(viewModel.progressRevision, viewModel.totalListenMs) {
+        loadReadingStreakSnapshot(viewModel.repository.getPreferences())
+    }
 
     if (ebooks.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
@@ -2514,16 +2849,26 @@ fun EbookShelfContent(
                 verticalArrangement = Arrangement.spacedBy(18.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                if (heroEbook != null && viewModel.smartShelfFilter == "ALL") {
-                    item(span = { GridItemSpan(maxLineSpan) }, key = "hero_eb_${heroEbook.id}") {
-                        CurrentlyReadingHeroCard(
-                            title = heroEbook.title,
-                            author = heroEbook.author,
-                            subtitle = heroSubtitle,
-                            progressFraction = heroProgress,
-                            coverBitmap = viewModel.currentEbookCoverArt,
-                            isAudio = false,
-                            onContinueClick = { onSelectEbook(heroEbook) }
+                if (viewModel.smartShelfFilter == "ALL") {
+                    if (heroEbook != null) {
+                        item(span = { GridItemSpan(maxLineSpan) }, key = "hero_eb_${heroEbook.id}") {
+                            CurrentlyReadingHeroCard(
+                                title = heroEbook.title,
+                                author = heroEbook.author,
+                                subtitle = heroSubtitle,
+                                progressFraction = heroProgress,
+                                coverBitmap = viewModel.currentEbookCoverArt,
+                                isAudio = false,
+                                onContinueClick = { onSelectEbook(heroEbook) }
+                            )
+                        }
+                    }
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "streak_ebook_card") {
+                        ReadingStreakStatsCard(
+                            snapshot = streakSnapshot,
+                            totalAudioListenMs = viewModel.totalListenMs,
+                            completedAudioBooks = viewModel.completedBooksCount,
+                            onClick = { showReadingInsightsDialog = true }
                         )
                     }
                 }
@@ -2546,18 +2891,27 @@ fun EbookShelfContent(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                if (heroEbook != null && viewModel.smartShelfFilter == "ALL") {
-                    item(key = "hero_eb_${heroEbook.id}") {
-                        CurrentlyReadingHeroCard(
-                            title = heroEbook.title,
-                            author = heroEbook.author,
-                            subtitle = heroSubtitle,
-                            progressFraction = heroProgress,
-                            coverBitmap = viewModel.currentEbookCoverArt,
-                            isAudio = false,
-                            onContinueClick = { onSelectEbook(heroEbook) }
+                if (viewModel.smartShelfFilter == "ALL") {
+                    if (heroEbook != null) {
+                        item(key = "hero_eb_${heroEbook.id}") {
+                            CurrentlyReadingHeroCard(
+                                title = heroEbook.title,
+                                author = heroEbook.author,
+                                subtitle = heroSubtitle,
+                                progressFraction = heroProgress,
+                                coverBitmap = viewModel.currentEbookCoverArt,
+                                isAudio = false,
+                                onContinueClick = { onSelectEbook(heroEbook) }
+                            )
+                        }
+                    }
+                    item(key = "streak_ebook_list") {
+                        ReadingStreakStatsCard(
+                            snapshot = streakSnapshot,
+                            totalAudioListenMs = viewModel.totalListenMs,
+                            completedAudioBooks = viewModel.completedBooksCount,
+                            onClick = { showReadingInsightsDialog = true }
                         )
-                        Spacer(Modifier.height(4.dp))
                     }
                 }
 
@@ -2574,6 +2928,16 @@ fun EbookShelfContent(
                 }
             }
         }
+    }
+
+    if (showReadingInsightsDialog) {
+        ReadingInsightsDialog(
+            snapshot = streakSnapshot,
+            totalAudioListenMs = viewModel.totalListenMs,
+            completedAudioBooks = viewModel.completedBooksCount,
+            ebooksCount = viewModel.ebooks.size,
+            onDismiss = { showReadingInsightsDialog = false }
+        )
     }
 
     if (showQuotesHub) {
@@ -2747,7 +3111,7 @@ fun EpubReaderScreen(
     var activeFootnotePopup by remember { mutableStateOf<Pair<String, String>?>(null) }
     var returnBookmark by remember { mutableStateOf<ReaderReturnBookmark?>(null) }
 
-    // Module D State: In-Book Selection Pill, Highlights, Notes & Shareable Quote Cards
+    // Module D State
     var allHighlights by remember { mutableStateOf(loadAllEbookHighlights(prefs)) }
     val currentChapterHighlights = remember(allHighlights, ebook.id, currentChapterIndex) {
         allHighlights.filter { it.ebookId == ebook.id && it.chapterIndex == currentChapterIndex }
@@ -2758,6 +3122,78 @@ fun EpubReaderScreen(
     var pendingHighlightColorHex by remember { mutableStateOf("#F5C542") }
     var showQuotesHubSheet by remember { mutableStateOf(false) }
     var activeQuoteStudioPassage by remember { mutableStateOf<String?>(null) }
+
+    // Module F State: Hybrid TTS Read-Aloud Engine + Reading Minutes Tracker
+    var isTtsBarVisible by remember { mutableStateOf(false) }
+    var isTtsPlaying by remember { mutableStateOf(false) }
+    var ttsSentenceIndex by remember { mutableIntStateOf(0) }
+    var ttsSpeed by remember { mutableFloatStateOf(prefs.getFloat("ebook_tts_speed", 1.0f)) }
+    var ttsSleepMinutesRemaining by remember { mutableIntStateOf(0) }
+    var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
+    var isTtsReady by remember { mutableStateOf(false) }
+    var ttsAutoAdvancePageTrigger by remember { mutableIntStateOf(0) }
+
+    // Track active reading minutes every 60s while reader is open
+    LaunchedEffect(ebook.id) {
+        recordReadingActivity(prefs, pagesAdded = 0, minutesAdded = 0)
+        while (true) {
+            delay(60_000L)
+            recordReadingActivity(prefs, pagesAdded = 0, minutesAdded = 1)
+        }
+    }
+
+    // TTS Sleep Timer Countdown
+    LaunchedEffect(ttsSleepMinutesRemaining, isTtsPlaying) {
+        if (isTtsPlaying && ttsSleepMinutesRemaining > 0) {
+            delay(60_000L)
+            ttsSleepMinutesRemaining = (ttsSleepMinutesRemaining - 1).coerceAtLeast(0)
+            if (ttsSleepMinutesRemaining == 0) {
+                isTtsPlaying = false
+                ttsEngine?.stop()
+            }
+        }
+    }
+
+    val coroutineScope = rememberCoroutineScope()
+
+    DisposableEffect(context) {
+        var engineRef: TextToSpeech? = null
+        val tts = TextToSpeech(context.applicationContext) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                engineRef?.let { eng ->
+                    try {
+                        eng.language = Locale.getDefault()
+                        eng.setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                        )
+                        eng.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                            override fun onStart(utteranceId: String?) {}
+                            override fun onError(utteranceId: String?) {}
+                            override fun onDone(utteranceId: String?) {
+                                coroutineScope.launch(Dispatchers.Main) {
+                                    if (isTtsPlaying) {
+                                        ttsAutoAdvancePageTrigger++
+                                    }
+                                }
+                            }
+                        })
+                        isTtsReady = true
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
+        engineRef = tts
+        ttsEngine = tts
+        onDispose {
+            try {
+                tts.stop()
+                tts.shutdown()
+            } catch (_: Throwable) {}
+        }
+    }
 
     LaunchedEffect(returnBookmark) {
         val currentBm = returnBookmark ?: return@LaunchedEffect
@@ -2832,7 +3268,6 @@ fun EpubReaderScreen(
     var prevPageBitmap by remember(ebook.id, currentChapterIndex, readerTheme) { mutableStateOf<Bitmap?>(null) }
     var isRenderingVisualPage by remember(ebook.id, currentChapterIndex) { mutableStateOf(false) }
 
-    val coroutineScope = rememberCoroutineScope()
     val curlAnim = remember { Animatable(0f) }
     var touchYNorm by remember { mutableFloatStateOf(0.55f) }
 
@@ -2892,7 +3327,7 @@ fun EpubReaderScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
@@ -2913,7 +3348,7 @@ fun EpubReaderScreen(
                     Column(
                         modifier = Modifier
                             .weight(1f)
-                            .padding(horizontal = 6.dp)
+                            .padding(horizontal = 4.dp)
                             .clickable { showTocDialog = true },
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
@@ -2951,6 +3386,26 @@ fun EpubReaderScreen(
                                 )
                             }
                         }
+                        // Module F: [PRO] Hybrid TTS Read-Aloud Button
+                        if (!isVisualPageMode) {
+                            IconButton(
+                                onClick = {
+                                    ProFeatureManager.runIfPro(ProFeature.TTS_READ_ALOUD) {
+                                        isTtsBarVisible = !isTtsBarVisible
+                                        if (!isTtsBarVisible) {
+                                            isTtsPlaying = false
+                                            ttsEngine?.stop()
+                                        }
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.VolumeUp,
+                                    contentDescription = "Read Aloud (TTS)",
+                                    tint = if (isTtsPlaying) MaterialTheme.colorScheme.primary else accentColor
+                                )
+                            }
+                        }
                         // Module D: Quotes & Highlights Hub Button
                         IconButton(
                             onClick = {
@@ -2966,7 +3421,7 @@ fun EpubReaderScreen(
                         }
                         TextButton(
                             onClick = { showReaderSettings = true },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
                         ) {
                             Text(
                                 text = "Aa",
@@ -3041,17 +3496,23 @@ fun EpubReaderScreen(
 
                 fun commitNextPage() {
                     selectedPassageText = null
+                    ttsSentenceIndex = 0
+                    recordReadingActivity(prefs, pagesAdded = pageStep, minutesAdded = 0)
                     if (subPageIndex + pageStep < subPages.size) {
                         subPageIndex += pageStep
                     } else if (currentChapterIndex + 1 < resolvedChapters.size) {
                         startAtLastSubPage = false
                         subPageIndex = 0
                         onSelectChapter(currentChapterIndex + 1)
+                    } else {
+                        isTtsPlaying = false
+                        ttsEngine?.stop()
                     }
                 }
 
                 fun commitPrevPage() {
                     selectedPassageText = null
+                    ttsSentenceIndex = 0
                     if (subPageIndex > 0) {
                         subPageIndex = (subPageIndex - pageStep).coerceAtLeast(0)
                     } else if (currentChapterIndex > 0) {
@@ -3085,6 +3546,7 @@ fun EpubReaderScreen(
                 fun animateJumpToChapter(targetIdx: Int, targetSubPage: Int = 0, recordReturnPill: Boolean = true) {
                     if (targetIdx !in resolvedChapters.indices || curlAnim.isRunning) return
                     selectedPassageText = null
+                    ttsSentenceIndex = 0
                     if (recordReturnPill && abs(targetIdx - currentChapterIndex) >= 1) {
                         returnBookmark = ReaderReturnBookmark(
                             chapterIndex = currentChapterIndex,
@@ -3111,6 +3573,43 @@ fun EpubReaderScreen(
 
                 val currLeftText = subPages.getOrElse(subPageIndex) { "" }
                 val currRightText = if (useDualSpread) subPages.getOrElse(subPageIndex + 1) { "" } else ""
+
+                // Module F: Active Page Sentences & TTS Utterance Dispatcher
+                val pageSentences = remember(currLeftText, currRightText) {
+                    extractSentencesFromPage(currLeftText, currRightText)
+                }
+                val activeTtsSentence = if (isTtsBarVisible && isTtsPlaying) {
+                    pageSentences.getOrNull(ttsSentenceIndex)
+                } else null
+
+                LaunchedEffect(ttsAutoAdvancePageTrigger) {
+                    if (ttsAutoAdvancePageTrigger > 0 && isTtsPlaying) {
+                        if (ttsSentenceIndex + 1 < pageSentences.size) {
+                            ttsSentenceIndex++
+                        } else if (canGoNext) {
+                            commitNextPage()
+                        } else {
+                            isTtsPlaying = false
+                        }
+                    }
+                }
+
+                LaunchedEffect(isTtsPlaying, ttsSentenceIndex, subPageIndex, currentChapterIndex, ttsSpeed, isTtsReady) {
+                    val eng = ttsEngine ?: return@LaunchedEffect
+                    if (!isTtsReady) return@LaunchedEffect
+                    if (isTtsPlaying && pageSentences.isNotEmpty()) {
+                        val safeIdx = ttsSentenceIndex.coerceIn(0, pageSentences.lastIndex)
+                        if (safeIdx != ttsSentenceIndex) ttsSentenceIndex = safeIdx
+                        val sentenceToSpeak = pageSentences[safeIdx]
+                        eng.setSpeechRate(ttsSpeed.coerceIn(0.75f, 2.0f))
+                        val params = Bundle().apply {
+                            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "fablewood_tts_$safeIdx")
+                        }
+                        eng.speak(sentenceToSpeak, TextToSpeech.QUEUE_FLUSH, params, "fablewood_tts_$safeIdx")
+                    } else if (!isTtsPlaying) {
+                        eng.stop()
+                    }
+                }
 
                 val nextChapSubPages = remember(
                     currentChapterIndex, resolvedChapters, singleColumnWidthPx, canvasHeightPx,
@@ -3175,7 +3674,7 @@ fun EpubReaderScreen(
                     currentChapter?.title, subPageIndex, currLeftText, currRightText, useDualSpread,
                     fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
                     renderedPageBitmap, resolvedChapters, currentChapterIndex, isTocChapter,
-                    currentChapterHighlights, isDarkReader
+                    currentChapterHighlights, isDarkReader, activeTtsSentence
                 ) {
                     if (useDualSpread) {
                         renderDualSpreadBookPageToBitmap(
@@ -3199,7 +3698,8 @@ fun EpubReaderScreen(
                             currentChapterIndex = currentChapterIndex,
                             isTocChapter = isTocChapter,
                             chapterHighlights = currentChapterHighlights,
-                            isDarkReader = isDarkReader
+                            isDarkReader = isDarkReader,
+                            activeTtsSentence = activeTtsSentence
                         )
                     } else {
                         renderBookPageToBitmap(
@@ -3223,7 +3723,8 @@ fun EpubReaderScreen(
                             currentChapterIndex = currentChapterIndex,
                             isTocChapter = isTocChapter,
                             chapterHighlights = currentChapterHighlights,
-                            isDarkReader = isDarkReader
+                            isDarkReader = isDarkReader,
+                            activeTtsSentence = activeTtsSentence
                         )
                     }
                 }
@@ -3472,7 +3973,6 @@ fun EpubReaderScreen(
                                             para.rect.contains(startX, startY)
                                         }
 
-                                        // Module D: Long-Press (or center tap on paragraph) opens the In-Book Selection Pill!
                                         if (pressDurationMs >= 360L && tappedPara != null) {
                                             selectedPassageText = tappedPara.text
                                         } else if (tappedHotspot != null) {
@@ -3491,7 +3991,6 @@ fun EpubReaderScreen(
                                         } else if (startX < w * 0.30f && canGoPrev) {
                                             animatePageTurnBackward()
                                         } else if (tappedPara != null) {
-                                            // Center-page tap on a paragraph also surfaces the quick highlight/quote pill
                                             selectedPassageText = tappedPara.text
                                         }
                                     } else {
@@ -3606,7 +4105,159 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Module D: Sleek In-Book Floating Selection Pill (4 Highlight Colors + Add Note + Copy + Share Quote)
+                // Module F: [PRO] Compact Hybrid TTS Read-Aloud Mini-Player Bar
+                if (isTtsBarVisible && selectedPassageText == null) {
+                    val currentSpokenLine = pageSentences.getOrNull(ttsSentenceIndex) ?: "Ready to read aloud"
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(horizontal = 14.dp)
+                            .padding(bottom = bottomBarHeightDp + 10.dp)
+                    ) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            shape = RoundedCornerShape(22.dp),
+                            tonalElevation = 10.dp,
+                            shadowElevation = 12.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(22.dp))
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.primary,
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                text = "READ ALOUD",
+                                                color = MaterialTheme.colorScheme.onPrimary,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = currentSpokenLine,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            isTtsPlaying = false
+                                            isTtsBarVisible = false
+                                            ttsEngine?.stop()
+                                        },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(Icons.Default.Close, contentDescription = "Close TTS", modifier = Modifier.size(16.dp))
+                                    }
+                                }
+
+                                Spacer(Modifier.height(6.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // Speed Stepper Chip (0.75x - 2.0x)
+                                    AssistChip(
+                                        onClick = {
+                                            val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
+                                            val nextIdx = (speeds.indexOfFirst { abs(it - ttsSpeed) < 0.05f } + 1) % speeds.size
+                                            ttsSpeed = speeds[nextIdx]
+                                            prefs.edit().putFloat("ebook_tts_speed", ttsSpeed).apply()
+                                        },
+                                        label = {
+                                            Text(
+                                                text = String.format(Locale.US, "%.2gx", ttsSpeed),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    )
+
+                                    // Transport Controls (Prev Sentence, Play/Pause, Next Sentence)
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        IconButton(
+                                            onClick = {
+                                                if (ttsSentenceIndex > 0) {
+                                                    ttsSentenceIndex--
+                                                } else if (canGoPrev) {
+                                                    commitPrevPage()
+                                                }
+                                            }
+                                        ) {
+                                            Icon(Icons.Default.SkipPrevious, contentDescription = "Previous Sentence")
+                                        }
+
+                                        FilledIconButton(
+                                            onClick = { isTtsPlaying = !isTtsPlaying },
+                                            modifier = Modifier.size(42.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isTtsPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                                contentDescription = "Play/Pause Read Aloud"
+                                            )
+                                        }
+
+                                        IconButton(
+                                            onClick = {
+                                                if (ttsSentenceIndex + 1 < pageSentences.size) {
+                                                    ttsSentenceIndex++
+                                                } else if (canGoNext) {
+                                                    commitNextPage()
+                                                }
+                                            }
+                                        ) {
+                                            Icon(Icons.Default.SkipNext, contentDescription = "Next Sentence")
+                                        }
+                                    }
+
+                                    // TTS Sleep Timer Chip (Off / 15m / 30m / 45m)
+                                    AssistChip(
+                                        onClick = {
+                                            ttsSleepMinutesRemaining = when (ttsSleepMinutesRemaining) {
+                                                0 -> 15
+                                                15 -> 30
+                                                30 -> 45
+                                                else -> 0
+                                            }
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Bedtime,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                        },
+                                        label = {
+                                            Text(
+                                                text = if (ttsSleepMinutesRemaining > 0) "${ttsSleepMinutesRemaining}m" else "Sleep",
+                                                fontSize = 11.5.sp
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Module D: Sleek In-Book Floating Selection Pill
                 val activePassage = selectedPassageText
                 if (activePassage != null) {
                     Box(
@@ -3649,7 +4300,6 @@ fun EpubReaderScreen(
 
                                 Spacer(Modifier.height(10.dp))
 
-                                // 4 Highlight Color Swatches + Remove Highlight
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -3675,7 +4325,6 @@ fun EpubReaderScreen(
                                     }
 
                                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        // Add Note
                                         FilledTonalIconButton(
                                             onClick = {
                                                 noteDraftText = ""
@@ -3686,7 +4335,6 @@ fun EpubReaderScreen(
                                             Icon(Icons.Default.EditNote, contentDescription = "Add Note", modifier = Modifier.size(18.dp))
                                         }
 
-                                        // Copy
                                         FilledTonalIconButton(
                                             onClick = {
                                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -3701,7 +4349,6 @@ fun EpubReaderScreen(
                                             Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp))
                                         }
 
-                                        // Share Quote Card [PRO]
                                         Button(
                                             onClick = {
                                                 val passageToShare = activePassage
@@ -3727,7 +4374,7 @@ fun EpubReaderScreen(
 
                 // Floating 8-Second "Return to Page X" Pill
                 val activeReturnBm = returnBookmark
-                if (activeReturnBm != null && selectedPassageText == null) {
+                if (activeReturnBm != null && selectedPassageText == null && !isTtsBarVisible) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -3831,7 +4478,6 @@ fun EpubReaderScreen(
         }
     }
 
-    // Module D: Add Note to Highlight Dialog
     if (showAddNoteDialogForPassage && selectedPassageText != null) {
         val passage = selectedPassageText!!
         AlertDialog(
@@ -3873,7 +4519,6 @@ fun EpubReaderScreen(
         )
     }
 
-    // Module D: Global Quotes & Notes Hub Sheet (Opened from Reader Top Bar)
     if (showQuotesHubSheet) {
         GlobalQuotesHubSheet(
             prefs = prefs,
@@ -3893,7 +4538,6 @@ fun EpubReaderScreen(
         )
     }
 
-    // Module D: Shareable Quote Card Studio
     if (activeQuoteStudioPassage != null) {
         ShareableQuoteCardStudioDialog(
             quoteText = activeQuoteStudioPassage!!,
