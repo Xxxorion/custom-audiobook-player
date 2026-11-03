@@ -1,5 +1,6 @@
 package com.example.audiobook
 
+import android.app.Activity
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Color as AndroidColor
@@ -21,6 +22,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -62,6 +65,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -72,6 +76,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -100,13 +105,22 @@ fun formatTime(ms: Long): String {
 
 private data class PageLinkHotspot(
     val rect: RectF,
-    val targetChapterIndex: Int,
-    val label: String
+    val targetChapterIndex: Int? = null,
+    val label: String,
+    val footnoteTitle: String? = null,
+    val footnoteBody: String? = null
 )
 
 private data class RenderedBookPage(
     val bitmap: Bitmap,
     val hotspots: List<PageLinkHotspot>
+)
+
+private data class ReaderReturnBookmark(
+    val chapterIndex: Int,
+    val subPageIndex: Int,
+    val label: String,
+    val timestampMs: Long = System.currentTimeMillis()
 )
 
 private fun parseSafeHexColor(hexStr: String, fallback: Color): Color {
@@ -128,7 +142,6 @@ private fun resolveNativeTypeface(fontFamilyKey: String, bold: Boolean): Typefac
     }
 }
 
-// Extracts a warm/cool tint color from a book cover bitmap for the "Currently Reading" Hero Card
 private fun extractHeroTintFromBitmap(bitmap: Bitmap?): Color? {
     val pal = extractCoverPaletteFromBitmap(bitmap) ?: return null
     val argb = AndroidColor.HSVToColor(
@@ -141,7 +154,6 @@ private fun extractHeroTintFromBitmap(bitmap: Bitmap?): Color? {
     return Color(argb)
 }
 
-// Derives a clean Series name from explicit series metadata or Title patterns (e.g. "Title: Book 1" or "Series - Book")
 private fun deriveSeriesName(rawSeries: String, rawTitle: String): String {
     if (rawSeries.isNotBlank()) return rawSeries.trim()
     val colonPrefix = rawTitle.substringBefore(':', "").trim()
@@ -155,7 +167,49 @@ private fun deriveSeriesName(rawSeries: String, rawTitle: String): String {
     return ""
 }
 
-// Module B: Tactile Book Cover Physics (Rounded Corners + 3D Left Spine-Crease Gradient + Realistic Drop Shadow)
+// Module C: Searches the bottom of the current chapter or Endnotes chapter for a matching footnote definition
+private fun findFootnoteDefinition(
+    markerNumOrSymbol: String,
+    currentChapter: EbookChapter?,
+    allChapters: List<EbookChapter>
+): String {
+    val cleanKey = markerNumOrSymbol.trim('[', ']', '(', ')', ' ')
+    val escaped = Regex.escape(cleanKey)
+    val linePattern = Regex("(?m)^\\s*(?:\\[$escaped\\]|$escaped[.)]|\\*$escaped)\\s+(.+)$")
+
+    // 1. Search current chapter lines first (from bottom up so we hit the footnote definition, not the inline callout)
+    if (currentChapter != null) {
+        val lines = currentChapter.bodyText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        for (i in lines.indices.reversed()) {
+            val line = lines[i]
+            val match = linePattern.find(line)
+            if (match != null) {
+                val nextLine = lines.getOrNull(i + 1) ?: ""
+                return if (nextLine.isNotEmpty() && !nextLine.startsWith("[")) {
+                    "${match.groupValues[1]} $nextLine".trim()
+                } else {
+                    match.groupValues[1].trim()
+                }
+            }
+        }
+    }
+
+    // 2. Search dedicated Notes / Endnotes / Footnotes chapters at the back of the book
+    val notesChapters = allChapters.filter {
+        it.title.contains("note", ignoreCase = true) ||
+            it.title.contains("reference", ignoreCase = true) ||
+            it.title.contains("glossary", ignoreCase = true)
+    }
+    for (chap in notesChapters) {
+        val m = linePattern.find(chap.bodyText)
+        if (m != null) {
+            return m.groupValues[1].trim()
+        }
+    }
+
+    return "Footnote [$cleanKey] referenced in ${currentChapter?.title ?: "this chapter"}."
+}
+
 @Composable
 fun TactileBookCover(
     coverArt: ImageBitmap?,
@@ -201,7 +255,6 @@ fun TactileBookCover(
             )
         }
 
-        // Tactile Left Spine-Crease & Specular Highlight Overlay (Apple Books / Yomu physics)
         Box(
             modifier = Modifier
                 .fillMaxHeight()
@@ -219,7 +272,6 @@ fun TactileBookCover(
                 )
         )
 
-        // Subtle outer book border sheen
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -273,7 +325,6 @@ fun TactileBookCover(
     }
 }
 
-// Module B: "Currently Reading" Dynamic Hero Card at the top of the Bookshelf
 @Composable
 fun CurrentlyReadingHeroCard(
     title: String,
@@ -437,7 +488,6 @@ fun CurrentlyReadingHeroCard(
     }
 }
 
-// Module B: Smart Shelves & Series Filter Chip Bar
 @Composable
 fun SmartShelfFilterRow(
     selectedFilter: String,
@@ -616,6 +666,7 @@ private fun formatBodyWithParagraphSpacing(rawBody: String, paragraphSpacingDp: 
     return clean
 }
 
+// Guaranteed Safe Text Bounds: Reserves generous bottom padding so the last line is never clipped
 fun paginateChapterByMeasuredLayout(
     bodyText: String,
     headingText: String,
@@ -635,7 +686,7 @@ fun paginateChapterByMeasuredLayout(
     val h = heightPx.coerceAtLeast(160)
     val padH = (w * 0.068f * marginScale.coerceIn(0.6f, 1.6f)).coerceAtLeast(20f)
     val padTop = (h * 0.045f).coerceAtLeast(24f)
-    val padBottom = (h * 0.050f).coerceAtLeast(30f)
+    val padBottom = (h * 0.055f).coerceAtLeast(34f)
     val contentWidth = (w - (padH * 2f)).toInt().coerceAtLeast(60)
 
     val headingTypeface = resolveNativeTypeface(fontFamilyKey, bold = true)
@@ -676,7 +727,7 @@ fun paginateChapterByMeasuredLayout(
     val totalLines = fullLayout.lineCount
     if (totalLines <= 0) return listOf(clean)
 
-    val fullAvailHeight = (h - padTop - padBottom - 8f).toInt().coerceAtLeast(80)
+    val fullAvailHeight = (h - padTop - padBottom - 10f).toInt().coerceAtLeast(80)
     val firstPageAvailHeight = (fullAvailHeight - headingHeightPx).coerceAtLeast(60)
 
     val pages = mutableListOf<String>()
@@ -725,6 +776,7 @@ fun paginateChapterText(
     )
 }
 
+// Renders a single book page AND detects both TOC Chapter Links and Inline Footnote Markers (`[1]`, `[2]`, `[note]`)
 private fun renderBookPageToBitmap(
     widthPx: Int,
     heightPx: Int,
@@ -755,7 +807,7 @@ private fun renderBookPageToBitmap(
 
     val padH = (w * 0.068f * marginScale.coerceIn(0.6f, 1.6f)).coerceAtLeast(20f)
     val padTop = (h * 0.045f).coerceAtLeast(24f)
-    val padBottom = (h * 0.040f).coerceAtLeast(22f)
+    val padBottom = (h * 0.045f).coerceAtLeast(26f)
     val contentWidth = (w - (padH * 2f)).toInt().coerceAtLeast(40)
 
     if (visualBitmap != null && bodyText.isBlank()) {
@@ -804,8 +856,10 @@ private fun renderBookPageToBitmap(
             }
 
             val spannable = SpannableString(bodyText)
-            data class MatchedSpan(val start: Int, val end: Int, val targetIdx: Int, val label: String)
-            val matchedSpans = mutableListOf<MatchedSpan>()
+            data class MatchedChapterSpan(val start: Int, val end: Int, val targetIdx: Int, val label: String)
+            data class MatchedFootnoteSpan(val start: Int, val end: Int, val marker: String)
+            val matchedChapters = mutableListOf<MatchedChapterSpan>()
+            val matchedFootnotes = mutableListOf<MatchedFootnoteSpan>()
 
             var searchOffset = 0
             for (line in bodyText.split('\n')) {
@@ -826,8 +880,22 @@ private fun renderBookPageToBitmap(
                         lineEnd,
                         Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
                     )
-                    matchedSpans.add(MatchedSpan(lineStart, lineEnd, targetChapIdx, line.trim()))
+                    matchedChapters.add(MatchedChapterSpan(lineStart, lineEnd, targetChapIdx, line.trim()))
                 }
+            }
+
+            // Detect inline footnote references like [1], [2], [14], [note 1]
+            val fnRegex = Regex("\\[(?:note\\s*)?(\\d{1,3}|[*†‡])\\]", RegexOption.IGNORE_CASE)
+            for (fnMatch in fnRegex.findAll(bodyText)) {
+                val s = fnMatch.range.first
+                val e = fnMatch.range.last + 1
+                spannable.setSpan(
+                    ForegroundColorSpan(linkColorArgb),
+                    s,
+                    e,
+                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                matchedFootnotes.add(MatchedFootnoteSpan(s, e, fnMatch.value))
             }
 
             val extraSpacingPx = ((paragraphSpacingDp - 10f).coerceAtLeast(0f)) * 0.45f
@@ -849,7 +917,7 @@ private fun renderBookPageToBitmap(
             bodyLayout.draw(canvas)
             canvas.restore()
 
-            for (ms in matchedSpans) {
+            for (ms in matchedChapters) {
                 val startLine = bodyLayout.getLineForOffset(ms.start)
                 val endLine = bodyLayout.getLineForOffset(ms.end.coerceAtLeast(ms.start))
                 val topPx = currentY + bodyLayout.getLineTop(startLine) - 8f
@@ -862,10 +930,145 @@ private fun renderBookPageToBitmap(
                     )
                 )
             }
+
+            val currChapObj = allChapters.getOrNull(currentChapterIndex)
+            for (fn in matchedFootnotes) {
+                val lineIdx = bodyLayout.getLineForOffset(fn.start)
+                val leftX = padH + bodyLayout.getPrimaryHorizontal(fn.start) - 18f
+                val rightX = padH + bodyLayout.getPrimaryHorizontal(fn.end.coerceAtMost(spannable.length)) + 18f
+                val topY = currentY + bodyLayout.getLineTop(lineIdx) - 12f
+                val bottomY = currentY + bodyLayout.getLineBottom(lineIdx) + 12f
+                val resolvedNote = findFootnoteDefinition(fn.marker, currChapObj, allChapters)
+                hotspots.add(
+                    PageLinkHotspot(
+                        rect = RectF(leftX, topY, rightX.coerceAtLeast(leftX + 44f), bottomY),
+                        targetChapterIndex = null,
+                        label = fn.marker,
+                        footnoteTitle = "Footnote ${fn.marker}",
+                        footnoteBody = resolvedNote
+                    )
+                )
+            }
         }
     }
 
     return RenderedBookPage(bitmap = bmp, hotspots = hotspots)
+}
+
+// Module C: [PRO] Dual-Page Open-Book Spread Renderer for Foldables & Landscape
+private fun renderDualSpreadBookPageToBitmap(
+    totalWidthPx: Int,
+    heightPx: Int,
+    bgColorArgb: Int,
+    textColorArgb: Int,
+    accentColorArgb: Int,
+    linkColorArgb: Int,
+    headingText: String,
+    showHeadingOnLeft: Boolean,
+    leftBodyText: String,
+    rightBodyText: String,
+    fontSizePx: Float,
+    fontFamilyKey: String,
+    lineHeightMultiplier: Float,
+    marginScale: Float,
+    isJustified: Boolean,
+    paragraphSpacingDp: Float,
+    allChapters: List<EbookChapter>,
+    currentChapterIndex: Int,
+    isTocChapter: Boolean
+): RenderedBookPage {
+    val totalW = totalWidthPx.coerceAtLeast(200)
+    val h = heightPx.coerceAtLeast(120)
+    val spineW = 24
+    val pageW = ((totalW - spineW) / 2).coerceAtLeast(80)
+
+    val leftRendered = renderBookPageToBitmap(
+        widthPx = pageW,
+        heightPx = h,
+        bgColorArgb = bgColorArgb,
+        textColorArgb = textColorArgb,
+        accentColorArgb = accentColorArgb,
+        linkColorArgb = linkColorArgb,
+        headingText = headingText,
+        showHeading = showHeadingOnLeft,
+        bodyText = leftBodyText,
+        fontSizePx = fontSizePx,
+        fontFamilyKey = fontFamilyKey,
+        lineHeightMultiplier = lineHeightMultiplier,
+        marginScale = marginScale,
+        isJustified = isJustified,
+        paragraphSpacingDp = paragraphSpacingDp,
+        visualBitmap = null,
+        allChapters = allChapters,
+        currentChapterIndex = currentChapterIndex,
+        isTocChapter = isTocChapter
+    )
+
+    val rightRendered = renderBookPageToBitmap(
+        widthPx = pageW,
+        heightPx = h,
+        bgColorArgb = bgColorArgb,
+        textColorArgb = textColorArgb,
+        accentColorArgb = accentColorArgb,
+        linkColorArgb = linkColorArgb,
+        headingText = "",
+        showHeading = false,
+        bodyText = rightBodyText,
+        fontSizePx = fontSizePx,
+        fontFamilyKey = fontFamilyKey,
+        lineHeightMultiplier = lineHeightMultiplier,
+        marginScale = marginScale,
+        isJustified = isJustified,
+        paragraphSpacingDp = paragraphSpacingDp,
+        visualBitmap = null,
+        allChapters = allChapters,
+        currentChapterIndex = currentChapterIndex,
+        isTocChapter = isTocChapter
+    )
+
+    val combinedBmp = Bitmap.createBitmap(totalW, h, Bitmap.Config.ARGB_8888)
+    val canvas = AndroidCanvas(combinedBmp)
+    canvas.drawColor(bgColorArgb)
+
+    val rightOffsetX = (pageW + spineW).toFloat()
+    canvas.drawBitmap(leftRendered.bitmap, 0f, 0f, null)
+    canvas.drawBitmap(rightRendered.bitmap, rightOffsetX, 0f, null)
+
+    // Realistic center book-spine gutter crease shadow
+    val spineLeft = (pageW - 14).toFloat()
+    val spineRight = (pageW + spineW + 14).toFloat()
+    val spinePaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+        shader = LinearGradient(
+            spineLeft,
+            0f,
+            spineRight,
+            0f,
+            intArrayOf(
+                0x00000000,
+                0x44000000,
+                0x77000000,
+                0x44000000,
+                0x00000000
+            ),
+            floatArrayOf(0f, 0.35f, 0.5f, 0.65f, 1f),
+            Shader.TileMode.CLAMP
+        )
+    }
+    canvas.drawRect(spineLeft, 0f, spineRight, h.toFloat(), spinePaint)
+
+    val combinedHotspots = ArrayList<PageLinkHotspot>(leftRendered.hotspots.size + rightRendered.hotspots.size)
+    combinedHotspots.addAll(leftRendered.hotspots)
+    for (spot in rightRendered.hotspots) {
+        val shiftedRect = RectF(
+            spot.rect.left + rightOffsetX,
+            spot.rect.top,
+            spot.rect.right + rightOffsetX,
+            spot.rect.bottom
+        )
+        combinedHotspots.add(spot.copy(rect = shiftedRect))
+    }
+
+    return RenderedBookPage(bitmap = combinedBmp, hotspots = combinedHotspots)
 }
 
 private fun draw3DCurledPageMesh(
@@ -1311,7 +1514,6 @@ fun CarModeScreen(
     }
 }
 
-// Module B: Upgraded Audiobook Shelf with Hero Card, Smart Shelves & Series Grouping
 @Composable
 fun BookshelfContent(
     books: List<Audiobook>,
@@ -1469,7 +1671,6 @@ fun BookshelfContent(
     }
 }
 
-// Module B: Upgraded eBook Shelf with Hero Card, Smart Shelves & Series Grouping
 @Composable
 fun EbookShelfContent(
     ebooks: List<Ebook>,
@@ -1734,6 +1935,7 @@ fun EpubReaderScreen(
     onUpdateTheme: (String) -> Unit,
     onReloadEbook: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val prefs = remember { repository.getPreferences() }
     val fmtUpper = ebook.format.uppercase(Locale.ROOT)
     val resolvedChapters = remember(chapters, ebook.title) {
@@ -1742,6 +1944,7 @@ fun EpubReaderScreen(
     val currentChapter = resolvedChapters.getOrNull(currentChapterIndex)
     val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
 
+    // Module A State
     var activePresetId by remember { mutableStateOf(prefs.getString("ebook_preset_id", "EDITORIAL") ?: "EDITORIAL") }
     var fontFamilyKey by remember { mutableStateOf(prefs.getString("ebook_font_family", "SERIF") ?: "SERIF") }
     var lineHeightMultiplier by remember { mutableFloatStateOf(prefs.getFloat("ebook_line_height_mult", 1.42f)) }
@@ -1753,6 +1956,35 @@ fun EpubReaderScreen(
     var customTextHex by remember { mutableStateOf(prefs.getString("ebook_custom_text_hex", "#E6EFEA") ?: "#E6EFEA") }
     var showCustomizeLayoutDrawer by remember { mutableStateOf(false) }
     var showCustomThemeBuilder by remember { mutableStateOf(false) }
+
+    // Module C State: Dual-Page Spread, Footnote Popup, 8-Second Return Pill & Left-Edge Brightness Gesture
+    var dualPageSpreadEnabled by remember { mutableStateOf(prefs.getBoolean("ebook_dual_page_spread", true)) }
+    var edgeBrightnessEnabled by remember { mutableStateOf(prefs.getBoolean("ebook_edge_brightness", true)) }
+    var readerBrightness by remember { mutableFloatStateOf(prefs.getFloat("ebook_brightness_level", 0.80f)) }
+    var isDraggingBrightness by remember { mutableStateOf(false) }
+    var activeFootnotePopup by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var returnBookmark by remember { mutableStateOf<ReaderReturnBookmark?>(null) }
+
+    // Auto-hide the "Return to Page X" pill after 8 seconds
+    LaunchedEffect(returnBookmark) {
+        val currentBm = returnBookmark ?: return@LaunchedEffect
+        delay(8000L)
+        if (returnBookmark == currentBm) {
+            returnBookmark = null
+        }
+    }
+
+    // Apply hardware window brightness when adjusted via the left-edge gesture
+    LaunchedEffect(readerBrightness, isDraggingBrightness) {
+        if (isDraggingBrightness) {
+            val activity = context as? Activity
+            activity?.window?.let { win ->
+                val lp = win.attributes
+                lp.screenBrightness = readerBrightness.coerceIn(0.05f, 1.0f)
+                win.attributes = lp
+            }
+        }
+    }
 
     val isTocChapter = remember(currentChapter, resolvedChapters) {
         val t = currentChapter?.title?.trim() ?: ""
@@ -1800,6 +2032,7 @@ fun EpubReaderScreen(
 
     var subPageIndex by remember(ebook.id, currentChapterIndex) { mutableIntStateOf(0) }
     var startAtLastSubPage by remember { mutableStateOf(false) }
+    var pendingReturnSubPage by remember { mutableIntStateOf(-1) }
 
     var renderedPageBitmap by remember(ebook.id, currentChapterIndex, readerTheme) { mutableStateOf<Bitmap?>(null) }
     var nextPageBitmap by remember(ebook.id, currentChapterIndex, readerTheme) { mutableStateOf<Bitmap?>(null) }
@@ -1824,534 +2057,836 @@ fun EpubReaderScreen(
         }
     }
 
-    Column(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(bgColor)
             .let { if (!isEmbeddedPane) it.windowInsetsPadding(WindowInsets.systemBars) else it }
     ) {
-        Surface(
-            color = bgColor,
-            tonalElevation = 0.dp,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+        val isWideScreen = maxWidth >= 580.dp
+        val isProUnlocked by ProFeatureManager.isProUser.collectAsState()
+        val useDualSpread = isWideScreen && dualPageSpreadEnabled && isProUnlocked && !isVisualPageMode
+        val pageStep = if (useDualSpread) 2 else 1
+
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Top Reader Bar
+            Surface(
+                color = bgColor,
+                tonalElevation = 0.dp,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                if (!isEmbeddedPane) {
-                    IconButton(onClick = onBackToShelf) {
-                        Icon(Icons.Default.ChevronLeft, contentDescription = "Back", tint = accentColor)
-                    }
-                } else if (onToggleFullScreen != null) {
-                    IconButton(onClick = onToggleFullScreen) {
-                        Icon(
-                            imageVector = if (isFullScreen) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
-                            contentDescription = "Toggle Full Screen",
-                            tint = accentColor
-                        )
-                    }
-                }
-
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 8.dp)
-                        .clickable { showTocDialog = true },
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        text = ebook.title,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 14.sp,
-                        color = textColor,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = currentChapter?.title ?: if (isVisualPageMode) "Page ${currentChapterIndex + 1}" else "Loading...",
-                        fontSize = 11.sp,
-                        color = accentColor,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { showTocDialog = true }) {
-                        Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters", tint = accentColor)
-                    }
-                    TextButton(
-                        onClick = { showReaderSettings = true },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "Aa",
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif,
-                            color = accentColor
-                        )
-                    }
-                }
-            }
-        }
-
-        HorizontalDivider(color = accentColor.copy(alpha = 0.14f))
-
-        BoxWithConstraints(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .background(bgColor)
-        ) {
-            val density = LocalDensity.current
-            val bottomBarHeightDp = 46.dp
-            val canvasWidthPx = with(density) { maxWidth.toPx().toInt().coerceAtLeast(100) }
-            val canvasHeightPx = with(density) { (maxHeight - bottomBarHeightDp).toPx().toInt().coerceAtLeast(100) }
-            val fontSizePx = with(density) { fontSizeSp.sp.toPx() }
-
-            val subPages = remember(
-                currentChapter?.bodyText,
-                currentChapter?.title,
-                canvasWidthPx,
-                canvasHeightPx,
-                fontSizePx,
-                fontFamilyKey,
-                lineHeightMultiplier,
-                marginScale,
-                isJustified,
-                paragraphSpacingDp,
-                isVisualPageMode
-            ) {
-                if (isVisualPageMode) listOf("")
-                else paginateChapterByMeasuredLayout(
-                    bodyText = currentChapter?.bodyText ?: "",
-                    headingText = currentChapter?.title ?: "",
-                    widthPx = canvasWidthPx,
-                    heightPx = canvasHeightPx,
-                    fontSizePx = fontSizePx,
-                    fontFamilyKey = fontFamilyKey,
-                    lineHeightMultiplier = lineHeightMultiplier,
-                    marginScale = marginScale,
-                    isJustified = isJustified,
-                    paragraphSpacingDp = paragraphSpacingDp
-                )
-            }
-
-            LaunchedEffect(subPages.size, currentChapterIndex) {
-                if (startAtLastSubPage) {
-                    subPageIndex = subPages.lastIndex.coerceAtLeast(0)
-                    startAtLastSubPage = false
-                } else if (subPageIndex > subPages.lastIndex) {
-                    subPageIndex = subPages.lastIndex.coerceAtLeast(0)
-                }
-            }
-
-            val canGoNext = (subPageIndex + 1 < subPages.size) || (currentChapterIndex + 1 < resolvedChapters.size)
-            val canGoPrev = (subPageIndex > 0) || (currentChapterIndex > 0)
-
-            fun commitNextPage() {
-                if (subPageIndex + 1 < subPages.size) {
-                    subPageIndex++
-                } else if (currentChapterIndex + 1 < resolvedChapters.size) {
-                    startAtLastSubPage = false
-                    subPageIndex = 0
-                    onSelectChapter(currentChapterIndex + 1)
-                }
-            }
-
-            fun commitPrevPage() {
-                if (subPageIndex > 0) {
-                    subPageIndex--
-                } else if (currentChapterIndex > 0) {
-                    startAtLastSubPage = true
-                    onSelectChapter(currentChapterIndex - 1)
-                }
-            }
-
-            fun animatePageTurnForward() {
-                if (!canGoNext || curlAnim.isRunning) return
-                coroutineScope.launch {
-                    touchYNorm = 0.62f
-                    curlAnim.snapTo(0.03f)
-                    curlAnim.animateTo(1f, tween(durationMillis = 420, easing = FastOutSlowInEasing))
-                    commitNextPage()
-                    curlAnim.snapTo(0f)
-                }
-            }
-
-            fun animatePageTurnBackward() {
-                if (!canGoPrev || curlAnim.isRunning) return
-                coroutineScope.launch {
-                    touchYNorm = 0.62f
-                    curlAnim.snapTo(-0.03f)
-                    curlAnim.animateTo(-1f, tween(durationMillis = 420, easing = FastOutSlowInEasing))
-                    commitPrevPage()
-                    curlAnim.snapTo(0f)
-                }
-            }
-
-            fun animateJumpToChapter(targetIdx: Int) {
-                if (targetIdx !in resolvedChapters.indices || curlAnim.isRunning) return
-                coroutineScope.launch {
-                    touchYNorm = 0.55f
-                    if (targetIdx >= currentChapterIndex) {
-                        curlAnim.snapTo(0.04f)
-                        curlAnim.animateTo(1f, tween(durationMillis = 380, easing = FastOutSlowInEasing))
-                    } else {
-                        curlAnim.snapTo(-0.04f)
-                        curlAnim.animateTo(-1f, tween(durationMillis = 380, easing = FastOutSlowInEasing))
-                    }
-                    startAtLastSubPage = false
-                    subPageIndex = 0
-                    onSelectChapter(targetIdx)
-                    curlAnim.snapTo(0f)
-                }
-            }
-
-            val currSubPageText = subPages.getOrElse(subPageIndex) { "" }
-            val nextPreviewText = remember(
-                subPageIndex, subPages, currentChapterIndex, resolvedChapters,
-                canvasWidthPx, canvasHeightPx, fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp
-            ) {
-                if (subPageIndex + 1 < subPages.size) {
-                    subPages[subPageIndex + 1]
-                } else if (currentChapterIndex + 1 < resolvedChapters.size) {
-                    val nextChap = resolvedChapters[currentChapterIndex + 1]
-                    paginateChapterByMeasuredLayout(
-                        bodyText = nextChap.bodyText,
-                        headingText = nextChap.title,
-                        widthPx = canvasWidthPx,
-                        heightPx = canvasHeightPx,
-                        fontSizePx = fontSizePx,
-                        fontFamilyKey = fontFamilyKey,
-                        lineHeightMultiplier = lineHeightMultiplier,
-                        marginScale = marginScale,
-                        isJustified = isJustified,
-                        paragraphSpacingDp = paragraphSpacingDp
-                    ).firstOrNull() ?: ""
-                } else ""
-            }
-            val prevPreviewText = remember(
-                subPageIndex, subPages, currentChapterIndex, resolvedChapters,
-                canvasWidthPx, canvasHeightPx, fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp
-            ) {
-                if (subPageIndex > 0) {
-                    subPages[subPageIndex - 1]
-                } else if (currentChapterIndex > 0) {
-                    val prevChap = resolvedChapters[currentChapterIndex - 1]
-                    paginateChapterByMeasuredLayout(
-                        bodyText = prevChap.bodyText,
-                        headingText = prevChap.title,
-                        widthPx = canvasWidthPx,
-                        heightPx = canvasHeightPx,
-                        fontSizePx = fontSizePx,
-                        fontFamilyKey = fontFamilyKey,
-                        lineHeightMultiplier = lineHeightMultiplier,
-                        marginScale = marginScale,
-                        isJustified = isJustified,
-                        paragraphSpacingDp = paragraphSpacingDp
-                    ).lastOrNull() ?: ""
-                } else ""
-            }
-
-            val bgArgb = bgColor.toArgb()
-            val textArgb = textColor.toArgb()
-            val accentArgb = accentColor.toArgb()
-            val linkArgb = linkColor.toArgb()
-
-            val currentFooter = if (isVisualPageMode) {
-                "Page ${currentChapterIndex + 1} of ${resolvedChapters.size}"
-            } else {
-                val pagesLeftInChap = (subPages.size - 1 - subPageIndex).coerceAtLeast(0)
-                if (pagesLeftInChap == 0) {
-                    "Last page of chapter  •  Ch ${currentChapterIndex + 1}/${resolvedChapters.size}"
-                } else {
-                    "$pagesLeftInChap pg left in chapter  •  Ch ${currentChapterIndex + 1}/${resolvedChapters.size}"
-                }
-            }
-
-            val currentRenderedPage = remember(
-                canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
-                currentChapter?.title, subPageIndex, currSubPageText, fontSizePx,
-                fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
-                renderedPageBitmap, resolvedChapters, currentChapterIndex, isTocChapter
-            ) {
-                renderBookPageToBitmap(
-                    widthPx = canvasWidthPx,
-                    heightPx = canvasHeightPx,
-                    bgColorArgb = bgArgb,
-                    textColorArgb = textArgb,
-                    accentColorArgb = accentArgb,
-                    linkColorArgb = linkArgb,
-                    headingText = currentChapter?.title ?: "",
-                    showHeading = subPageIndex == 0,
-                    bodyText = currSubPageText,
-                    fontSizePx = fontSizePx,
-                    fontFamilyKey = fontFamilyKey,
-                    lineHeightMultiplier = lineHeightMultiplier,
-                    marginScale = marginScale,
-                    isJustified = isJustified,
-                    paragraphSpacingDp = paragraphSpacingDp,
-                    visualBitmap = if (isVisualPageMode) renderedPageBitmap else null,
-                    allChapters = resolvedChapters,
-                    currentChapterIndex = currentChapterIndex,
-                    isTocChapter = isTocChapter
-                )
-            }
-
-            val nextRenderedPage = remember(
-                canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
-                currentChapterIndex, subPageIndex, nextPreviewText, fontSizePx,
-                fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
-                nextPageBitmap, resolvedChapters, isTocChapter
-            ) {
-                val isNextNewChapter = subPageIndex + 1 >= subPages.size
-                val nextHeading = if (isNextNewChapter && currentChapterIndex + 1 < resolvedChapters.size) {
-                    resolvedChapters[currentChapterIndex + 1].title
-                } else ""
-                renderBookPageToBitmap(
-                    widthPx = canvasWidthPx,
-                    heightPx = canvasHeightPx,
-                    bgColorArgb = bgArgb,
-                    textColorArgb = textArgb,
-                    accentColorArgb = accentArgb,
-                    linkColorArgb = linkArgb,
-                    headingText = nextHeading,
-                    showHeading = isNextNewChapter,
-                    bodyText = nextPreviewText,
-                    fontSizePx = fontSizePx,
-                    fontFamilyKey = fontFamilyKey,
-                    lineHeightMultiplier = lineHeightMultiplier,
-                    marginScale = marginScale,
-                    isJustified = isJustified,
-                    paragraphSpacingDp = paragraphSpacingDp,
-                    visualBitmap = if (isVisualPageMode) (nextPageBitmap ?: renderedPageBitmap) else null,
-                    allChapters = resolvedChapters,
-                    currentChapterIndex = if (isNextNewChapter) currentChapterIndex + 1 else currentChapterIndex,
-                    isTocChapter = isTocChapter && !isNextNewChapter
-                )
-            }
-
-            val prevRenderedPage = remember(
-                canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
-                currentChapterIndex, subPageIndex, prevPreviewText, fontSizePx,
-                fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
-                prevPageBitmap, resolvedChapters, isTocChapter
-            ) {
-                val isPrevFirstSubPage = subPageIndex == 1
-                renderBookPageToBitmap(
-                    widthPx = canvasWidthPx,
-                    heightPx = canvasHeightPx,
-                    bgColorArgb = bgArgb,
-                    textColorArgb = textArgb,
-                    accentColorArgb = accentArgb,
-                    linkColorArgb = linkArgb,
-                    headingText = currentChapter?.title ?: "",
-                    showHeading = isPrevFirstSubPage,
-                    bodyText = prevPreviewText,
-                    fontSizePx = fontSizePx,
-                    fontFamilyKey = fontFamilyKey,
-                    lineHeightMultiplier = lineHeightMultiplier,
-                    marginScale = marginScale,
-                    isJustified = isJustified,
-                    paragraphSpacingDp = paragraphSpacingDp,
-                    visualBitmap = if (isVisualPageMode) (prevPageBitmap ?: renderedPageBitmap) else null,
-                    allChapters = resolvedChapters,
-                    currentChapterIndex = currentChapterIndex,
-                    isTocChapter = isTocChapter
-                )
-            }
-
-            if (isLoading || (isVisualPageMode && isRenderingVisualPage && renderedPageBitmap == null)) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = accentColor)
-                }
-            } else {
-                Canvas(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(with(density) { canvasHeightPx.toDp() })
-                        .pointerInput(currentChapterIndex, subPageIndex, subPages.size, resolvedChapters.size, currentRenderedPage.hotspots) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                val w = size.width.toFloat().coerceAtLeast(1f)
-                                val h = size.height.toFloat().coerceAtLeast(1f)
-                                val startX = down.position.x
-                                val startY = down.position.y
-                                touchYNorm = (startY / h).coerceIn(0.1f, 0.9f)
-
-                                var totalDragX = 0f
-                                var totalDragY = 0f
-                                var dragDirection = 0
-                                var lastDx = 0f
-
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull() ?: break
-                                    if (!change.pressed) break
-
-                                    val delta = change.positionChange()
-                                    val dx = delta.x
-                                    val dy = delta.y
-                                    if (abs(dx) > 0.1f) lastDx = dx
-                                    totalDragX += dx
-                                    totalDragY += dy
-                                    touchYNorm = (change.position.y / h).coerceIn(0.1f, 0.9f)
-
-                                    if (dragDirection == 0 && abs(totalDragX) > 10f) {
-                                        dragDirection = if (totalDragX < 0f && canGoNext) {
-                                            1
-                                        } else if (totalDragX > 0f && canGoPrev) {
-                                            -1
-                                        } else {
-                                            0
-                                        }
-                                    }
-
-                                    if (dragDirection == 1 && canGoNext) {
-                                        change.consume()
-                                        val fingerProgress = ((w - change.position.x) / (w * 0.92f)).coerceIn(0.01f, 1f)
-                                        val dragProgress = (-totalDragX / (w * 0.85f)).coerceIn(0.01f, 1f)
-                                        val combined = if (startX > w * 0.65f) max(fingerProgress, dragProgress) else dragProgress
-                                        coroutineScope.launch { curlAnim.snapTo(combined) }
-                                    } else if (dragDirection == -1 && canGoPrev) {
-                                        change.consume()
-                                        val dragProgress = (totalDragX / (w * 0.85f)).coerceIn(0.01f, 1f)
-                                        coroutineScope.launch { curlAnim.snapTo(-dragProgress) }
-                                    }
-                                }
-
-                                if (dragDirection == 0 && abs(totalDragX) < 14f && abs(totalDragY) < 18f) {
-                                    val tappedHotspot = currentRenderedPage.hotspots.firstOrNull { spot ->
-                                        spot.rect.contains(startX, startY)
-                                    }
-                                    if (tappedHotspot != null) {
-                                        animateJumpToChapter(tappedHotspot.targetChapterIndex)
-                                    } else if (startX > w * 0.72f && canGoNext) {
-                                        animatePageTurnForward()
-                                    } else if (startX < w * 0.28f && canGoPrev) {
-                                        animatePageTurnBackward()
-                                    }
-                                } else {
-                                    val c = curlAnim.value
-                                    coroutineScope.launch {
-                                        if (c > 0f) {
-                                            val shouldComplete = c > 0.22f || lastDx < -6f
-                                            if (shouldComplete && canGoNext) {
-                                                curlAnim.animateTo(1f, tween(280, easing = FastOutSlowInEasing))
-                                                commitNextPage()
-                                                curlAnim.snapTo(0f)
-                                            } else {
-                                                curlAnim.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
-                                            }
-                                        } else if (c < 0f) {
-                                            val shouldComplete = abs(c) > 0.22f || lastDx > 6f
-                                            if (shouldComplete && canGoPrev) {
-                                                curlAnim.animateTo(-1f, tween(280, easing = FastOutSlowInEasing))
-                                                commitPrevPage()
-                                                curlAnim.snapTo(0f)
-                                            } else {
-                                                curlAnim.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                ) {
-                    val c = curlAnim.value
-                    drawIntoCanvas { composeCanvas ->
-                        val native = composeCanvas.nativeCanvas
-                        val w = size.width
-                        val h = size.height
-
-                        when {
-                            abs(c) < 0.003f -> {
-                                native.drawBitmap(currentRenderedPage.bitmap, 0f, 0f, null)
-                            }
-                            c > 0f -> {
-                                native.drawBitmap(nextRenderedPage.bitmap, 0f, 0f, null)
-                                draw3DCurledPageMesh(
-                                    nativeCanvas = native,
-                                    pageBitmap = currentRenderedPage.bitmap,
-                                    width = w,
-                                    height = h,
-                                    curlProgress = c,
-                                    touchYNorm = touchYNorm,
-                                    bgColorArgb = bgArgb
-                                )
-                            }
-                            else -> {
-                                native.drawBitmap(currentRenderedPage.bitmap, 0f, 0f, null)
-                                val uncurlProgress = (1f - abs(c)).coerceIn(0.01f, 0.99f)
-                                draw3DCurledPageMesh(
-                                    nativeCanvas = native,
-                                    pageBitmap = prevRenderedPage.bitmap,
-                                    width = w,
-                                    height = h,
-                                    curlProgress = uncurlProgress,
-                                    touchYNorm = touchYNorm,
-                                    bgColorArgb = bgArgb
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .height(bottomBarHeightDp)
-                    .background(bgColor),
-                verticalArrangement = Arrangement.Center
-            ) {
-                HorizontalDivider(color = accentColor.copy(alpha = 0.14f))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    TextButton(
-                        onClick = { animatePageTurnBackward() },
-                        enabled = canGoPrev,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                    ) {
-                        Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
-                        Text("Prev", color = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
+                    if (!isEmbeddedPane) {
+                        IconButton(onClick = onBackToShelf) {
+                            Icon(Icons.Default.ChevronLeft, contentDescription = "Back", tint = accentColor)
+                        }
+                    } else if (onToggleFullScreen != null) {
+                        IconButton(onClick = onToggleFullScreen) {
+                            Icon(
+                                imageVector = if (isFullScreen) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
+                                contentDescription = "Toggle Full Screen",
+                                tint = accentColor
+                            )
+                        }
                     }
 
-                    val pct = if (resolvedChapters.isNotEmpty()) {
-                        (((currentChapterIndex + 1).toFloat() / resolvedChapters.size) * 100).toInt().coerceIn(1, 100)
-                    } else 0
-
-                    Text(
-                        text = "$currentFooter ($pct%)",
-                        fontSize = 11.5.sp,
-                        color = textColor.copy(alpha = 0.78f),
-                        maxLines = 1,
-                        modifier = Modifier.clickable { showTocDialog = true }
-                    )
-
-                    TextButton(
-                        onClick = { animatePageTurnForward() },
-                        enabled = canGoNext,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 8.dp)
+                            .clickable { showTocDialog = true },
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Text("Next", color = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
-                        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
+                        Text(
+                            text = ebook.title,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 14.sp,
+                            color = textColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = currentChapter?.title ?: if (isVisualPageMode) "Page ${currentChapterIndex + 1}" else "Loading...",
+                            fontSize = 11.sp,
+                            color = accentColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isWideScreen && !isVisualPageMode) {
+                            IconButton(
+                                onClick = {
+                                    ProFeatureManager.runIfPro(ProFeature.DUAL_PAGE_FOLDABLE) {
+                                        dualPageSpreadEnabled = !dualPageSpreadEnabled
+                                        prefs.edit().putBoolean("ebook_dual_page_spread", dualPageSpreadEnabled).apply()
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = if (useDualSpread) Icons.Default.MenuBook else Icons.Default.Article,
+                                    contentDescription = "Toggle Dual-Page Spread",
+                                    tint = accentColor
+                                )
+                            }
+                        }
+                        IconButton(onClick = { showTocDialog = true }) {
+                            Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters", tint = accentColor)
+                        }
+                        TextButton(
+                            onClick = { showReaderSettings = true },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "Aa",
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Serif,
+                                color = accentColor
+                            )
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(color = accentColor.copy(alpha = 0.14f))
+
+            // Main Interactive 3D Mesh Page-Curl Reading Area
+            BoxWithConstraints(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .background(bgColor)
+            ) {
+                val density = LocalDensity.current
+                val bottomBarHeightDp = 48.dp
+                val canvasWidthPx = with(density) { maxWidth.toPx().toInt().coerceAtLeast(100) }
+                val canvasHeightPx = with(density) { (maxHeight - bottomBarHeightDp).toPx().toInt().coerceAtLeast(100) }
+                val fontSizePx = with(density) { fontSizeSp.sp.toPx() }
+                val singleColumnWidthPx = if (useDualSpread) ((canvasWidthPx - 24) / 2).coerceAtLeast(100) else canvasWidthPx
+
+                val subPages = remember(
+                    currentChapter?.bodyText,
+                    currentChapter?.title,
+                    singleColumnWidthPx,
+                    canvasHeightPx,
+                    fontSizePx,
+                    fontFamilyKey,
+                    lineHeightMultiplier,
+                    marginScale,
+                    isJustified,
+                    paragraphSpacingDp,
+                    isVisualPageMode
+                ) {
+                    if (isVisualPageMode) listOf("")
+                    else paginateChapterByMeasuredLayout(
+                        bodyText = currentChapter?.bodyText ?: "",
+                        headingText = currentChapter?.title ?: "",
+                        widthPx = singleColumnWidthPx,
+                        heightPx = canvasHeightPx,
+                        fontSizePx = fontSizePx,
+                        fontFamilyKey = fontFamilyKey,
+                        lineHeightMultiplier = lineHeightMultiplier,
+                        marginScale = marginScale,
+                        isJustified = isJustified,
+                        paragraphSpacingDp = paragraphSpacingDp
+                    )
+                }
+
+                LaunchedEffect(subPages.size, currentChapterIndex, useDualSpread) {
+                    if (pendingReturnSubPage >= 0) {
+                        subPageIndex = pendingReturnSubPage.coerceIn(0, subPages.lastIndex.coerceAtLeast(0))
+                        pendingReturnSubPage = -1
+                    } else if (startAtLastSubPage) {
+                        val lastIdx = subPages.lastIndex.coerceAtLeast(0)
+                        subPageIndex = if (useDualSpread) (lastIdx / 2) * 2 else lastIdx
+                        startAtLastSubPage = false
+                    } else if (subPageIndex > subPages.lastIndex) {
+                        subPageIndex = subPages.lastIndex.coerceAtLeast(0)
+                    }
+                }
+
+                val canGoNext = (subPageIndex + pageStep < subPages.size) || (currentChapterIndex + 1 < resolvedChapters.size)
+                val canGoPrev = (subPageIndex > 0) || (currentChapterIndex > 0)
+
+                fun commitNextPage() {
+                    if (subPageIndex + pageStep < subPages.size) {
+                        subPageIndex += pageStep
+                    } else if (currentChapterIndex + 1 < resolvedChapters.size) {
+                        startAtLastSubPage = false
+                        subPageIndex = 0
+                        onSelectChapter(currentChapterIndex + 1)
+                    }
+                }
+
+                fun commitPrevPage() {
+                    if (subPageIndex > 0) {
+                        subPageIndex = (subPageIndex - pageStep).coerceAtLeast(0)
+                    } else if (currentChapterIndex > 0) {
+                        startAtLastSubPage = true
+                        onSelectChapter(currentChapterIndex - 1)
+                    }
+                }
+
+                fun animatePageTurnForward() {
+                    if (!canGoNext || curlAnim.isRunning) return
+                    coroutineScope.launch {
+                        touchYNorm = 0.62f
+                        curlAnim.snapTo(0.03f)
+                        curlAnim.animateTo(1f, tween(durationMillis = 420, easing = FastOutSlowInEasing))
+                        commitNextPage()
+                        curlAnim.snapTo(0f)
+                    }
+                }
+
+                fun animatePageTurnBackward() {
+                    if (!canGoPrev || curlAnim.isRunning) return
+                    coroutineScope.launch {
+                        touchYNorm = 0.62f
+                        curlAnim.snapTo(-0.03f)
+                        curlAnim.animateTo(-1f, tween(durationMillis = 420, easing = FastOutSlowInEasing))
+                        commitPrevPage()
+                        curlAnim.snapTo(0f)
+                    }
+                }
+
+                fun animateJumpToChapter(targetIdx: Int, targetSubPage: Int = 0, recordReturnPill: Boolean = true) {
+                    if (targetIdx !in resolvedChapters.indices || curlAnim.isRunning) return
+                    if (recordReturnPill && abs(targetIdx - currentChapterIndex) >= 1) {
+                        returnBookmark = ReaderReturnBookmark(
+                            chapterIndex = currentChapterIndex,
+                            subPageIndex = subPageIndex,
+                            label = "Ch ${currentChapterIndex + 1} • Pg ${subPageIndex + 1}"
+                        )
+                    }
+                    coroutineScope.launch {
+                        touchYNorm = 0.55f
+                        if (targetIdx >= currentChapterIndex) {
+                            curlAnim.snapTo(0.04f)
+                            curlAnim.animateTo(1f, tween(durationMillis = 380, easing = FastOutSlowInEasing))
+                        } else {
+                            curlAnim.snapTo(-0.04f)
+                            curlAnim.animateTo(-1f, tween(durationMillis = 380, easing = FastOutSlowInEasing))
+                        }
+                        startAtLastSubPage = false
+                        pendingReturnSubPage = targetSubPage
+                        subPageIndex = targetSubPage
+                        onSelectChapter(targetIdx)
+                        curlAnim.snapTo(0f)
+                    }
+                }
+
+                val currLeftText = subPages.getOrElse(subPageIndex) { "" }
+                val currRightText = if (useDualSpread) subPages.getOrElse(subPageIndex + 1) { "" } else ""
+
+                val nextChapSubPages = remember(
+                    currentChapterIndex, resolvedChapters, singleColumnWidthPx, canvasHeightPx,
+                    fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp
+                ) {
+                    if (currentChapterIndex + 1 < resolvedChapters.size) {
+                        val nextChap = resolvedChapters[currentChapterIndex + 1]
+                        paginateChapterByMeasuredLayout(
+                            bodyText = nextChap.bodyText,
+                            headingText = nextChap.title,
+                            widthPx = singleColumnWidthPx,
+                            heightPx = canvasHeightPx,
+                            fontSizePx = fontSizePx,
+                            fontFamilyKey = fontFamilyKey,
+                            lineHeightMultiplier = lineHeightMultiplier,
+                            marginScale = marginScale,
+                            isJustified = isJustified,
+                            paragraphSpacingDp = paragraphSpacingDp
+                        )
+                    } else emptyList()
+                }
+
+                val prevChapSubPages = remember(
+                    currentChapterIndex, resolvedChapters, singleColumnWidthPx, canvasHeightPx,
+                    fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp
+                ) {
+                    if (currentChapterIndex > 0) {
+                        val prevChap = resolvedChapters[currentChapterIndex - 1]
+                        paginateChapterByMeasuredLayout(
+                            bodyText = prevChap.bodyText,
+                            headingText = prevChap.title,
+                            widthPx = singleColumnWidthPx,
+                            heightPx = canvasHeightPx,
+                            fontSizePx = fontSizePx,
+                            fontFamilyKey = fontFamilyKey,
+                            lineHeightMultiplier = lineHeightMultiplier,
+                            marginScale = marginScale,
+                            isJustified = isJustified,
+                            paragraphSpacingDp = paragraphSpacingDp
+                        )
+                    } else emptyList()
+                }
+
+                val bgArgb = bgColor.toArgb()
+                val textArgb = textColor.toArgb()
+                val accentArgb = accentColor.toArgb()
+                val linkArgb = linkColor.toArgb()
+
+                val currentFooter = if (isVisualPageMode) {
+                    "Page ${currentChapterIndex + 1} of ${resolvedChapters.size}"
+                } else {
+                    val pagesLeftInChap = (subPages.size - 1 - (subPageIndex + pageStep - 1)).coerceAtLeast(0)
+                    if (pagesLeftInChap == 0) {
+                        "Last page of chapter  •  Ch ${currentChapterIndex + 1}/${resolvedChapters.size}"
+                    } else {
+                        "$pagesLeftInChap pg left in chapter  •  Ch ${currentChapterIndex + 1}/${resolvedChapters.size}"
+                    }
+                }
+
+                val currentRenderedPage = remember(
+                    canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
+                    currentChapter?.title, subPageIndex, currLeftText, currRightText, useDualSpread,
+                    fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
+                    renderedPageBitmap, resolvedChapters, currentChapterIndex, isTocChapter
+                ) {
+                    if (useDualSpread) {
+                        renderDualSpreadBookPageToBitmap(
+                            totalWidthPx = canvasWidthPx,
+                            heightPx = canvasHeightPx,
+                            bgColorArgb = bgArgb,
+                            textColorArgb = textArgb,
+                            accentColorArgb = accentArgb,
+                            linkColorArgb = linkArgb,
+                            headingText = currentChapter?.title ?: "",
+                            showHeadingOnLeft = subPageIndex == 0,
+                            leftBodyText = currLeftText,
+                            rightBodyText = currRightText,
+                            fontSizePx = fontSizePx,
+                            fontFamilyKey = fontFamilyKey,
+                            lineHeightMultiplier = lineHeightMultiplier,
+                            marginScale = marginScale,
+                            isJustified = isJustified,
+                            paragraphSpacingDp = paragraphSpacingDp,
+                            allChapters = resolvedChapters,
+                            currentChapterIndex = currentChapterIndex,
+                            isTocChapter = isTocChapter
+                        )
+                    } else {
+                        renderBookPageToBitmap(
+                            widthPx = canvasWidthPx,
+                            heightPx = canvasHeightPx,
+                            bgColorArgb = bgArgb,
+                            textColorArgb = textArgb,
+                            accentColorArgb = accentArgb,
+                            linkColorArgb = linkArgb,
+                            headingText = currentChapter?.title ?: "",
+                            showHeading = subPageIndex == 0,
+                            bodyText = currLeftText,
+                            fontSizePx = fontSizePx,
+                            fontFamilyKey = fontFamilyKey,
+                            lineHeightMultiplier = lineHeightMultiplier,
+                            marginScale = marginScale,
+                            isJustified = isJustified,
+                            paragraphSpacingDp = paragraphSpacingDp,
+                            visualBitmap = if (isVisualPageMode) renderedPageBitmap else null,
+                            allChapters = resolvedChapters,
+                            currentChapterIndex = currentChapterIndex,
+                            isTocChapter = isTocChapter
+                        )
+                    }
+                }
+
+                val nextRenderedPage = remember(
+                    canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
+                    currentChapterIndex, subPageIndex, subPages, nextChapSubPages, useDualSpread,
+                    fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
+                    nextPageBitmap, resolvedChapters, isTocChapter
+                ) {
+                    val isNextNewChapter = subPageIndex + pageStep >= subPages.size
+                    val nextHeading = if (isNextNewChapter && currentChapterIndex + 1 < resolvedChapters.size) {
+                        resolvedChapters[currentChapterIndex + 1].title
+                    } else ""
+                    val nextLeft = if (!isNextNewChapter) {
+                        subPages.getOrElse(subPageIndex + pageStep) { "" }
+                    } else {
+                        nextChapSubPages.firstOrNull() ?: ""
+                    }
+                    val nextRight = if (useDualSpread) {
+                        if (!isNextNewChapter) subPages.getOrElse(subPageIndex + pageStep + 1) { "" }
+                        else nextChapSubPages.getOrElse(1) { "" }
+                    } else ""
+
+                    if (useDualSpread) {
+                        renderDualSpreadBookPageToBitmap(
+                            totalWidthPx = canvasWidthPx,
+                            heightPx = canvasHeightPx,
+                            bgColorArgb = bgArgb,
+                            textColorArgb = textArgb,
+                            accentColorArgb = accentArgb,
+                            linkColorArgb = linkArgb,
+                            headingText = nextHeading,
+                            showHeadingOnLeft = isNextNewChapter,
+                            leftBodyText = nextLeft,
+                            rightBodyText = nextRight,
+                            fontSizePx = fontSizePx,
+                            fontFamilyKey = fontFamilyKey,
+                            lineHeightMultiplier = lineHeightMultiplier,
+                            marginScale = marginScale,
+                            isJustified = isJustified,
+                            paragraphSpacingDp = paragraphSpacingDp,
+                            allChapters = resolvedChapters,
+                            currentChapterIndex = if (isNextNewChapter) currentChapterIndex + 1 else currentChapterIndex,
+                            isTocChapter = isTocChapter && !isNextNewChapter
+                        )
+                    } else {
+                        renderBookPageToBitmap(
+                            widthPx = canvasWidthPx,
+                            heightPx = canvasHeightPx,
+                            bgColorArgb = bgArgb,
+                            textColorArgb = textArgb,
+                            accentColorArgb = accentArgb,
+                            linkColorArgb = linkArgb,
+                            headingText = nextHeading,
+                            showHeading = isNextNewChapter,
+                            bodyText = nextLeft,
+                            fontSizePx = fontSizePx,
+                            fontFamilyKey = fontFamilyKey,
+                            lineHeightMultiplier = lineHeightMultiplier,
+                            marginScale = marginScale,
+                            isJustified = isJustified,
+                            paragraphSpacingDp = paragraphSpacingDp,
+                            visualBitmap = if (isVisualPageMode) (nextPageBitmap ?: renderedPageBitmap) else null,
+                            allChapters = resolvedChapters,
+                            currentChapterIndex = if (isNextNewChapter) currentChapterIndex + 1 else currentChapterIndex,
+                            isTocChapter = isTocChapter && !isNextNewChapter
+                        )
+                    }
+                }
+
+                val prevRenderedPage = remember(
+                    canvasWidthPx, canvasHeightPx, bgArgb, textArgb, accentArgb, linkArgb,
+                    currentChapterIndex, subPageIndex, subPages, prevChapSubPages, useDualSpread,
+                    fontSizePx, fontFamilyKey, lineHeightMultiplier, marginScale, isJustified, paragraphSpacingDp,
+                    prevPageBitmap, resolvedChapters, isTocChapter
+                ) {
+                    val isPrevChap = subPageIndex == 0
+                    val prevStartIdx = if (!isPrevChap) {
+                        (subPageIndex - pageStep).coerceAtLeast(0)
+                    } else {
+                        val lastIdx = (prevChapSubPages.size - 1).coerceAtLeast(0)
+                        if (useDualSpread) (lastIdx / 2) * 2 else lastIdx
+                    }
+                    val prevHeading = if (!isPrevChap) {
+                        currentChapter?.title ?: ""
+                    } else if (currentChapterIndex > 0) {
+                        resolvedChapters[currentChapterIndex - 1].title
+                    } else ""
+                    val prevLeft = if (!isPrevChap) {
+                        subPages.getOrElse(prevStartIdx) { "" }
+                    } else {
+                        prevChapSubPages.getOrElse(prevStartIdx) { "" }
+                    }
+                    val prevRight = if (useDualSpread) {
+                        if (!isPrevChap) subPages.getOrElse(prevStartIdx + 1) { "" }
+                        else prevChapSubPages.getOrElse(prevStartIdx + 1) { "" }
+                    } else ""
+
+                    if (useDualSpread) {
+                        renderDualSpreadBookPageToBitmap(
+                            totalWidthPx = canvasWidthPx,
+                            heightPx = canvasHeightPx,
+                            bgColorArgb = bgArgb,
+                            textColorArgb = textArgb,
+                            accentColorArgb = accentArgb,
+                            linkColorArgb = linkArgb,
+                            headingText = prevHeading,
+                            showHeadingOnLeft = prevStartIdx == 0,
+                            leftBodyText = prevLeft,
+                            rightBodyText = prevRight,
+                            fontSizePx = fontSizePx,
+                            fontFamilyKey = fontFamilyKey,
+                            lineHeightMultiplier = lineHeightMultiplier,
+                            marginScale = marginScale,
+                            isJustified = isJustified,
+                            paragraphSpacingDp = paragraphSpacingDp,
+                            allChapters = resolvedChapters,
+                            currentChapterIndex = if (isPrevChap) (currentChapterIndex - 1).coerceAtLeast(0) else currentChapterIndex,
+                            isTocChapter = isTocChapter
+                        )
+                    } else {
+                        renderBookPageToBitmap(
+                            widthPx = canvasWidthPx,
+                            heightPx = canvasHeightPx,
+                            bgColorArgb = bgArgb,
+                            textColorArgb = textArgb,
+                            accentColorArgb = accentArgb,
+                            linkColorArgb = linkArgb,
+                            headingText = prevHeading,
+                            showHeading = prevStartIdx == 0,
+                            bodyText = prevLeft,
+                            fontSizePx = fontSizePx,
+                            fontFamilyKey = fontFamilyKey,
+                            lineHeightMultiplier = lineHeightMultiplier,
+                            marginScale = marginScale,
+                            isJustified = isJustified,
+                            paragraphSpacingDp = paragraphSpacingDp,
+                            visualBitmap = if (isVisualPageMode) (prevPageBitmap ?: renderedPageBitmap) else null,
+                            allChapters = resolvedChapters,
+                            currentChapterIndex = currentChapterIndex,
+                            isTocChapter = isTocChapter
+                        )
+                    }
+                }
+
+                if (isLoading || (isVisualPageMode && isRenderingVisualPage && renderedPageBitmap == null)) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = accentColor)
+                    }
+                } else {
+                    val leftEdgeThresholdPx = with(density) { 42.dp.toPx() }
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(with(density) { canvasHeightPx.toDp() })
+                            .pointerInput(
+                                currentChapterIndex, subPageIndex, subPages.size,
+                                resolvedChapters.size, currentRenderedPage.hotspots,
+                                edgeBrightnessEnabled, useDualSpread
+                            ) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    val w = size.width.toFloat().coerceAtLeast(1f)
+                                    val h = size.height.toFloat().coerceAtLeast(1f)
+                                    val startX = down.position.x
+                                    val startY = down.position.y
+                                    touchYNorm = (startY / h).coerceIn(0.1f, 0.9f)
+
+                                    var totalDragX = 0f
+                                    var totalDragY = 0f
+                                    var gestureMode = 0 // 0 = Undecided, 1 = Next Curl, -1 = Prev Curl, 2 = Left-Edge Brightness
+                                    var lastDx = 0f
+
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull() ?: break
+                                        if (!change.pressed) break
+
+                                        val delta = change.positionChange()
+                                        val dx = delta.x
+                                        val dy = delta.y
+                                        if (abs(dx) > 0.1f) lastDx = dx
+                                        totalDragX += dx
+                                        totalDragY += dy
+                                        touchYNorm = (change.position.y / h).coerceIn(0.1f, 0.9f)
+
+                                        if (gestureMode == 0) {
+                                            if (edgeBrightnessEnabled && startX <= leftEdgeThresholdPx && abs(totalDragY) > 12f && abs(totalDragY) > abs(totalDragX) * 1.25f) {
+                                                gestureMode = 2
+                                                isDraggingBrightness = true
+                                            } else if (abs(totalDragX) > 10f && abs(totalDragX) > abs(totalDragY)) {
+                                                gestureMode = if (totalDragX < 0f && canGoNext) {
+                                                    1
+                                                } else if (totalDragX > 0f && canGoPrev) {
+                                                    -1
+                                                } else {
+                                                    0
+                                                }
+                                            }
+                                        }
+
+                                        when (gestureMode) {
+                                            2 -> {
+                                                change.consume()
+                                                val deltaBrightness = -dy / (h * 0.75f)
+                                                readerBrightness = (readerBrightness + deltaBrightness).coerceIn(0.05f, 1.0f)
+                                            }
+                                            1 -> if (canGoNext) {
+                                                change.consume()
+                                                val fingerProgress = ((w - change.position.x) / (w * 0.92f)).coerceIn(0.01f, 1f)
+                                                val dragProgress = (-totalDragX / (w * 0.85f)).coerceIn(0.01f, 1f)
+                                                val combined = if (startX > w * 0.65f) max(fingerProgress, dragProgress) else dragProgress
+                                                coroutineScope.launch { curlAnim.snapTo(combined) }
+                                            }
+                                            -1 -> if (canGoPrev) {
+                                                change.consume()
+                                                val dragProgress = (totalDragX / (w * 0.85f)).coerceIn(0.01f, 1f)
+                                                coroutineScope.launch { curlAnim.snapTo(-dragProgress) }
+                                            }
+                                        }
+                                    }
+
+                                    if (gestureMode == 2) {
+                                        prefs.edit().putFloat("ebook_brightness_level", readerBrightness).apply()
+                                        coroutineScope.launch {
+                                            delay(650L)
+                                            isDraggingBrightness = false
+                                        }
+                                    } else if (gestureMode == 0 && abs(totalDragX) < 14f && abs(totalDragY) < 18f) {
+                                        val tappedHotspot = currentRenderedPage.hotspots.firstOrNull { spot ->
+                                            spot.rect.contains(startX, startY)
+                                        }
+                                        if (tappedHotspot != null) {
+                                            if (tappedHotspot.footnoteBody != null) {
+                                                activeFootnotePopup = Pair(
+                                                    tappedHotspot.footnoteTitle ?: "Footnote",
+                                                    tappedHotspot.footnoteBody
+                                                )
+                                            } else if (tappedHotspot.targetChapterIndex != null) {
+                                                animateJumpToChapter(tappedHotspot.targetChapterIndex, 0, recordReturnPill = true)
+                                            }
+                                        } else if (startX > w * 0.72f && canGoNext) {
+                                            animatePageTurnForward()
+                                        } else if (startX < w * 0.28f && canGoPrev) {
+                                            animatePageTurnBackward()
+                                        }
+                                    } else {
+                                        val c = curlAnim.value
+                                        coroutineScope.launch {
+                                            if (c > 0f) {
+                                                val shouldComplete = c > 0.22f || lastDx < -6f
+                                                if (shouldComplete && canGoNext) {
+                                                    curlAnim.animateTo(1f, tween(280, easing = FastOutSlowInEasing))
+                                                    commitNextPage()
+                                                    curlAnim.snapTo(0f)
+                                                } else {
+                                                    curlAnim.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
+                                                }
+                                            } else if (c < 0f) {
+                                                val shouldComplete = abs(c) > 0.22f || lastDx > 6f
+                                                if (shouldComplete && canGoPrev) {
+                                                    curlAnim.animateTo(-1f, tween(280, easing = FastOutSlowInEasing))
+                                                    commitPrevPage()
+                                                    curlAnim.snapTo(0f)
+                                                } else {
+                                                    curlAnim.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                    ) {
+                        val c = curlAnim.value
+                        drawIntoCanvas { composeCanvas ->
+                            val native = composeCanvas.nativeCanvas
+                            val w = size.width
+                            val h = size.height
+
+                            when {
+                                abs(c) < 0.003f -> {
+                                    native.drawBitmap(currentRenderedPage.bitmap, 0f, 0f, null)
+                                }
+                                c > 0f -> {
+                                    native.drawBitmap(nextRenderedPage.bitmap, 0f, 0f, null)
+                                    draw3DCurledPageMesh(
+                                        nativeCanvas = native,
+                                        pageBitmap = currentRenderedPage.bitmap,
+                                        width = w,
+                                        height = h,
+                                        curlProgress = c,
+                                        touchYNorm = touchYNorm,
+                                        bgColorArgb = bgArgb
+                                    )
+                                }
+                                else -> {
+                                    native.drawBitmap(currentRenderedPage.bitmap, 0f, 0f, null)
+                                    val uncurlProgress = (1f - abs(c)).coerceIn(0.01f, 0.99f)
+                                    draw3DCurledPageMesh(
+                                        nativeCanvas = native,
+                                        pageBitmap = prevRenderedPage.bitmap,
+                                        width = w,
+                                        height = h,
+                                        curlProgress = uncurlProgress,
+                                        touchYNorm = touchYNorm,
+                                        bgColorArgb = bgArgb
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Module C: Extra-Dim Dark Room Overlay when brightness is dragged below 25%
+                if (readerBrightness < 0.25f) {
+                    val dimAlpha = ((0.25f - readerBrightness) / 0.20f * 0.62f).coerceIn(0f, 0.65f)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(with(density) { canvasHeightPx.toDp() })
+                            .background(Color.Black.copy(alpha = dimAlpha))
+                    )
+                }
+
+                // Module C: Floating Brightness HUD Pill during Left-Edge Vertical Swipe
+                AnimatedVisibility(
+                    visible = isDraggingBrightness,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 18.dp)
+                ) {
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.82f),
+                        shape = RoundedCornerShape(50),
+                        tonalElevation = 8.dp
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (readerBrightness < 0.3f) Icons.Default.BrightnessLow else Icons.Default.BrightnessHigh,
+                                contentDescription = null,
+                                tint = Color(0xFFD4AF37),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "Brightness ${(readerBrightness * 100).roundToInt()}%",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                // Module C: Floating 8-Second "Return to Page X" Pill after internal chapter jumps
+                AnimatedVisibility(
+                    visible = returnBookmark != null,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = bottomBarHeightDp + 12.dp)
+                ) {
+                    val bm = returnBookmark
+                    if (bm != null) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary,
+                            shape = RoundedCornerShape(50),
+                            shadowElevation = 8.dp
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .clickable {
+                                        val targetChap = bm.chapterIndex
+                                        val targetSub = bm.subPageIndex
+                                        returnBookmark = null
+                                        animateJumpToChapter(targetChap, targetSub, recordReturnPill = false)
+                                    }
+                                    .padding(start = 14.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Undo,
+                                    contentDescription = "Return",
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "Return to ${bm.label}",
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                IconButton(
+                                    onClick = { returnBookmark = null },
+                                    modifier = Modifier.size(22.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Dismiss",
+                                        tint = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Dedicated Safe Bottom Status Footer
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(bottomBarHeightDp)
+                        .background(bgColor),
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    HorizontalDivider(color = accentColor.copy(alpha = 0.14f))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = { animatePageTurnBackward() },
+                            enabled = canGoPrev,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
+                            Text("Prev", color = if (canGoPrev) accentColor else textColor.copy(alpha = 0.3f))
+                        }
+
+                        val pct = if (resolvedChapters.isNotEmpty()) {
+                            (((currentChapterIndex + 1).toFloat() / resolvedChapters.size) * 100).toInt().coerceIn(1, 100)
+                        } else 0
+
+                        Text(
+                            text = "$currentFooter ($pct%)",
+                            fontSize = 11.5.sp,
+                            color = textColor.copy(alpha = 0.78f),
+                            maxLines = 1,
+                            modifier = Modifier.clickable { showTocDialog = true }
+                        )
+
+                        TextButton(
+                            onClick = { animatePageTurnForward() },
+                            enabled = canGoNext,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("Next", color = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
+                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = if (canGoNext) accentColor else textColor.copy(alpha = 0.3f))
+                        }
                     }
                 }
             }
         }
+    }
+
+    // Module C: Inline Footnote Preview Popup
+    if (activeFootnotePopup != null) {
+        val (fnTitle, fnBody) = activeFootnotePopup!!
+        AlertDialog(
+            onDismissRequest = { activeFootnotePopup = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text(fnTitle, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Text(
+                    text = fnBody,
+                    style = MaterialTheme.typography.bodyMedium,
+                    lineHeight = 22.sp
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { activeFootnotePopup = null }) {
+                    Text("Close")
+                }
+            }
+        )
     }
 
     if (showTocDialog) {
@@ -2372,6 +2907,13 @@ fun EpubReaderScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
+                                    if (abs(idx - currentChapterIndex) >= 1) {
+                                        returnBookmark = ReaderReturnBookmark(
+                                            chapterIndex = currentChapterIndex,
+                                            subPageIndex = subPageIndex,
+                                            label = "Ch ${currentChapterIndex + 1} • Pg ${subPageIndex + 1}"
+                                        )
+                                    }
                                     subPageIndex = 0
                                     onSelectChapter(idx)
                                     showTocDialog = false
@@ -2709,6 +3251,69 @@ fun EpubReaderScreen(
                                             modifier = Modifier.weight(1f)
                                         )
                                     }
+                                }
+
+                                // [PRO] Dual-Page Spread for Foldables & Landscape
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("2-Column Foldable Spread", fontWeight = FontWeight.SemiBold)
+                                            Spacer(Modifier.width(6.dp))
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.primary,
+                                                shape = RoundedCornerShape(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = "PRO",
+                                                    color = MaterialTheme.colorScheme.onPrimary,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            "Open-book 2-page spread when unfolded or in landscape",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = dualPageSpreadEnabled,
+                                        onCheckedChange = { enabled ->
+                                            ProFeatureManager.runIfPro(ProFeature.DUAL_PAGE_FOLDABLE) {
+                                                dualPageSpreadEnabled = enabled
+                                                prefs.edit().putBoolean("ebook_dual_page_spread", enabled).apply()
+                                            }
+                                        }
+                                    )
+                                }
+
+                                // Left-Edge Brightness Gesture Toggle
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Left-Edge Brightness Swipe", fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            "Slide up/down on the far-left edge for brightness & extra-dim",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = edgeBrightnessEnabled,
+                                        onCheckedChange = {
+                                            edgeBrightnessEnabled = it
+                                            prefs.edit().putBoolean("ebook_edge_brightness", it).apply()
+                                        }
+                                    )
                                 }
 
                                 Row(
