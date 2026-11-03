@@ -34,6 +34,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -46,6 +47,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -56,6 +58,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
@@ -65,9 +68,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.math.PI
@@ -122,8 +128,354 @@ private fun resolveNativeTypeface(fontFamilyKey: String, bold: Boolean): Typefac
     }
 }
 
-// Normalizes chapter titles using the first heading line of each chapter when needed,
-// and strips duplicate leading title lines from the body text so headings don't print twice.
+// Extracts a warm/cool tint color from a book cover bitmap for the "Currently Reading" Hero Card
+private fun extractHeroTintFromBitmap(bitmap: Bitmap?): Color? {
+    val pal = extractCoverPaletteFromBitmap(bitmap) ?: return null
+    val argb = AndroidColor.HSVToColor(
+        floatArrayOf(
+            pal.dominantHue.coerceIn(0f, 360f),
+            (pal.dominantSat * 0.65f).coerceIn(0.25f, 0.72f),
+            0.28f
+        )
+    )
+    return Color(argb)
+}
+
+// Derives a clean Series name from explicit series metadata or Title patterns (e.g. "Title: Book 1" or "Series - Book")
+private fun deriveSeriesName(rawSeries: String, rawTitle: String): String {
+    if (rawSeries.isNotBlank()) return rawSeries.trim()
+    val colonPrefix = rawTitle.substringBefore(':', "").trim()
+    if (colonPrefix.length in 3..38 && colonPrefix != rawTitle.trim()) {
+        return colonPrefix
+    }
+    val dashPrefix = rawTitle.substringBefore(" - ", "").trim()
+    if (dashPrefix.length in 3..38 && dashPrefix != rawTitle.trim()) {
+        return dashPrefix
+    }
+    return ""
+}
+
+// Module B: Tactile Book Cover Physics (Rounded Corners + 3D Left Spine-Crease Gradient + Realistic Drop Shadow)
+@Composable
+fun TactileBookCover(
+    coverArt: ImageBitmap?,
+    fallbackIcon: ImageVector,
+    progress: Float,
+    badgeText: String? = null,
+    badgeIcon: ImageVector? = null,
+    cornerRadius: Dp = 12.dp,
+    shadowElevation: Dp = 8.dp,
+    modifier: Modifier = Modifier
+) {
+    val shape = RoundedCornerShape(
+        topStart = 4.dp,
+        bottomStart = 4.dp,
+        topEnd = cornerRadius,
+        bottomEnd = cornerRadius
+    )
+    Box(
+        modifier = modifier
+            .shadow(
+                elevation = shadowElevation,
+                shape = shape,
+                ambientColor = Color.Black.copy(alpha = 0.65f),
+                spotColor = Color.Black.copy(alpha = 0.75f)
+            )
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center
+    ) {
+        if (coverArt != null) {
+            Image(
+                bitmap = coverArt,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Icon(
+                imageVector = fallbackIcon,
+                contentDescription = null,
+                modifier = Modifier.size(44.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+
+        // Tactile Left Spine-Crease & Specular Highlight Overlay (Apple Books / Yomu physics)
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(16.dp)
+                .align(Alignment.CenterStart)
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.42f),
+                            Color.White.copy(alpha = 0.22f),
+                            Color.Black.copy(alpha = 0.26f),
+                            Color.Transparent
+                        )
+                    )
+                )
+        )
+
+        // Subtle outer book border sheen
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .border(
+                    width = 0.75.dp,
+                    color = Color.White.copy(alpha = 0.14f),
+                    shape = shape
+                )
+        )
+
+        if (!badgeText.isNullOrBlank()) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 10.dp, bottom = 8.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.68f))
+                    .padding(horizontal = 6.dp, vertical = 3.dp)
+            ) {
+                Text(badgeText, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+        } else if (badgeIcon != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 10.dp, bottom = 8.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .padding(4.dp)
+            ) {
+                Icon(badgeIcon, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+            }
+        }
+
+        if (progress > 0f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .background(Color.Black.copy(alpha = 0.45f))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(progress.coerceIn(0.02f, 1f))
+                        .background(MaterialTheme.colorScheme.primary)
+                )
+            }
+        }
+    }
+}
+
+// Module B: "Currently Reading" Dynamic Hero Card at the top of the Bookshelf
+@Composable
+fun CurrentlyReadingHeroCard(
+    title: String,
+    author: String,
+    subtitle: String,
+    progressFraction: Float,
+    coverBitmap: Bitmap?,
+    isAudio: Boolean,
+    onContinueClick: () -> Unit
+) {
+    var dynamicTint by remember(coverBitmap) { mutableStateOf<Color?>(null) }
+
+    LaunchedEffect(coverBitmap) {
+        if (coverBitmap != null) {
+            dynamicTint = withContext(Dispatchers.Default) {
+                extractHeroTintFromBitmap(coverBitmap)
+            }
+        } else {
+            dynamicTint = null
+        }
+    }
+
+    val baseBg = dynamicTint ?: MaterialTheme.colorScheme.surfaceVariant
+    val pct = (progressFraction.coerceIn(0f, 1f) * 100).roundToInt()
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onContinueClick() },
+        shape = RoundedCornerShape(22.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+        colors = CardDefaults.cardColors(containerColor = baseBg)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            baseBg,
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
+                        )
+                    )
+                )
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TactileBookCover(
+                    coverArt = coverBitmap?.asImageBitmap(),
+                    fallbackIcon = if (isAudio) Icons.Default.Headphones else Icons.Default.MenuBook,
+                    progress = progressFraction,
+                    cornerRadius = 10.dp,
+                    shadowElevation = 10.dp,
+                    modifier = Modifier.size(88.dp)
+                )
+
+                Spacer(Modifier.width(16.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isAudio) "CURRENTLY LISTENING" else "CURRENTLY READING",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+                            shape = RoundedCornerShape(50)
+                        ) {
+                            Text(
+                                text = "$pct%",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+
+                    Text(
+                        text = title,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = author,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
+                    LinearProgressIndicator(
+                        progress = { progressFraction.coerceIn(0.02f, 1f) },
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(5.dp)
+                            .clip(RoundedCornerShape(50))
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary,
+                            shape = RoundedCornerShape(50)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (isAudio) Icons.Default.PlayArrow else Icons.Default.AutoStories,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = "Continue",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Module B: Smart Shelves & Series Filter Chip Bar
+@Composable
+fun SmartShelfFilterRow(
+    selectedFilter: String,
+    onSelectFilter: (String) -> Unit
+) {
+    val filters = listOf(
+        "ALL" to "All",
+        "READING" to "Reading",
+        "UNREAD" to "Unread",
+        "FINISHED" to "Finished",
+        "SERIES" to "Series"
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        filters.forEach { (key, label) ->
+            val isSelected = selectedFilter == key
+            FilterChip(
+                selected = isSelected,
+                onClick = { onSelectFilter(key) },
+                label = {
+                    Text(
+                        text = label,
+                        fontSize = 12.5.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                },
+                shape = RoundedCornerShape(50)
+            )
+        }
+    }
+}
+
 private fun resolveSmartChapterTitles(
     rawChapters: List<EbookChapter>,
     bookTitle: String
@@ -165,7 +517,6 @@ private fun resolveSmartChapterTitles(
     }
 }
 
-// Matches a Table of Contents line to its target chapter index
 private fun matchLineToTargetChapterIndex(
     rawLine: String,
     chapters: List<EbookChapter>,
@@ -265,7 +616,6 @@ private fun formatBodyWithParagraphSpacing(rawBody: String, paragraphSpacingDp: 
     return clean
 }
 
-// Exact StaticLayout pixel-measured pagination honoring Module A Font Family, Line Height, Margins & Justification!
 fun paginateChapterByMeasuredLayout(
     bodyText: String,
     headingText: String,
@@ -375,7 +725,6 @@ fun paginateChapterText(
     )
 }
 
-// Renders a book page onto an offscreen Bitmap honoring Module A Typography, Margins, Justification & Link Hotspots
 private fun renderBookPageToBitmap(
     widthPx: Int,
     heightPx: Int,
@@ -519,7 +868,6 @@ private fun renderBookPageToBitmap(
     return RenderedBookPage(bitmap = bmp, hotspots = hotspots)
 }
 
-// Draws a 3D cylindrically-warped page mesh using Android's native drawBitmapMesh.
 private fun draw3DCurledPageMesh(
     nativeCanvas: AndroidCanvas,
     pageBitmap: Bitmap,
@@ -803,28 +1151,14 @@ fun MiniPlayerBar(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.surface),
-                contentAlignment = Alignment.Center
-            ) {
-                if (coverArt != null) {
-                    Image(
-                        bitmap = coverArt,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.Headphones,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
+            TactileBookCover(
+                coverArt = coverArt,
+                fallbackIcon = Icons.Default.Headphones,
+                progress = 0f,
+                cornerRadius = 8.dp,
+                shadowElevation = 4.dp,
+                modifier = Modifier.size(48.dp)
+            )
 
             Spacer(Modifier.width(12.dp))
 
@@ -977,6 +1311,7 @@ fun CarModeScreen(
     }
 }
 
+// Module B: Upgraded Audiobook Shelf with Hero Card, Smart Shelves & Series Grouping
 @Composable
 fun BookshelfContent(
     books: List<Audiobook>,
@@ -1031,51 +1366,110 @@ fun BookshelfContent(
                 }
             }
         }
-    } else if (viewMode == "GRID") {
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 145.dp),
-            contentPadding = PaddingValues(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            items(count = books.size, key = { idx -> books[idx].id }) { index ->
-                val book = books[index]
-                val isSelected = book.id == activeBookId
-                BookCardWrapper(
-                    book = book,
-                    isSelected = isSelected,
-                    liveProgress = if (isSelected) activeBookProgress else null,
-                    liveSubtitle = if (isSelected) activeBookSubtitle else null,
-                    viewMode = "GRID",
-                    viewModel = viewModel,
-                    onSelectBook = onSelectBook,
-                    onLongPressBook = onLongPressBook
-                )
-            }
+        return
+    }
+
+    val heroBook = remember(books, activeBookId) {
+        books.find { it.id == activeBookId } ?: books.firstOrNull()
+    }
+
+    val filteredBooks = remember(books, viewModel.smartShelfFilter, viewModel.progressRevision, viewModel.completedBooksCount) {
+        when (viewModel.smartShelfFilter) {
+            "READING" -> books.filter { viewModel.getAudiobookStatus(it) == "READING" }
+            "UNREAD" -> books.filter { viewModel.getAudiobookStatus(it) == "UNREAD" }
+            "FINISHED" -> books.filter { viewModel.getAudiobookStatus(it) == "FINISHED" }
+            "SERIES" -> books.sortedWith(
+                compareBy<Audiobook> { deriveSeriesName(it.series, it.title).ifBlank { "ZZZ" } }
+                    .thenComparator { a, b -> compareNatural(a.title, b.title) }
+            )
+            else -> books
         }
-    } else {
-        LazyColumn(
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            items(count = books.size, key = { idx -> books[idx].id }) { index ->
-                val book = books[index]
-                val isSelected = book.id == activeBookId
-                BookCardWrapper(
-                    book = book,
-                    isSelected = isSelected,
-                    liveProgress = if (isSelected) activeBookProgress else null,
-                    liveSubtitle = if (isSelected) activeBookSubtitle else null,
-                    viewMode = "LIST",
-                    viewModel = viewModel,
-                    onSelectBook = onSelectBook,
-                    onLongPressBook = onLongPressBook
-                )
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        SmartShelfFilterRow(
+            selectedFilter = viewModel.smartShelfFilter,
+            onSelectFilter = { viewModel.updateSmartShelfFilter(it) }
+        )
+
+        if (viewMode == "GRID") {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 145.dp),
+                contentPadding = PaddingValues(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                if (heroBook != null && viewModel.smartShelfFilter == "ALL") {
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "hero_${heroBook.id}") {
+                        CurrentlyReadingHeroCard(
+                            title = heroBook.title,
+                            author = heroBook.author,
+                            subtitle = activeBookSubtitle.ifBlank { "${heroBook.tracks.size} track(s)" },
+                            progressFraction = activeBookProgress,
+                            coverBitmap = viewModel.currentCoverArt,
+                            isAudio = true,
+                            onContinueClick = { onSelectBook(heroBook) }
+                        )
+                    }
+                }
+
+                items(count = filteredBooks.size, key = { idx -> filteredBooks[idx].id }) { index ->
+                    val book = filteredBooks[index]
+                    val isSelected = book.id == activeBookId
+                    BookCardWrapper(
+                        book = book,
+                        isSelected = isSelected,
+                        liveProgress = if (isSelected) activeBookProgress else null,
+                        liveSubtitle = if (isSelected) activeBookSubtitle else null,
+                        viewMode = "GRID",
+                        viewModel = viewModel,
+                        onSelectBook = onSelectBook,
+                        onLongPressBook = onLongPressBook
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                if (heroBook != null && viewModel.smartShelfFilter == "ALL") {
+                    item(key = "hero_${heroBook.id}") {
+                        CurrentlyReadingHeroCard(
+                            title = heroBook.title,
+                            author = heroBook.author,
+                            subtitle = activeBookSubtitle.ifBlank { "${heroBook.tracks.size} track(s)" },
+                            progressFraction = activeBookProgress,
+                            coverBitmap = viewModel.currentCoverArt,
+                            isAudio = true,
+                            onContinueClick = { onSelectBook(heroBook) }
+                        )
+                        Spacer(Modifier.height(4.dp))
+                    }
+                }
+
+                items(count = filteredBooks.size, key = { idx -> filteredBooks[idx].id }) { index ->
+                    val book = filteredBooks[index]
+                    val isSelected = book.id == activeBookId
+                    BookCardWrapper(
+                        book = book,
+                        isSelected = isSelected,
+                        liveProgress = if (isSelected) activeBookProgress else null,
+                        liveSubtitle = if (isSelected) activeBookSubtitle else null,
+                        viewMode = "LIST",
+                        viewModel = viewModel,
+                        onSelectBook = onSelectBook,
+                        onLongPressBook = onLongPressBook
+                    )
+                }
             }
         }
     }
 }
 
+// Module B: Upgraded eBook Shelf with Hero Card, Smart Shelves & Series Grouping
 @Composable
 fun EbookShelfContent(
     ebooks: List<Ebook>,
@@ -1123,40 +1517,107 @@ fun EbookShelfContent(
                 }
             }
         }
-    } else if (viewMode == "GRID") {
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 145.dp),
-            contentPadding = PaddingValues(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            items(count = ebooks.size, key = { idx -> ebooks[idx].id }) { index ->
-                val ebook = ebooks[index]
-                EbookCardWrapper(
-                    ebook = ebook,
-                    isSelected = ebook.id == activeEbookId,
-                    viewMode = "GRID",
-                    viewModel = viewModel,
-                    onSelectEbook = onSelectEbook,
-                    onLongPressEbook = onLongPressEbook
-                )
-            }
+        return
+    }
+
+    val heroEbook = remember(ebooks, activeEbookId) {
+        ebooks.find { it.id == activeEbookId } ?: ebooks.firstOrNull()
+    }
+
+    val heroTotalChaps = remember(heroEbook?.id, viewModel.progressRevision) {
+        if (heroEbook != null) viewModel.repository.getEbookTotalChapters(heroEbook.id) else 0
+    }
+    val heroCurrChap = remember(heroEbook?.id, viewModel.progressRevision) {
+        if (heroEbook != null) viewModel.repository.getEbookChapterIndex(heroEbook.id) else 0
+    }
+    val heroProgress = if (heroTotalChaps > 0) ((heroCurrChap + 1).toFloat() / heroTotalChaps).coerceIn(0.02f, 1f) else 0f
+    val heroSubtitle = if (heroTotalChaps > 0) "Chapter ${heroCurrChap + 1} of $heroTotalChaps" else "${heroEbook?.format ?: "EPUB"} eBook"
+
+    val filteredEbooks = remember(ebooks, viewModel.smartShelfFilter, viewModel.progressRevision) {
+        when (viewModel.smartShelfFilter) {
+            "READING" -> ebooks.filter { viewModel.getEbookStatus(it) == "READING" }
+            "UNREAD" -> ebooks.filter { viewModel.getEbookStatus(it) == "UNREAD" }
+            "FINISHED" -> ebooks.filter { viewModel.getEbookStatus(it) == "FINISHED" }
+            "SERIES" -> ebooks.sortedWith(
+                compareBy<Ebook> { deriveSeriesName("", it.title).ifBlank { it.author } }
+                    .thenComparator { a, b -> compareNatural(a.title, b.title) }
+            )
+            else -> ebooks
         }
-    } else {
-        LazyColumn(
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            items(count = ebooks.size, key = { idx -> ebooks[idx].id }) { index ->
-                val ebook = ebooks[index]
-                EbookCardWrapper(
-                    ebook = ebook,
-                    isSelected = ebook.id == activeEbookId,
-                    viewMode = "LIST",
-                    viewModel = viewModel,
-                    onSelectEbook = onSelectEbook,
-                    onLongPressEbook = onLongPressEbook
-                )
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        SmartShelfFilterRow(
+            selectedFilter = viewModel.smartShelfFilter,
+            onSelectFilter = { viewModel.updateSmartShelfFilter(it) }
+        )
+
+        if (viewMode == "GRID") {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 145.dp),
+                contentPadding = PaddingValues(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                if (heroEbook != null && viewModel.smartShelfFilter == "ALL") {
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "hero_eb_${heroEbook.id}") {
+                        CurrentlyReadingHeroCard(
+                            title = heroEbook.title,
+                            author = heroEbook.author,
+                            subtitle = heroSubtitle,
+                            progressFraction = heroProgress,
+                            coverBitmap = viewModel.currentEbookCoverArt,
+                            isAudio = false,
+                            onContinueClick = { onSelectEbook(heroEbook) }
+                        )
+                    }
+                }
+
+                items(count = filteredEbooks.size, key = { idx -> filteredEbooks[idx].id }) { index ->
+                    val ebook = filteredEbooks[index]
+                    EbookCardWrapper(
+                        ebook = ebook,
+                        isSelected = ebook.id == activeEbookId,
+                        viewMode = "GRID",
+                        viewModel = viewModel,
+                        onSelectEbook = onSelectEbook,
+                        onLongPressEbook = onLongPressEbook
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                if (heroEbook != null && viewModel.smartShelfFilter == "ALL") {
+                    item(key = "hero_eb_${heroEbook.id}") {
+                        CurrentlyReadingHeroCard(
+                            title = heroEbook.title,
+                            author = heroEbook.author,
+                            subtitle = heroSubtitle,
+                            progressFraction = heroProgress,
+                            coverBitmap = viewModel.currentEbookCoverArt,
+                            isAudio = false,
+                            onContinueClick = { onSelectEbook(heroEbook) }
+                        )
+                        Spacer(Modifier.height(4.dp))
+                    }
+                }
+
+                items(count = filteredEbooks.size, key = { idx -> filteredEbooks[idx].id }) { index ->
+                    val ebook = filteredEbooks[index]
+                    EbookCardWrapper(
+                        ebook = ebook,
+                        isSelected = ebook.id == activeEbookId,
+                        viewMode = "LIST",
+                        viewModel = viewModel,
+                        onSelectEbook = onSelectEbook,
+                        onLongPressEbook = onLongPressEbook
+                    )
+                }
             }
         }
     }
@@ -1199,41 +1660,17 @@ fun EbookCardWrapper(
                     onLongClick = { onLongPressEbook(ebook) }
                 )
         ) {
-            Box(
+            TactileBookCover(
+                coverArt = cardArt,
+                fallbackIcon = Icons.Default.MenuBook,
+                progress = progress,
+                badgeText = ebook.format,
+                cornerRadius = 12.dp,
+                shadowElevation = if (isSelected) 10.dp else 6.dp,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center
-            ) {
-                if (cardArt != null) {
-                    Image(bitmap = cardArt!!, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                } else {
-                    Icon(Icons.Default.MenuBook, contentDescription = null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary)
-                }
-
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(8.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Color.Black.copy(alpha = 0.65f))
-                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                ) {
-                    Text(ebook.format, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                }
-
-                if (progress > 0f) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .fillMaxWidth(progress)
-                            .height(4.dp)
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
-                }
-            }
+            )
             Spacer(Modifier.height(8.dp))
             Text(ebook.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(ebook.author, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1258,19 +1695,14 @@ fun EbookCardWrapper(
             shape = RoundedCornerShape(16.dp)
         ) {
             Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(64.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (cardArt != null) {
-                        Image(bitmap = cardArt!!, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                    } else {
-                        Icon(Icons.Default.MenuBook, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    }
-                }
+                TactileBookCover(
+                    coverArt = cardArt,
+                    fallbackIcon = Icons.Default.MenuBook,
+                    progress = progress,
+                    cornerRadius = 10.dp,
+                    shadowElevation = 5.dp,
+                    modifier = Modifier.size(64.dp)
+                )
                 Spacer(Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(ebook.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1310,7 +1742,6 @@ fun EpubReaderScreen(
     val currentChapter = resolvedChapters.getOrNull(currentChapterIndex)
     val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
 
-    // Module A: Reactive Typography, Preset & Custom Theme State
     var activePresetId by remember { mutableStateOf(prefs.getString("ebook_preset_id", "EDITORIAL") ?: "EDITORIAL") }
     var fontFamilyKey by remember { mutableStateOf(prefs.getString("ebook_font_family", "SERIF") ?: "SERIF") }
     var lineHeightMultiplier by remember { mutableFloatStateOf(prefs.getFloat("ebook_line_height_mult", 1.42f)) }
@@ -1338,13 +1769,13 @@ fun EpubReaderScreen(
         "DUSK" -> Color(0xFF22272E)
         "OLED" -> Color(0xFF000000)
         "CUSTOM" -> parseSafeHexColor(customBgHex, Color(0xFF121E18))
-        else -> Color(0xFF0A140F) // Forest Dark
+        else -> Color(0xFF0A140F)
     }
     val textColor = when (readerTheme) {
         "SEPIA" -> Color(0xFF3B2F2F)
         "LIGHT" -> Color(0xFF1C2420)
         "DUSK" -> Color(0xFFD5DCE4)
-        "OLED" -> Color(0xFFB5BDC4) // Dimmed low-contrast text for Night Owl OLED
+        "OLED" -> Color(0xFFB5BDC4)
         "CUSTOM" -> parseSafeHexColor(customTextHex, Color(0xFFE6EFEA))
         else -> Color(0xFFE8F0EC)
     }
@@ -1399,7 +1830,6 @@ fun EpubReaderScreen(
             .background(bgColor)
             .let { if (!isEmbeddedPane) it.windowInsetsPadding(WindowInsets.systemBars) else it }
     ) {
-        // Minimalist Apple Books-style Top Bar
         Surface(
             color = bgColor,
             tonalElevation = 0.dp,
@@ -1454,7 +1884,6 @@ fun EpubReaderScreen(
                     IconButton(onClick = { showTocDialog = true }) {
                         Icon(Icons.Default.FormatListNumbered, contentDescription = "Chapters", tint = accentColor)
                     }
-                    // Sleek "Aa" Typography Button
                     TextButton(
                         onClick = { showReaderSettings = true },
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
@@ -1473,7 +1902,6 @@ fun EpubReaderScreen(
 
         HorizontalDivider(color = accentColor.copy(alpha = 0.14f))
 
-        // Main Interactive 3D Mesh Page-Curl Reading Canvas
         BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
@@ -1876,7 +2304,6 @@ fun EpubReaderScreen(
                 }
             }
 
-            // Dedicated Safe Bottom Status Footer
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1967,7 +2394,6 @@ fun EpubReaderScreen(
         )
     }
 
-    // MODULE A: The "Aa" Appearance ModalBottomSheet & 1-Tap Designer Presets
     if (showReaderSettings) {
         ModalBottomSheet(
             onDismissRequest = { showReaderSettings = false },
@@ -1997,7 +2423,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // 1. 1-Tap Designer Presets (Top Row)
                 Text(
                     text = "DESIGNER PRESETS",
                     style = MaterialTheme.typography.labelSmall,
@@ -2082,7 +2507,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // 2. Core Reading Themes + [PRO] Custom Theme Builder
                 Text(
                     text = "COLOR THEME",
                     style = MaterialTheme.typography.labelSmall,
@@ -2136,7 +2560,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // [PRO] Custom Theme Builder Toggle
                 OutlinedButton(
                     onClick = {
                         ProFeatureManager.runIfPro(ProFeature.CUSTOM_THEMES) {
@@ -2206,7 +2629,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // 3. Quick Font Size Stepper
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -2237,7 +2659,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // 4. Expandable "Customize Layout" Progressive Disclosure Drawer
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
                     shape = RoundedCornerShape(16.dp),
@@ -2267,7 +2688,6 @@ fun EpubReaderScreen(
                                 modifier = Modifier.padding(top = 16.dp),
                                 verticalArrangement = Arrangement.spacedBy(14.dp)
                             ) {
-                                // Font Family Selector
                                 Text("Typeface", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -2291,7 +2711,6 @@ fun EpubReaderScreen(
                                     }
                                 }
 
-                                // Text Alignment (Justified with Auto-Hyphenation vs. Left Aligned)
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -2315,7 +2734,6 @@ fun EpubReaderScreen(
                                     )
                                 }
 
-                                // Line Height Slider
                                 Column {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -2335,7 +2753,6 @@ fun EpubReaderScreen(
                                     )
                                 }
 
-                                // Paragraph Spacing Slider
                                 Column {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -2355,7 +2772,6 @@ fun EpubReaderScreen(
                                     )
                                 }
 
-                                // Margin Width Slider
                                 Column {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -2375,7 +2791,6 @@ fun EpubReaderScreen(
                                     )
                                 }
 
-                                // Respect Publisher Styles (CSS) Toggle
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -2438,7 +2853,6 @@ fun EpubReaderScreen(
         }
     }
 
-    // Paywall Upgrade Sheet (Triggered automatically when ProFeatureManager.isProUser is set to false)
     val lockedFeature = ProFeatureManager.activePaywallPromptFeature
     if (lockedFeature != null) {
         AlertDialog(
@@ -2573,41 +2987,17 @@ fun GridBookCard(
     Column(
         modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
-        Box(
+        TactileBookCover(
+            coverArt = coverArt,
+            fallbackIcon = Icons.Default.Book,
+            progress = progress,
+            badgeIcon = Icons.Default.Headphones,
+            cornerRadius = 12.dp,
+            shadowElevation = if (isSelected) 10.dp else 6.dp,
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            if (coverArt != null) {
-                Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            } else {
-                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(8.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(4.dp)
-            ) {
-                Icon(Icons.Default.Headphones, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-            }
-
-            if (progress > 0f) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .fillMaxWidth(progress)
-                        .height(4.dp)
-                        .background(MaterialTheme.colorScheme.tertiary)
-                )
-            }
-        }
+        )
 
         Spacer(Modifier.height(8.dp))
         Text(book.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -2649,29 +3039,14 @@ fun ListBookCard(
         shape = RoundedCornerShape(16.dp)
     ) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(64.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.primary),
-                contentAlignment = Alignment.Center
-            ) {
-                if (coverArt != null) {
-                    Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                } else {
-                    Icon(Icons.Default.Book, contentDescription = null, tint = Color.Black)
-                }
-
-                if (progress > 0f) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .fillMaxWidth(progress)
-                            .height(4.dp)
-                            .background(MaterialTheme.colorScheme.tertiary)
-                    )
-                }
-            }
+            TactileBookCover(
+                coverArt = coverArt,
+                fallbackIcon = Icons.Default.Book,
+                progress = progress,
+                cornerRadius = 10.dp,
+                shadowElevation = 5.dp,
+                modifier = Modifier.size(64.dp)
+            )
 
             Spacer(Modifier.width(16.dp))
 
@@ -2950,19 +3325,14 @@ fun NowPlayingScreen(
                         }
                     }
 
-                    Box(
-                        modifier = Modifier
-                            .size(240.dp)
-                            .clip(RoundedCornerShape(24.dp))
-                            .background(MaterialTheme.colorScheme.surfaceVariant),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (coverArt != null) {
-                            Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                        } else {
-                            Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(96.dp), tint = MaterialTheme.colorScheme.primary)
-                        }
-                    }
+                    TactileBookCover(
+                        coverArt = coverArt,
+                        fallbackIcon = Icons.Default.Headphones,
+                        progress = percentRead / 100f,
+                        cornerRadius = 20.dp,
+                        shadowElevation = 14.dp,
+                        modifier = Modifier.size(240.dp)
+                    )
 
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(book.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 2)
@@ -3066,19 +3436,14 @@ fun NowPlayingScreen(
                     )
                 }
 
-                Box(
-                    modifier = Modifier
-                        .size(if (isEmbeddedPane) 185.dp else 220.dp)
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (coverArt != null) {
-                        Image(bitmap = coverArt, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                    } else {
-                        Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(84.dp), tint = MaterialTheme.colorScheme.primary)
-                    }
-                }
+                TactileBookCover(
+                    coverArt = coverArt,
+                    fallbackIcon = Icons.Default.Headphones,
+                    progress = percentRead / 100f,
+                    cornerRadius = 20.dp,
+                    shadowElevation = 14.dp,
+                    modifier = Modifier.size(if (isEmbeddedPane) 185.dp else 220.dp)
+                )
 
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Total Book: ${formatTime(totalDur)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -28,7 +28,7 @@ enum class ProFeature(val title: String, val description: String) {
 /**
  * Centralized Paywall-Ready State Manager.
  * Currently unlocked (`true`) so you can test the full Pro experience.
- * Flip ` MutableStateFlow(false)` when ready to gate Pro features behind billing.
+ * Flip `MutableStateFlow(false)` when ready to gate Pro features behind billing.
  */
 object ProFeatureManager {
     private val _isProUser = MutableStateFlow(true)
@@ -124,6 +124,9 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     // Top-Center Shelf Toggle: "AUDIO" or "EBOOK"
     var shelfMode by mutableStateOf(repository.getPreferences().getString("shelf_mode", "AUDIO") ?: "AUDIO")
 
+    // Module B: Smart Shelf Filter ("ALL", "READING", "UNREAD", "FINISHED", "SERIES")
+    var smartShelfFilter by mutableStateOf(repository.getPreferences().getString("smart_shelf_filter", "ALL") ?: "ALL")
+
     // eBook Shelf & Reader State
     var ebooks by mutableStateOf<List<Ebook>>(repository.loadEbooksCache())
     var currentEbookId by mutableStateOf(repository.getLastEbookId() ?: "")
@@ -200,6 +203,30 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     private var coverSearchJob: Job? = null
     private var ebookLoadJob: Job? = null
     private var discoveryJob: Job? = null
+
+    fun updateSmartShelfFilter(filterKey: String) {
+        smartShelfFilter = filterKey
+        repository.getPreferences().edit().putString("smart_shelf_filter", filterKey).apply()
+    }
+
+    fun getAudiobookStatus(book: Audiobook): String {
+        val completedIds = repository.loadCompletedBookIds()
+        if (completedIds.contains(book.id)) return "FINISHED"
+        val pos = repository.getBookPosition(book.id)
+        val track = repository.getBookTrackIndex(book.id)
+        return if (pos > 0L || track > 0) "READING" else "UNREAD"
+    }
+
+    fun getEbookStatus(ebook: Ebook): String {
+        val total = repository.getEbookTotalChapters(ebook.id)
+        val curr = repository.getEbookChapterIndex(ebook.id)
+        val lastRead = repository.getEbookLastReadTime(ebook.id)
+        return when {
+            total > 1 && curr >= total - 1 -> "FINISHED"
+            curr > 0 || lastRead > 0L -> "READING"
+            else -> "UNREAD"
+        }
+    }
 
     fun applyReaderPreset(preset: ReaderPreset) {
         ebookPresetId = preset.id
