@@ -111,15 +111,17 @@ data class CoverSearchCandidate(
     val fullResUrl: String
 )
 
-// Phase 3: Book Discovery & Affiliate Monetization Models
+// Module E: Upgraded DiscoveryBook Model with Direct Free EPUB Download Support
 data class DiscoveryBook(
     val id: String,
     val title: String,
     val author: String,
     val description: String,
-    val formatLabel: String, // "Audiobook" or "eBook"
+    val formatLabel: String, // "FREE EPUB", "Audiobook", or "eBook & Audio"
     val coverBitmap: Bitmap?,
-    val directStoreUrl: String = ""
+    val directStoreUrl: String = "",
+    val epubDownloadUrl: String = "",
+    val pageOrDownloadInfo: String = ""
 )
 
 data class StoreLinkOption(
@@ -130,31 +132,13 @@ data class StoreLinkOption(
     val isLibraryOrFree: Boolean = false
 )
 
-/**
- * Centralized Affiliate Partner Configuration.
- * Paste your affiliate tracking IDs into the constants below as you join each program!
- * When an ID is blank, Fablewood opens the clean direct store search URL automatically.
- */
 object AffiliateConfig {
-    // 1. Amazon Associates / Audible Creator Tag (e.g., "fablewood-20")
     const val AMAZON_ASSOCIATE_TAG = ""
-
-    // 2. Libro.fm Affiliate / Referral Code (DRM-Free .m4b Audiobooks - via Awin / ShareASale)
     const val LIBRO_FM_AFFILIATE_ID = ""
-
-    // 3. Bookshop.org Affiliate ID (10% commission supporting local bookstores)
     const val BOOKSHOP_ORG_AFFILIATE_ID = ""
-
-    // 4. Barnes & Noble (NOOK eBooks & Audiobooks - via CJ Affiliate)
     const val BARNES_AND_NOBLE_AFFILIATE_ID = ""
-
-    // 5. Rakuten Kobo (eBooks & Audiobooks - via Rakuten Advertising)
     const val KOBO_AFFILIATE_ID = ""
-
-    // 6. Audiobooks.com (via Impact / CJ)
     const val AUDIOBOOKS_COM_AFFILIATE_ID = ""
-
-    // 7. Apple Books / iTunes Partner Token (Performance Partners)
     const val APPLE_BOOKS_AFFILIATE_TOKEN = ""
 
     fun buildPartnerLinksForBook(title: String, author: String): List<StoreLinkOption> {
@@ -165,46 +149,38 @@ object AffiliateConfig {
             cleanSearch.replace(' ', '+')
         }
 
-        // 1. Libby / OverDrive Local Library Deep-Link
         val libbyUrl = "https://libbyapp.com/search/query-$encodedQuery/page-1"
 
-        // 2. Libro.fm (DRM-Free M4B Audiobooks that import directly into Fablewood!)
         val libroBase = "https://libro.fm/search?q=$encodedQuery"
         val libroUrl = if (LIBRO_FM_AFFILIATE_ID.isNotBlank()) {
             "$libroBase&aff=$LIBRO_FM_AFFILIATE_ID"
         } else libroBase
 
-        // 3. Audible / Amazon Audiobooks & Kindle
         val amazonBase = "https://www.amazon.com/s?k=$encodedQuery&i=audible"
         val amazonUrl = if (AMAZON_ASSOCIATE_TAG.isNotBlank()) {
             "$amazonBase&tag=$AMAZON_ASSOCIATE_TAG"
         } else amazonBase
 
-        // 4. Barnes & Noble (NOOK eBooks & B&N Audiobooks)
         val bnBase = "https://www.barnesandnoble.com/s/$encodedQuery"
         val bnUrl = if (BARNES_AND_NOBLE_AFFILIATE_ID.isNotBlank()) {
             "$bnBase?aff=$BARNES_AND_NOBLE_AFFILIATE_ID"
         } else bnBase
 
-        // 5. Bookshop.org (Indie Bookstores & eBooks)
         val bookshopBase = "https://bookshop.org/beta-search?keywords=$encodedQuery"
         val bookshopUrl = if (BOOKSHOP_ORG_AFFILIATE_ID.isNotBlank()) {
             "$bookshopBase&a_aid=$BOOKSHOP_ORG_AFFILIATE_ID"
         } else bookshopBase
 
-        // 6. Rakuten Kobo (eBooks & Audiobooks)
         val koboBase = "https://www.kobo.com/us/en/search?query=$encodedQuery"
         val koboUrl = if (KOBO_AFFILIATE_ID.isNotBlank()) {
             "$koboBase&aff=$KOBO_AFFILIATE_ID"
         } else koboBase
 
-        // 7. Audiobooks.com
         val abComBase = "https://www.audiobooks.com/search/book/$encodedQuery"
         val abComUrl = if (AUDIOBOOKS_COM_AFFILIATE_ID.isNotBlank()) {
             "$abComBase?aff=$AUDIOBOOKS_COM_AFFILIATE_ID"
         } else abComBase
 
-        // 8. Free Public Domain Downloads (Standard Ebooks & LibriVox)
         val standardEbooksUrl = "https://standardebooks.org/ebooks?query=$encodedQuery"
         val librivoxUrl = "https://librivox.org/search?q=$encodedQuery&search_form=advanced"
 
@@ -270,7 +246,6 @@ object AffiliateConfig {
     }
 }
 
-// All 35 supported eBook, Comic, and Document extensions (available via manual Import)
 val ALL_SUPPORTED_EBOOK_EXTENSIONS = setOf(
     "epub", "pdf", "cbz", "cbr", "cb7", "cbt", "cba", "cbc",
     "mobi", "azw", "azw3", "kfx", "prc", "azw4", "tpz", "topaz",
@@ -1251,12 +1226,19 @@ class AudiobookRepository(context: Context) {
         for (cached in loadEbooksCache()) {
             if (cached.id in hiddenIds) continue
             val isSafImport = cached.uri.scheme == "content" && cached.uri.authority?.contains("media") != true
-            if (isSafImport) {
+            val isInternalDownload = cached.uri.scheme == "file" && cached.uri.path?.contains("downloaded_ebooks") == true
+            if (isSafImport || isInternalDownload) {
                 if (openUriParcelFileDescriptor(cached.uri)?.use { true } == true) {
                     val key = "${cached.title.lowercase(Locale.ROOT)}|${cached.format}"
                     discovered[key] = cached
                 }
             }
+        }
+
+        // Also scan internal downloaded_ebooks folder
+        val internalDownloadsDir = File(appContext.filesDir, "downloaded_ebooks")
+        if (internalDownloadsDir.exists() && internalDownloadsDir.isDirectory) {
+            scanDirectoryRecursiveForEbooks(internalDownloadsDir, listOf("Books"), 0, discovered, hiddenIds)
         }
 
         val rootDir = Environment.getExternalStorageDirectory()
@@ -4341,13 +4323,102 @@ class AudiobookRepository(context: Context) {
         null
     }
 
-    // Phase 3: Live Book Discovery Search Engine (Apple Audiobooks + Apple Books + Google Books)
+    // Module E: Live Book Discovery Engine (Gutendex Free Classics + Apple Audiobooks + Google Books)
     suspend fun searchDiscoveryBooksOnline(rawQuery: String): List<DiscoveryBook> = withContext(Dispatchers.IO) {
-        val cleanQuery = cleanAudiobookSearchQuery(rawQuery).ifBlank { "bestselling fantasy sci-fi" }
+        val trimmed = rawQuery.trim()
+        val isFreeClassicsFeed = trimmed.equals("FREE_CLASSICS", ignoreCase = true) ||
+            trimmed.equals("Free Classics", ignoreCase = true)
+
+        val cleanQuery = if (isFreeClassicsFeed) "" else cleanAudiobookSearchQuery(trimmed).ifBlank { "bestselling fiction" }
         val resultsList = mutableListOf<DiscoveryBook>()
         val seenKeys = mutableSetOf<String>()
 
-        // 1. Apple Books Audiobook Catalog
+        // 1. Gutendex Public Domain Classics Catalog (1-Tap Free Downloadable EPUBs!)
+        try {
+            val gutendexUrlStr = if (isFreeClassicsFeed) {
+                "https://gutendex.com/books/?sort=popular"
+            } else {
+                val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+                "https://gutendex.com/books/?search=$encoded"
+            }
+            val jsonText = readHttpText(URL(gutendexUrlStr))
+            if (jsonText != null) {
+                val results = JSONObject(jsonText).optJSONArray("results")
+                if (results != null) {
+                    val maxGutendex = if (isFreeClassicsFeed) 10 else 4
+                    for (i in 0 until results.length()) {
+                        if (resultsList.size >= maxGutendex) break
+                        val item = results.getJSONObject(i)
+                        val rawTitle = item.optString("title", "").substringBefore(';').trim()
+                        if (rawTitle.isBlank()) continue
+
+                        val authorsArr = item.optJSONArray("authors")
+                        val rawAuthor = if (authorsArr != null && authorsArr.length() > 0) {
+                            authorsArr.getJSONObject(0).optString("name", "Classic Author")
+                        } else "Classic Author"
+                        // Convert "Austen, Jane" -> "Jane Austen"
+                        val formattedAuthor = if (rawAuthor.contains(",")) {
+                            val parts = rawAuthor.split(",").map { it.trim() }
+                            if (parts.size >= 2) "${parts[1]} ${parts[0]}" else rawAuthor
+                        } else rawAuthor
+
+                        val formats = item.optJSONObject("formats") ?: continue
+                        val epubUrl = formats.optString("application/epub+zip", "")
+                            .ifBlank { formats.optString("application/epub", "") }
+                        if (epubUrl.isBlank()) continue
+
+                        val key = "${rawTitle.lowercase(Locale.ROOT)}|${formattedAuthor.lowercase(Locale.ROOT)}"
+                        if (!seenKeys.add(key)) continue
+
+                        val coverUrl = formats.optString("image/jpeg", "").replace("http://", "https://")
+                        val bmp = if (coverUrl.isNotBlank()) downloadBitmapFromUrl(coverUrl, 240, 240) else null
+
+                        val summariesArr = item.optJSONArray("summaries")
+                        val summaryText = if (summariesArr != null && summariesArr.length() > 0) {
+                            summariesArr.optString(0, "")
+                        } else {
+                            val subjectsArr = item.optJSONArray("subjects")
+                            val subjectsList = mutableListOf<String>()
+                            if (subjectsArr != null) {
+                                for (s in 0 until minOf(3, subjectsArr.length())) {
+                                    subjectsList.add(subjectsArr.optString(s, "").substringBefore(" --"))
+                                }
+                            }
+                            if (subjectsList.isNotEmpty()) {
+                                "Public domain classic by $formattedAuthor • Themes: ${subjectsList.distinct().joinToString(", ")}."
+                            } else {
+                                "Complete unabridged public-domain classic eBook by $formattedAuthor. Ready for instant 1-tap EPUB download."
+                            }
+                        }
+
+                        val dlCount = item.optInt("download_count", 0)
+                        val dlInfo = if (dlCount > 0) "Free Public Domain EPUB • ${String.format(Locale.US, "%,d", dlCount)} downloads" else "Free Public Domain EPUB"
+
+                        resultsList.add(
+                            DiscoveryBook(
+                                id = "gutendex_${item.optInt("id", i)}",
+                                title = rawTitle,
+                                author = formattedAuthor,
+                                description = summaryText,
+                                formatLabel = "FREE EPUB",
+                                coverBitmap = bmp,
+                                directStoreUrl = "https://www.gutenberg.org/ebooks/${item.optInt("id", 0)}",
+                                epubDownloadUrl = epubUrl.replace("http://", "https://"),
+                                pageOrDownloadInfo = dlInfo
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Gutendex free classics search warning", t)
+        }
+
+        if (isFreeClassicsFeed && resultsList.isNotEmpty()) {
+            return@withContext resultsList
+        }
+
+        // 2. Apple Books Audiobook Catalog
         try {
             val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
             val itunesUrl = URL("https://itunes.apple.com/search?term=$encoded&media=audiobook&entity=audiobook&limit=6")
@@ -4356,7 +4427,7 @@ class AudiobookRepository(context: Context) {
                 val results = JSONObject(jsonText).optJSONArray("results")
                 if (results != null) {
                     for (i in 0 until results.length()) {
-                        if (resultsList.size >= 10) break
+                        if (resultsList.size >= 12) break
                         val item = results.getJSONObject(i)
                         val title = item.optString("collectionName", "").trim()
                         val author = item.optString("artistName", "Unknown Author").trim()
@@ -4369,6 +4440,7 @@ class AudiobookRepository(context: Context) {
                         val art100 = item.optString("artworkUrl100", "")
                         val previewUrl = if (art100.isNotBlank()) art100.replace("100x100bb", "300x300bb") else ""
                         val bmp = if (previewUrl.isNotBlank()) downloadBitmapFromUrl(previewUrl, 220, 220) else null
+                        val genre = item.optString("primaryGenreName", "Audiobook")
 
                         resultsList.add(
                             DiscoveryBook(
@@ -4378,7 +4450,9 @@ class AudiobookRepository(context: Context) {
                                 description = rawDesc.ifBlank { "Unabridged audiobook edition by $author." },
                                 formatLabel = "Audiobook",
                                 coverBitmap = bmp,
-                                directStoreUrl = item.optString("collectionViewUrl", "")
+                                directStoreUrl = item.optString("collectionViewUrl", ""),
+                                epubDownloadUrl = "",
+                                pageOrDownloadInfo = "$genre • Unabridged Audio"
                             )
                         )
                     }
@@ -4388,8 +4462,8 @@ class AudiobookRepository(context: Context) {
             Log.w(TAG, "Discovery audiobook search failed for '$cleanQuery'", t)
         }
 
-        // 2. Google Books Catalog
-        if (resultsList.size < 10) {
+        // 3. Google Books Catalog
+        if (resultsList.size < 12) {
             try {
                 val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
                 val gbooksUrl = URL("https://www.googleapis.com/books/v1/volumes?q=$encoded&maxResults=6")
@@ -4398,7 +4472,7 @@ class AudiobookRepository(context: Context) {
                     val items = JSONObject(jsonText).optJSONArray("items")
                     if (items != null) {
                         for (i in 0 until items.length()) {
-                            if (resultsList.size >= 10) break
+                            if (resultsList.size >= 12) break
                             val itemObj = items.getJSONObject(i)
                             val volInfo = itemObj.optJSONObject("volumeInfo") ?: continue
                             val title = volInfo.optString("title", "").trim()
@@ -4416,6 +4490,8 @@ class AudiobookRepository(context: Context) {
                             val thumb = imageLinks?.optString("thumbnail", imageLinks.optString("smallThumbnail", ""))
                                 ?.replace("http://", "https://") ?: ""
                             val bmp = if (thumb.isNotBlank()) downloadBitmapFromUrl(thumb, 220, 220) else null
+                            val pageCount = volInfo.optInt("pageCount", 0)
+                            val pageInfo = if (pageCount > 0) "$pageCount pages • eBook & Print" else "eBook & Print Edition"
 
                             resultsList.add(
                                 DiscoveryBook(
@@ -4425,7 +4501,9 @@ class AudiobookRepository(context: Context) {
                                     description = desc.ifBlank { "eBook & print edition by $author." },
                                     formatLabel = "eBook & Audio",
                                     coverBitmap = bmp,
-                                    directStoreUrl = volInfo.optString("infoLink", "")
+                                    directStoreUrl = volInfo.optString("infoLink", ""),
+                                    epubDownloadUrl = "",
+                                    pageOrDownloadInfo = pageInfo
                                 )
                             )
                         }
@@ -4437,6 +4515,91 @@ class AudiobookRepository(context: Context) {
         }
 
         resultsList
+    }
+
+    // Module E: 1-Tap Public Domain EPUB Downloader & Instant Shelf Importer
+    suspend fun downloadPublicDomainEpub(book: DiscoveryBook): Ebook? = withContext(Dispatchers.IO) {
+        val rawUrl = book.epubDownloadUrl.trim()
+        if (rawUrl.isEmpty()) return@withContext null
+
+        try {
+            val destDir = File(appContext.filesDir, "downloaded_ebooks")
+            if (!destDir.exists()) destDir.mkdirs()
+
+            val safeTitle = book.title.replace(Regex("[^a-zA-Z0-9 _-]"), "").trim().take(48).ifBlank { "Classic_Book" }
+            val safeAuthor = book.author.replace(Regex("[^a-zA-Z0-9 _-]"), "").trim().take(32).ifBlank { "Author" }
+            val destFile = File(destDir, "$safeTitle - $safeAuthor.epub")
+
+            // Follow up to 5 HTTP/HTTPS redirects (Project Gutenberg redirects to mirror cache)
+            var currentUrl = rawUrl
+            var redirectCount = 0
+            var downloaded = false
+
+            while (redirectCount < 5 && !downloaded) {
+                val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 10000
+                    readTimeout = 15000
+                    instanceFollowRedirects = true
+                    setRequestProperty("User-Agent", "FablewoodAudiobooks/1.7")
+                }
+                try {
+                    val code = conn.responseCode
+                    if (code in 300..399) {
+                        val loc = conn.getHeaderField("Location") ?: break
+                        currentUrl = if (loc.startsWith("http")) loc else URL(URL(currentUrl), loc).toString()
+                        redirectCount++
+                    } else if (code in 200..299) {
+                        conn.inputStream.use { input ->
+                            FileOutputStream(destFile).use { output ->
+                                val buf = ByteArray(16384)
+                                while (true) {
+                                    val r = input.read(buf)
+                                    if (r <= 0) break
+                                    output.write(buf, 0, r)
+                                }
+                                output.fd.sync()
+                            }
+                        }
+                        downloaded = destFile.exists() && destFile.length() > 1024L
+                        break
+                    } else {
+                        break
+                    }
+                } finally {
+                    conn.disconnect()
+                }
+            }
+
+            if (!downloaded) return@withContext null
+
+            val fileUri = Uri.fromFile(destFile)
+            val uriStr = fileUri.toString()
+
+            // Save cover art from DiscoveryBook if present
+            if (book.coverBitmap != null) {
+                saveBitmapToCache(uriStr, book.coverBitmap)
+                CoverMemoryCache.cache.put(uriStr, book.coverBitmap)
+            }
+
+            val newEbook = Ebook(
+                id = uriStr,
+                title = book.title,
+                author = book.author,
+                uri = fileUri,
+                format = "EPUB"
+            )
+
+            // Extract metadata/cover fallback if needed and register in ebooks cache
+            extractEpubMetadataAndCover(fileUri, uriStr, book.title, book.author)
+            val existing = loadEbooksCache().filterNot { it.id == uriStr }
+            val updated = listOf(newEbook) + existing
+            saveEbooksCache(updated)
+
+            newEbook
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed downloading public domain EPUB from $rawUrl", t)
+            null
+        }
     }
 
     suspend fun searchCoverCandidatesOnline(rawQuery: String): List<CoverSearchCandidate> = withContext(Dispatchers.IO) {
@@ -4629,7 +4792,7 @@ class AudiobookRepository(context: Context) {
         val conn = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 6000
             readTimeout = 6000
-            setRequestProperty("User-Agent", "FablewoodAudiobooks/1.6")
+            setRequestProperty("User-Agent", "FablewoodAudiobooks/1.7")
         }
         return try {
             if (conn.responseCode in 200..299) {
@@ -4646,7 +4809,7 @@ class AudiobookRepository(context: Context) {
                 connectTimeout = 6000
                 readTimeout = 6000
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "FablewoodAudiobooks/1.6")
+                setRequestProperty("User-Agent", "FablewoodAudiobooks/1.7")
             }
             try {
                 if (conn.responseCode in 200..299) {

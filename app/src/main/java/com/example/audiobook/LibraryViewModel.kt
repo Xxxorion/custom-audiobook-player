@@ -148,10 +148,11 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var ebookCustomBgHex by mutableStateOf(repository.getPreferences().getString("ebook_custom_bg_hex", "#121E18") ?: "#121E18")
     var ebookCustomTextHex by mutableStateOf(repository.getPreferences().getString("ebook_custom_text_hex", "#E6EFEA") ?: "#E6EFEA")
 
-    // Phase 3: Book Discovery & Affiliate Hub State
+    // Module E: Book Discovery, Free Classics Feed & 1-Tap EPUB Downloader State
     var discoveryQuery by mutableStateOf("")
     var discoveryBooks by mutableStateOf<List<DiscoveryBook>>(emptyList())
     var isSearchingDiscovery by mutableStateOf(false)
+    var downloadingBookId by mutableStateOf<String?>(null)
 
     var isPlaying by mutableStateOf(false)
     var currentTrackIndex by mutableIntStateOf(0)
@@ -326,22 +327,30 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     }
 
     fun searchDiscoveryCatalog(query: String) {
-        val effectiveQuery = query.trim().ifBlank {
-            val activeAuthor = books.find { it.id == currentBookId }?.author
-                ?: ebooks.find { it.id == currentEbookId }?.author
-                ?: ""
-            if (activeAuthor.isNotBlank() && !activeAuthor.equals("Unknown Author", ignoreCase = true)) {
-                activeAuthor
-            } else {
-                "New York Times Bestseller Fiction"
-            }
-        }
+        val effectiveQuery = query.trim().ifBlank { "FREE_CLASSICS" }
         discoveryQuery = effectiveQuery
         discoveryJob?.cancel()
         isSearchingDiscovery = true
         discoveryJob = viewModelScope.launch {
             discoveryBooks = repository.searchDiscoveryBooksOnline(effectiveQuery)
             isSearchingDiscovery = false
+        }
+    }
+
+    // Module E: 1-Tap Free Public Domain EPUB Download & Auto-Open
+    fun downloadAndOpenFreeEpub(book: DiscoveryBook, openFullScreen: Boolean, onResult: (Ebook?) -> Unit = {}) {
+        if (downloadingBookId != null) return
+        downloadingBookId = book.id
+        viewModelScope.launch {
+            val downloadedEbook = repository.downloadPublicDomainEpub(book)
+            downloadingBookId = null
+            if (downloadedEbook != null) {
+                ebooks = repository.loadEbooksCache()
+                updateShelfMode("EBOOK")
+                selectEbook(downloadedEbook, openFullScreen = openFullScreen)
+                coverRevision++
+            }
+            onResult(downloadedEbook)
         }
     }
 

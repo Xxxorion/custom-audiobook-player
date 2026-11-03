@@ -24,6 +24,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -462,8 +463,10 @@ fun FablewoodAudiobookApp(
     var liveCoverSearchQuery by remember { mutableStateOf("") }
     var showAllFilesPermissionPrompt by remember { mutableStateOf(false) }
 
+    // Module E: Unified Discover Screen & Apple Books-Style Book Detail Sheet State
     var showDiscoveryDialog by remember { mutableStateOf(false) }
     var discoverySearchInput by remember { mutableStateOf("") }
+    var selectedDiscoveryBookForDetail by remember { mutableStateOf<DiscoveryBook?>(null) }
     var showStoreLinksDialog by remember { mutableStateOf(false) }
     var storeLinksBookTitle by remember { mutableStateOf("") }
     var storeLinksBookAuthor by remember { mutableStateOf("") }
@@ -501,9 +504,9 @@ fun FablewoodAudiobookApp(
 
     fun openDiscoveryWithQuery(initialQuery: String = "") {
         val clean = initialQuery.trim()
-        discoverySearchInput = clean
+        discoverySearchInput = if (clean.equals("FREE_CLASSICS", ignoreCase = true)) "" else clean
         showDiscoveryDialog = true
-        viewModel.searchDiscoveryCatalog(clean)
+        viewModel.searchDiscoveryCatalog(clean.ifBlank { "FREE_CLASSICS" })
     }
 
     fun openStoreSelectorForBook(title: String, author: String) {
@@ -979,12 +982,12 @@ fun FablewoodAudiobookApp(
 
                 NavigationDrawerItem(
                     icon = { Icon(Icons.Default.Explore, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                    label = { Text("Discover & Library Hub", fontWeight = FontWeight.SemiBold) },
+                    label = { Text("Discover & Free Classics", fontWeight = FontWeight.SemiBold) },
                     selected = false,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
-                        openDiscoveryWithQuery("")
+                        openDiscoveryWithQuery("FREE_CLASSICS")
                     }
                 )
                 NavigationDrawerItem(
@@ -1139,11 +1142,19 @@ fun FablewoodAudiobookApp(
                                 )
                             },
                             navigationIcon = {
-                                IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
-                                    Icon(Icons.Default.Menu, contentDescription = "Menu")
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
+                                        Icon(Icons.Default.Menu, contentDescription = "Menu")
+                                    }
+                                    IconButton(onClick = { openDiscoveryWithQuery("FREE_CLASSICS") }) {
+                                        Icon(
+                                            Icons.Default.Explore,
+                                            contentDescription = "Discover & Free Classics",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
                             },
-                            // Identical 3-icon action bar on both Audio and eBooks so the center pill never gets squished!
                             actions = {
                                 IconButton(onClick = {
                                     viewModel.isSearching = !viewModel.isSearching
@@ -1437,123 +1448,168 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // Phase 3: In-App Book Discovery & Library Hub Dialog
+    // Module E: Frictionless "Discover" ModalBottomSheet (Instant Free Classics + Affiliate Catalog)
     if (showDiscoveryDialog) {
-        AlertDialog(
+        ModalBottomSheet(
             onDismissRequest = { showDiscoveryDialog = false },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Explore, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Discover Books & Library", fontWeight = FontWeight.Bold)
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 420.dp, max = 680.dp)
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Explore, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Discover Books & Classics", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    }
+                    TextButton(onClick = { showDiscoveryDialog = false }) {
+                        Text("Done", fontWeight = FontWeight.Bold)
+                    }
                 }
-            },
-            text = {
-                Column(
+
+                OutlinedTextField(
+                    value = discoverySearchInput,
+                    onValueChange = { discoverySearchInput = it },
+                    placeholder = { Text("Search classics, authors, or bestsellers...") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    trailingIcon = {
+                        IconButton(onClick = { viewModel.searchDiscoveryCatalog(discoverySearchInput) }) {
+                            Icon(Icons.Default.Search, contentDescription = "Search", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Curated 1-Tap Category Chips
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 480.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedTextField(
-                        value = discoverySearchInput,
-                        onValueChange = { discoverySearchInput = it },
-                        label = { Text("Search author, title, or genre") },
-                        singleLine = true,
-                        trailingIcon = {
-                            IconButton(onClick = { viewModel.searchDiscoveryCatalog(discoverySearchInput) }) {
-                                Icon(Icons.Default.Search, contentDescription = "Search", tint = MaterialTheme.colorScheme.primary)
-                            }
+                    val isFreeClassicsActive = viewModel.discoveryQuery.equals("FREE_CLASSICS", ignoreCase = true)
+                    FilterChip(
+                        selected = isFreeClassicsActive,
+                        onClick = {
+                            discoverySearchInput = ""
+                            viewModel.searchDiscoveryCatalog("FREE_CLASSICS")
                         },
-                        modifier = Modifier.fillMaxWidth()
+                        leadingIcon = {
+                            Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                        },
+                        label = { Text("Free Classics (1-Tap EPUB)", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
                     )
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        val activeAuthor = activeBook?.author?.takeIf { !it.equals("Unknown Author", true) }
-                            ?: activeEbook?.author?.takeIf { !it.equals("Unknown Author", true) }
-                        if (activeAuthor != null) {
-                            AssistChip(
-                                onClick = {
-                                    discoverySearchInput = activeAuthor
-                                    viewModel.searchDiscoveryCatalog(activeAuthor)
-                                },
-                                label = { Text(activeAuthor, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                        AssistChip(
+                    val activeAuthor = activeBook?.author?.takeIf { !it.equals("Unknown Author", true) }
+                        ?: activeEbook?.author?.takeIf { !it.equals("Unknown Author", true) }
+                    if (activeAuthor != null) {
+                        FilterChip(
+                            selected = viewModel.discoveryQuery.equals(activeAuthor, ignoreCase = true),
                             onClick = {
-                                discoverySearchInput = "Sci-Fi & Fantasy Bestsellers"
-                                viewModel.searchDiscoveryCatalog(discoverySearchInput)
+                                discoverySearchInput = activeAuthor
+                                viewModel.searchDiscoveryCatalog(activeAuthor)
                             },
-                            label = { Text("Sci-Fi/Fantasy", maxLines = 1) },
-                            modifier = Modifier.weight(1f)
+                            label = { Text(activeAuthor, fontSize = 12.sp, maxLines = 1) }
                         )
                     }
 
-                    HorizontalDivider()
+                    FilterChip(
+                        selected = viewModel.discoveryQuery.contains("Sci-Fi", ignoreCase = true),
+                        onClick = {
+                            discoverySearchInput = "Sci-Fi & Fantasy"
+                            viewModel.searchDiscoveryCatalog("Sci-Fi & Fantasy")
+                        },
+                        label = { Text("Sci-Fi & Fantasy", fontSize = 12.sp) }
+                    )
 
-                    if (viewModel.isSearchingDiscovery) {
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                                Spacer(Modifier.height(10.dp))
-                                Text(
-                                    "Searching Audiobooks & eBooks...",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                    FilterChip(
+                        selected = viewModel.discoveryQuery.contains("Mystery", ignoreCase = true),
+                        onClick = {
+                            discoverySearchInput = "Mystery & Thriller"
+                            viewModel.searchDiscoveryCatalog("Mystery & Thriller")
+                        },
+                        label = { Text("Mystery & Thriller", fontSize = 12.sp) }
+                    )
+                }
+
+                HorizontalDivider()
+
+                if (viewModel.isSearchingDiscovery) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                "Loading Free Classics & Store Catalog...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-                    } else if (viewModel.discoveryBooks.isEmpty()) {
+                    }
+                } else if (viewModel.discoveryBooks.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Text(
-                            text = "Search any book title, author, or series above to check local library availability or compare audiobook & eBook stores.",
+                            text = "Tap 'Free Classics' above to browse public-domain EPUBs ready for instant 1-tap download, or search any author or title.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp)
+                            textAlign = TextAlign.Center
                         )
-                    } else {
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
                         for (item in viewModel.discoveryBooks) {
+                            val isFreeEpub = item.epubDownloadUrl.isNotBlank()
+                            val isDownloadingThis = viewModel.downloadingBookId == item.id
+
                             Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectedDiscoveryBookForDetail = item },
+                                shape = RoundedCornerShape(16.dp),
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                             ) {
-                                Column(modifier = Modifier.padding(12.dp)) {
+                                Column(modifier = Modifier.padding(14.dp)) {
                                     Row(verticalAlignment = Alignment.Top) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(72.dp)
-                                                .clip(RoundedCornerShape(10.dp))
-                                                .background(MaterialTheme.colorScheme.surface),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            if (item.coverBitmap != null) {
-                                                Image(
-                                                    bitmap = item.coverBitmap.asImageBitmap(),
-                                                    contentDescription = item.title,
-                                                    contentScale = ContentScale.Crop,
-                                                    modifier = Modifier.fillMaxSize()
-                                                )
-                                            } else {
-                                                Icon(Icons.Default.MenuBook, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                            }
-                                        }
+                                        TactileBookCover(
+                                            coverArt = item.coverBitmap?.asImageBitmap(),
+                                            fallbackIcon = Icons.Default.MenuBook,
+                                            progress = 0f,
+                                            badgeText = item.formatLabel,
+                                            cornerRadius = 10.dp,
+                                            shadowElevation = 6.dp,
+                                            modifier = Modifier.size(80.dp)
+                                        )
 
-                                        Spacer(Modifier.width(12.dp))
+                                        Spacer(Modifier.width(14.dp))
 
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
                                                 text = item.title,
                                                 fontWeight = FontWeight.Bold,
+                                                fontSize = 15.sp,
                                                 maxLines = 2,
                                                 overflow = TextOverflow.Ellipsis
                                             )
@@ -1561,15 +1617,24 @@ fun FablewoodAudiobookApp(
                                                 text = item.author,
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = MaterialTheme.colorScheme.primary,
+                                                fontWeight = FontWeight.SemiBold,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
+                                            if (item.pageOrDownloadInfo.isNotBlank()) {
+                                                Text(
+                                                    text = item.pageOrDownloadInfo,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1
+                                                )
+                                            }
                                             Spacer(Modifier.height(4.dp))
                                             Text(
                                                 text = item.description,
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                maxLines = 3,
+                                                maxLines = 2,
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                         }
@@ -1581,27 +1646,56 @@ fun FablewoodAudiobookApp(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        OutlinedButton(
-                                            onClick = {
-                                                val libbyLink = AffiliateConfig.buildPartnerLinksForBook(item.title, item.author).first()
-                                                openExternalUrl(libbyLink.url)
-                                            },
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Icon(Icons.Default.AccountBalance, contentDescription = null, modifier = Modifier.size(16.dp))
-                                            Spacer(Modifier.width(5.dp))
-                                            Text("Libby (Free)", fontSize = 12.sp, maxLines = 1)
+                                        if (isFreeEpub) {
+                                            Button(
+                                                onClick = {
+                                                    viewModel.downloadAndOpenFreeEpub(item, openFullScreen = true) { ebook ->
+                                                        if (ebook != null) {
+                                                            showDiscoveryDialog = false
+                                                            Toast.makeText(context, "Downloaded '${ebook.title}'!", Toast.LENGTH_SHORT).show()
+                                                        } else {
+                                                            Toast.makeText(context, "Download failed; try again.", Toast.LENGTH_SHORT).show()
+                                                        }
+                                                    }
+                                                },
+                                                enabled = viewModel.downloadingBookId == null,
+                                                modifier = Modifier.weight(1.3f)
+                                            ) {
+                                                if (isDownloadingThis) {
+                                                    CircularProgressIndicator(
+                                                        color = MaterialTheme.colorScheme.onPrimary,
+                                                        strokeWidth = 2.dp,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Spacer(Modifier.width(8.dp))
+                                                    Text("Downloading...", fontSize = 12.sp, maxLines = 1)
+                                                } else {
+                                                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    Spacer(Modifier.width(6.dp))
+                                                    Text("Download Free EPUB", fontSize = 12.sp, maxLines = 1)
+                                                }
+                                            }
+                                        } else {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    val libbyLink = AffiliateConfig.buildPartnerLinksForBook(item.title, item.author).first()
+                                                    openExternalUrl(libbyLink.url)
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(Icons.Default.AccountBalance, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(5.dp))
+                                                Text("Libby (Free)", fontSize = 12.sp, maxLines = 1)
+                                            }
                                         }
 
-                                        Button(
-                                            onClick = {
-                                                openStoreSelectorForBook(item.title, item.author)
-                                            },
+                                        OutlinedButton(
+                                            onClick = { selectedDiscoveryBookForDetail = item },
                                             modifier = Modifier.weight(1f)
                                         ) {
-                                            Icon(Icons.Default.ShoppingBag, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(16.dp))
                                             Spacer(Modifier.width(5.dp))
-                                            Text("Get / Buy", fontSize = 12.sp, maxLines = 1)
+                                            Text("Details & Stores", fontSize = 12.sp, maxLines = 1)
                                         }
                                     }
                                 }
@@ -1609,16 +1703,203 @@ fun FablewoodAudiobookApp(
                         }
                     }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { showDiscoveryDialog = false }) {
-                    Text(stringResource(R.string.close))
-                }
             }
-        )
+        }
     }
 
-    // Phase 3: Multi-Retailer Affiliate & Library Store Selector Sheet
+    // Module E: Apple Books-Style Book Detail ModalBottomSheet
+    if (selectedDiscoveryBookForDetail != null) {
+        val book = selectedDiscoveryBookForDetail!!
+        val isFreeEpub = book.epubDownloadUrl.isNotBlank()
+        val isDownloadingThis = viewModel.downloadingBookId == book.id
+        val partnerLinks = remember(book.title, book.author) {
+            AffiliateConfig.buildPartnerLinksForBook(book.title, book.author)
+        }
+        val amazonLink = partnerLinks.firstOrNull { it.storeName.contains("Amazon", true) }
+        val bnLink = partnerLinks.firstOrNull { it.storeName.contains("Barnes", true) }
+        val libroLink = partnerLinks.firstOrNull { it.storeName.contains("Libro", true) }
+        val libbyLink = partnerLinks.firstOrNull { it.storeName.contains("Libby", true) }
+
+        ModalBottomSheet(
+            onDismissRequest = { selectedDiscoveryBookForDetail = null },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 22.dp)
+                    .padding(bottom = 36.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                TactileBookCover(
+                    coverArt = book.coverBitmap?.asImageBitmap(),
+                    fallbackIcon = Icons.Default.MenuBook,
+                    progress = 0f,
+                    badgeText = book.formatLabel,
+                    cornerRadius = 16.dp,
+                    shadowElevation = 14.dp,
+                    modifier = Modifier.size(165.dp)
+                )
+
+                Spacer(Modifier.height(16.dp))
+
+                Text(
+                    text = book.title,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = book.author,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center
+                )
+                if (book.pageOrDownloadInfo.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = book.pageOrDownloadInfo,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(Modifier.height(18.dp))
+
+                // Primary Action Buttons
+                if (isFreeEpub) {
+                    Button(
+                        onClick = {
+                            viewModel.downloadAndOpenFreeEpub(book, openFullScreen = true) { ebook ->
+                                if (ebook != null) {
+                                    selectedDiscoveryBookForDetail = null
+                                    showDiscoveryDialog = false
+                                    Toast.makeText(context, "Added '${ebook.title}' to your eBooks shelf!", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "Download failed; please try again.", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        enabled = viewModel.downloadingBookId == null,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth().height(52.dp)
+                    ) {
+                        if (isDownloadingThis) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 2.5.dp,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text("Downloading EPUB into Library...", fontWeight = FontWeight.Bold)
+                        } else {
+                            Icon(Icons.Default.Download, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Download Free EPUB (1-Tap Read)", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (amazonLink != null) {
+                        Button(
+                            onClick = { openExternalUrl(amazonLink.url) },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f).height(46.dp)
+                        ) {
+                            Icon(Icons.Default.ShoppingBag, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Buy on Amazon", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        }
+                    }
+                    if (bnLink != null) {
+                        OutlinedButton(
+                            onClick = { openExternalUrl(bnLink.url) },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f).height(46.dp)
+                        ) {
+                            Icon(Icons.Default.MenuBook, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Barnes & Noble", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (libroLink != null) {
+                        OutlinedButton(
+                            onClick = { openExternalUrl(libroLink.url) },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("Libro.fm (M4B)", fontSize = 12.sp, maxLines = 1)
+                        }
+                    }
+                    if (libbyLink != null) {
+                        OutlinedButton(
+                            onClick = { openExternalUrl(libbyLink.url) },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.AccountBalance, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("Borrow on Libby", fontSize = 12.sp, maxLines = 1)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(14.dp))
+
+                Text(
+                    text = "SYNOPSIS",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.align(Alignment.Start)
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = book.description,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    lineHeight = 22.sp,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(Modifier.height(16.dp))
+
+                TextButton(
+                    onClick = {
+                        val title = book.title
+                        val author = book.author
+                        selectedDiscoveryBookForDetail = null
+                        openStoreSelectorForBook(title, author)
+                    }
+                ) {
+                    Text("View All 9 Store & Library Options →", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+
+    // Multi-Retailer Affiliate & Library Store Selector Sheet
     if (showStoreLinksDialog && storeLinksBookTitle.isNotEmpty()) {
         val partnerLinks = remember(storeLinksBookTitle, storeLinksBookAuthor) {
             AffiliateConfig.buildPartnerLinksForBook(storeLinksBookTitle, storeLinksBookAuthor)
@@ -2126,7 +2407,6 @@ fun FablewoodAudiobookApp(
         )
     }
 
-    // Settings Dialog now houses all Library & Cover Management tools so the Side Drawer stays ultra-clean!
     if (showSettingsDialog) {
         AlertDialog(
             onDismissRequest = { showSettingsDialog = false },
