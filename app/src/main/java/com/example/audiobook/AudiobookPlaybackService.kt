@@ -19,6 +19,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
+import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 
@@ -100,7 +101,6 @@ class AudiobookPlaybackService : MediaSessionService() {
 
         exoPlayer = player
 
-        // ForwardingPlayer exposes 15s Rewind & Fast-Forward to system media notifications, Bluetooth & lock screen
         val forwardingPlayer = object : ForwardingPlayer(player) {
             override fun getAvailableCommands(): Player.Commands {
                 return super.getAvailableCommands()
@@ -140,9 +140,11 @@ class AudiobookPlaybackService : MediaSessionService() {
             .setSessionCommand(SessionCommand(ACTION_NOTIFICATION_FORWARD, Bundle.EMPTY))
             .build()
 
+        val customButtonsList = ImmutableList.of(rewindButton, forwardButton)
+
         mediaSession = MediaSession.Builder(this, forwardingPlayer)
             .setSessionActivity(sessionActivityPendingIntent)
-            .setCustomLayout(listOf(rewindButton, forwardButton))
+            .setCustomLayout(customButtonsList)
             .setCallback(object : MediaSession.Callback {
                 override fun onConnect(
                     session: MediaSession,
@@ -165,7 +167,7 @@ class AudiobookPlaybackService : MediaSessionService() {
                     return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                         .setAvailableSessionCommands(sessionCommands)
                         .setAvailablePlayerCommands(playerCommands)
-                        .setCustomLayout(listOf(rewindButton, forwardButton))
+                        .setCustomLayout(customButtonsList)
                         .build()
                 }
 
