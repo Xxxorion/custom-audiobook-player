@@ -24,6 +24,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.text.Layout
 import android.text.Spannable
 import android.text.SpannableString
@@ -67,6 +68,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -85,6 +88,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -121,7 +125,66 @@ fun formatTime(ms: Long): String {
     }
 }
 
-// Module F: Reading Insights & Daily Streak Persistence Engine
+// Symmetrical Rewind / Fast-Forward Circular Arrow Icon with centered seconds label
+@Composable
+fun SymmetricalSkipIcon(
+    seconds: Int,
+    isForward: Boolean,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
+    iconSize: Dp = 40.dp,
+    fontSize: TextUnit = 10.5.sp
+) {
+    Box(
+        modifier = Modifier.size(iconSize),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val strokePx = 2.4.dp.toPx()
+            val pad = strokePx * 1.4f
+            val arcDiameter = size.minDimension - (pad * 2f)
+            val topLeft = Offset(pad, pad)
+            val arcSize = Size(arcDiameter, arcDiameter)
+
+            // Mirror-image circular arc with an open gap at the top for the arrowhead
+            val startAngle = if (isForward) -65f else -115f
+            val sweepAngle = if (isForward) 300f else -300f
+
+            drawArc(
+                color = tint,
+                startAngle = startAngle,
+                sweepAngle = sweepAngle,
+                useCenter = false,
+                topLeft = topLeft,
+                size = arcSize,
+                style = Stroke(width = strokePx, cap = StrokeCap.Round)
+            )
+
+            // Symmetrical arrowhead at the top of the circle pointing left (rewind) or right (forward)
+            val cx = size.width / 2f
+            val topY = pad
+            val arrowW = 5.5.dp.toPx()
+            val arrowH = 4.8.dp.toPx()
+            val dir = if (isForward) 1f else -1f
+            val tipX = cx + (dir * 2.5.dp.toPx())
+
+            val headPath = Path().apply {
+                moveTo(tipX, topY)
+                lineTo(tipX - (dir * arrowW), topY - arrowH)
+                lineTo(tipX - (dir * arrowW), topY + arrowH)
+                close()
+            }
+            drawPath(path = headPath, color = tint)
+        }
+        Text(
+            text = "$seconds",
+            color = tint,
+            fontSize = fontSize,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 2.dp)
+        )
+    }
+}
+
 data class ReadingStreakSnapshot(
     val streakDays: Int,
     val bestStreakDays: Int,
@@ -217,7 +280,6 @@ fun recordReadingActivity(
     )
 }
 
-// Module F: Minimalist Home "Reading Streak & Insights" Card
 @Composable
 fun ReadingStreakStatsCard(
     snapshot: ReadingStreakSnapshot,
@@ -308,7 +370,6 @@ fun ReadingStreakStatsCard(
     }
 }
 
-// Module F: Detailed Reading Insights Dialog
 @Composable
 fun ReadingInsightsDialog(
     snapshot: ReadingStreakSnapshot,
@@ -396,7 +457,6 @@ fun ReadingInsightsDialog(
     )
 }
 
-// Module F: Splits visible page text into clean sentences for Hybrid TTS Read-Aloud
 private fun extractSentencesFromPage(leftText: String, rightText: String = ""): List<String> {
     val combined = if (rightText.isNotBlank()) "$leftText\n$rightText" else leftText
     if (combined.isBlank()) return emptyList()
@@ -406,7 +466,6 @@ private fun extractSentencesFromPage(leftText: String, rightText: String = ""): 
         .filter { it.length >= 2 }
 }
 
-// Module D: Highlight & Quote Data Model + JSON Persistence
 data class EbookHighlight(
     val id: String = UUID.randomUUID().toString(),
     val ebookId: String,
@@ -725,14 +784,23 @@ private fun extractHeroTintFromBitmap(bitmap: Bitmap?): Color? {
     return Color(argb)
 }
 
+// Enhanced Series Detector: Checks explicit series metadata, "Book N" / "#N" markers, or colon/dash prefixes
 private fun deriveSeriesName(rawSeries: String, rawTitle: String): String {
     if (rawSeries.isNotBlank()) return rawSeries.trim()
-    val colonPrefix = rawTitle.substringBefore(':', "").trim()
-    if (colonPrefix.length in 3..38 && colonPrefix != rawTitle.trim()) {
+    val cleanTitle = rawTitle.trim()
+
+    val bookNumMatch = Regex("(?i)^(.+?)(?:[:,\\-—]|\\s+)\\s*(?:book|vol\\.?|volume|part|#)\\s*\\d+").find(cleanTitle)
+    if (bookNumMatch != null) {
+        val prefix = bookNumMatch.groupValues[1].trim()
+        if (prefix.length in 3..45) return prefix
+    }
+
+    val colonPrefix = cleanTitle.substringBefore(':', "").trim()
+    if (colonPrefix.length in 3..38 && colonPrefix != cleanTitle) {
         return colonPrefix
     }
-    val dashPrefix = rawTitle.substringBefore(" - ", "").trim()
-    if (dashPrefix.length in 3..38 && dashPrefix != rawTitle.trim()) {
+    val dashPrefix = cleanTitle.substringBefore(" - ", "").trim()
+    if (dashPrefix.length in 3..38 && dashPrefix != cleanTitle) {
         return dashPrefix
     }
     return ""
@@ -943,13 +1011,18 @@ fun CurrentlyReadingHeroCard(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Square cover for Audiobooks, Rectangular 2:3 cover for eBooks!
                 TactileBookCover(
                     coverArt = coverBitmap?.asImageBitmap(),
                     fallbackIcon = if (isAudio) Icons.Default.Headphones else Icons.Default.MenuBook,
                     progress = progressFraction,
                     cornerRadius = 10.dp,
                     shadowElevation = 10.dp,
-                    modifier = Modifier.size(88.dp)
+                    modifier = if (isAudio) {
+                        Modifier.size(88.dp)
+                    } else {
+                        Modifier.width(72.dp).height(108.dp)
+                    }
                 )
 
                 Spacer(Modifier.width(16.dp))
@@ -1250,7 +1323,7 @@ fun GlobalQuotesHubSheet(
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            text = "No highlights or notes yet.\nLong-press any paragraph while reading an eBook to highlight or share a quote card.",
+                            text = "No highlights or notes yet.\nLong-press any paragraph while reading an eBook to select specific sentences and share a quote card.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
@@ -1825,7 +1898,6 @@ private fun renderBookPageToBitmap(
                 }
             }
 
-            // Module F: Live Active Sentence Highlighting during TTS Read-Aloud!
             if (!activeTtsSentence.isNullOrBlank() && activeTtsSentence.length >= 3) {
                 val ttsIdx = bodyText.indexOf(activeTtsSentence)
                 if (ttsIdx >= 0) {
@@ -2485,16 +2557,13 @@ fun CarModeScreen(
                 onClick = onQuickRewind,
                 modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF12241C))
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Replay, contentDescription = "Rewind", tint = Color.White, modifier = Modifier.size(48.dp))
-                    Text(
-                        text = "$skipIntervalSeconds",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 3.dp)
-                    )
-                }
+                SymmetricalSkipIcon(
+                    seconds = skipIntervalSeconds,
+                    isForward = false,
+                    tint = Color.White,
+                    iconSize = 52.dp,
+                    fontSize = 13.sp
+                )
             }
 
             IconButton(onClick = onPlayPause, modifier = Modifier.size(128.dp)) {
@@ -2510,16 +2579,13 @@ fun CarModeScreen(
                 onClick = onQuickForward,
                 modifier = Modifier.size(84.dp).clip(CircleShape).background(Color(0xFF12241C))
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.RotateRight, contentDescription = "Forward", tint = Color.White, modifier = Modifier.size(48.dp))
-                    Text(
-                        text = "$skipIntervalSeconds",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 3.dp)
-                    )
-                }
+                SymmetricalSkipIcon(
+                    seconds = skipIntervalSeconds,
+                    isForward = true,
+                    tint = Color.White,
+                    iconSize = 52.dp,
+                    fontSize = 13.sp
+                )
             }
         }
 
@@ -2604,15 +2670,26 @@ fun BookshelfContent(
         books.find { it.id == activeBookId } ?: books.firstOrNull()
     }
 
+    // True Series Filter: Only displays books that belong to a series or multi-book author group!
     val filteredBooks = remember(books, viewModel.smartShelfFilter, viewModel.progressRevision, viewModel.completedBooksCount) {
         when (viewModel.smartShelfFilter) {
             "READING" -> books.filter { viewModel.getAudiobookStatus(it) == "READING" }
             "UNREAD" -> books.filter { viewModel.getAudiobookStatus(it) == "UNREAD" }
             "FINISHED" -> books.filter { viewModel.getAudiobookStatus(it) == "FINISHED" }
-            "SERIES" -> books.sortedWith(
-                compareBy<Audiobook> { deriveSeriesName(it.series, it.title).ifBlank { "ZZZ" } }
-                    .thenComparator { a, b -> compareNatural(a.title, b.title) }
-            )
+            "SERIES" -> {
+                val authorCounts = books
+                    .filter { !it.author.equals("Unknown Author", ignoreCase = true) && it.author.isNotBlank() }
+                    .groupingBy { it.author.lowercase(Locale.ROOT) }
+                    .eachCount()
+
+                books.filter { b ->
+                    deriveSeriesName(b.series, b.title).isNotBlank() ||
+                        (authorCounts[b.author.lowercase(Locale.ROOT)] ?: 0) >= 2
+                }.sortedWith(
+                    compareBy<Audiobook> { deriveSeriesName(it.series, it.title).ifBlank { it.author } }
+                        .thenComparator { a, b -> compareNatural(a.title, b.title) }
+                )
+            }
             else -> books
         }
     }
@@ -2624,7 +2701,20 @@ fun BookshelfContent(
             onOpenQuotesHub = { showQuotesHub = true }
         )
 
-        if (viewMode == "GRID") {
+        if (filteredBooks.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                Text(
+                    text = if (viewModel.smartShelfFilter == "SERIES") {
+                        "No multi-book series found in your Audiobook library yet."
+                    } else {
+                        "No audiobooks match the '${viewModel.smartShelfFilter.lowercase(Locale.ROOT)}' filter."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+            }
+        } else if (viewMode == "GRID") {
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = 145.dp),
                 contentPadding = PaddingValues(16.dp),
@@ -2821,15 +2911,26 @@ fun EbookShelfContent(
     val heroProgress = if (heroTotalChaps > 0) ((heroCurrChap + 1).toFloat() / heroTotalChaps).coerceIn(0.02f, 1f) else 0f
     val heroSubtitle = if (heroTotalChaps > 0) "Chapter ${heroCurrChap + 1} of $heroTotalChaps" else "${heroEbook?.format ?: "EPUB"} eBook"
 
+    // True Series Filter: Only displays eBooks that belong to a series or multi-book author group!
     val filteredEbooks = remember(ebooks, viewModel.smartShelfFilter, viewModel.progressRevision) {
         when (viewModel.smartShelfFilter) {
             "READING" -> ebooks.filter { viewModel.getEbookStatus(it) == "READING" }
             "UNREAD" -> ebooks.filter { viewModel.getEbookStatus(it) == "UNREAD" }
             "FINISHED" -> ebooks.filter { viewModel.getEbookStatus(it) == "FINISHED" }
-            "SERIES" -> ebooks.sortedWith(
-                compareBy<Ebook> { deriveSeriesName("", it.title).ifBlank { it.author } }
-                    .thenComparator { a, b -> compareNatural(a.title, b.title) }
-            )
+            "SERIES" -> {
+                val authorCounts = ebooks
+                    .filter { !it.author.equals("Unknown Author", ignoreCase = true) && it.author.isNotBlank() }
+                    .groupingBy { it.author.lowercase(Locale.ROOT) }
+                    .eachCount()
+
+                ebooks.filter { eb ->
+                    deriveSeriesName("", eb.title).isNotBlank() ||
+                        (authorCounts[eb.author.lowercase(Locale.ROOT)] ?: 0) >= 2
+                }.sortedWith(
+                    compareBy<Ebook> { deriveSeriesName("", it.title).ifBlank { it.author } }
+                        .thenComparator { a, b -> compareNatural(a.title, b.title) }
+                )
+            }
             else -> ebooks
         }
     }
@@ -2841,9 +2942,22 @@ fun EbookShelfContent(
             onOpenQuotesHub = { showQuotesHub = true }
         )
 
-        if (viewMode == "GRID") {
+        if (filteredEbooks.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                Text(
+                    text = if (viewModel.smartShelfFilter == "SERIES") {
+                        "No multi-book series found on your eBooks shelf yet."
+                    } else {
+                        "No eBooks match the '${viewModel.smartShelfFilter.lowercase(Locale.ROOT)}' filter."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+            }
+        } else if (viewMode == "GRID") {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 145.dp),
+                columns = GridCells.Adaptive(minSize = 135.dp),
                 contentPadding = PaddingValues(16.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(18.dp),
@@ -2970,6 +3084,7 @@ fun EbookShelfContent(
     }
 }
 
+// Rectangular 2:3 Book Cover Ratio on the eBook Shelf so full covers never get cropped into squares!
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun EbookCardWrapper(
@@ -2996,7 +3111,12 @@ fun EbookCardWrapper(
     val progress = if (totalChaps > 0) ((currChap + 1).toFloat() / totalChaps).coerceIn(0.02f, 1f) else 0f
     val isVisualPageFormat = ebook.format.uppercase(Locale.ROOT) in VISUAL_PAGE_EBOOK_FORMATS
     val unitLabel = if (isVisualPageFormat) "Section" else "Chapter"
-    val subtitle = if (totalChaps > 0) "$unitLabel ${currChap + 1} of $totalChaps" else "${ebook.format} eBook"
+    val seriesLabel = remember(ebook.title) { deriveSeriesName("", ebook.title) }
+    val subtitle = when {
+        viewModel.smartShelfFilter == "SERIES" && seriesLabel.isNotBlank() -> "Series: $seriesLabel"
+        totalChaps > 0 -> "$unitLabel ${currChap + 1} of $totalChaps"
+        else -> "${ebook.format} eBook"
+    }
 
     if (viewMode == "GRID") {
         Column(
@@ -3016,7 +3136,7 @@ fun EbookCardWrapper(
                 shadowElevation = if (isSelected) 10.dp else 6.dp,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(1f)
+                    .aspectRatio(0.67f)
             )
             Spacer(Modifier.height(8.dp))
             Text(ebook.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -3024,8 +3144,9 @@ fun EbookCardWrapper(
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1
+                color = if (isSelected || viewModel.smartShelfFilter == "SERIES") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     } else {
@@ -3046,15 +3167,15 @@ fun EbookCardWrapper(
                     coverArt = cardArt,
                     fallbackIcon = Icons.Default.MenuBook,
                     progress = progress,
-                    cornerRadius = 10.dp,
+                    cornerRadius = 8.dp,
                     shadowElevation = 5.dp,
-                    modifier = Modifier.size(64.dp)
+                    modifier = Modifier.width(54.dp).height(80.dp)
                 )
                 Spacer(Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(ebook.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(ebook.author, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                    Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                    Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, maxLines = 1)
                 }
                 Icon(Icons.Default.MenuBook, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             }
@@ -3111,19 +3232,35 @@ fun EpubReaderScreen(
     var activeFootnotePopup by remember { mutableStateOf<Pair<String, String>?>(null) }
     var returnBookmark by remember { mutableStateOf<ReaderReturnBookmark?>(null) }
 
-    // Module D State
+    // Module D State + Sentence-by-Sentence Quote Selection
     var allHighlights by remember { mutableStateOf(loadAllEbookHighlights(prefs)) }
     val currentChapterHighlights = remember(allHighlights, ebook.id, currentChapterIndex) {
         allHighlights.filter { it.ebookId == ebook.id && it.chapterIndex == currentChapterIndex }
     }
     var selectedPassageText by remember { mutableStateOf<String?>(null) }
+    val passageSentences = remember(selectedPassageText) {
+        val raw = selectedPassageText ?: ""
+        if (raw.isBlank()) emptyList()
+        else raw.split(Regex("(?<=[.!?…])\\s+")).map { it.trim() }.filter { it.isNotEmpty() }
+    }
+    var selectedSentenceIndices by remember(selectedPassageText) {
+        mutableStateOf(passageSentences.indices.toSet())
+    }
+    val effectiveSelectedQuoteText = remember(passageSentences, selectedSentenceIndices, selectedPassageText) {
+        if (passageSentences.size <= 1 || selectedSentenceIndices.isEmpty()) {
+            selectedPassageText ?: ""
+        } else {
+            passageSentences.filterIndexed { index, _ -> index in selectedSentenceIndices }.joinToString(" ")
+        }
+    }
+
     var showAddNoteDialogForPassage by remember { mutableStateOf(false) }
     var noteDraftText by remember { mutableStateOf("") }
     var pendingHighlightColorHex by remember { mutableStateOf("#F5C542") }
     var showQuotesHubSheet by remember { mutableStateOf(false) }
     var activeQuoteStudioPassage by remember { mutableStateOf<String?>(null) }
 
-    // Module F State: Hybrid TTS Read-Aloud Engine + Reading Minutes Tracker
+    // Module F State: Hybrid TTS Read-Aloud Engine + Multiple Narrator Voices [PRO]
     var isTtsBarVisible by remember { mutableStateOf(false) }
     var isTtsPlaying by remember { mutableStateOf(false) }
     var ttsSentenceIndex by remember { mutableIntStateOf(0) }
@@ -3132,8 +3269,10 @@ fun EpubReaderScreen(
     var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
     var isTtsReady by remember { mutableStateOf(false) }
     var ttsAutoAdvancePageTrigger by remember { mutableIntStateOf(0) }
+    var availableTtsVoices by remember { mutableStateOf<List<Voice>>(emptyList()) }
+    var selectedVoiceName by remember { mutableStateOf(prefs.getString("ebook_tts_voice_name", "") ?: "") }
+    var showVoicePickerDialog by remember { mutableStateOf(false) }
 
-    // Track active reading minutes every 60s while reader is open
     LaunchedEffect(ebook.id) {
         recordReadingActivity(prefs, pagesAdded = 0, minutesAdded = 0)
         while (true) {
@@ -3142,7 +3281,6 @@ fun EpubReaderScreen(
         }
     }
 
-    // TTS Sleep Timer Countdown
     LaunchedEffect(ttsSleepMinutesRemaining, isTtsPlaying) {
         if (isTtsPlaying && ttsSleepMinutesRemaining > 0) {
             delay(60_000L)
@@ -3169,6 +3307,19 @@ fun EpubReaderScreen(
                                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                                 .build()
                         )
+                        val voicesList = eng.voices?.filter { v ->
+                            v.locale.language.equals(Locale.getDefault().language, ignoreCase = true) ||
+                                v.locale.language.equals("en", ignoreCase = true)
+                        }?.sortedWith(
+                            compareByDescending<Voice> { !it.isNetworkConnectionRequired }
+                                .thenBy { it.name }
+                        )?.take(18) ?: emptyList()
+
+                        availableTtsVoices = voicesList
+                        if (selectedVoiceName.isNotBlank()) {
+                            voicesList.firstOrNull { it.name == selectedVoiceName }?.let { eng.voice = it }
+                        }
+
                         eng.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                             override fun onStart(utteranceId: String?) {}
                             override fun onError(utteranceId: String?) {}
@@ -3318,7 +3469,6 @@ fun EpubReaderScreen(
         val pageStep = if (useDualSpread) 2 else 1
 
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top Reader Bar
             Surface(
                 color = bgColor,
                 tonalElevation = 0.dp,
@@ -3386,7 +3536,6 @@ fun EpubReaderScreen(
                                 )
                             }
                         }
-                        // Module F: [PRO] Hybrid TTS Read-Aloud Button
                         if (!isVisualPageMode) {
                             IconButton(
                                 onClick = {
@@ -3406,7 +3555,6 @@ fun EpubReaderScreen(
                                 )
                             }
                         }
-                        // Module D: Quotes & Highlights Hub Button
                         IconButton(
                             onClick = {
                                 ProFeatureManager.runIfPro(ProFeature.QUOTES_HUB) {
@@ -3574,7 +3722,6 @@ fun EpubReaderScreen(
                 val currLeftText = subPages.getOrElse(subPageIndex) { "" }
                 val currRightText = if (useDualSpread) subPages.getOrElse(subPageIndex + 1) { "" } else ""
 
-                // Module F: Active Page Sentences & TTS Utterance Dispatcher
                 val pageSentences = remember(currLeftText, currRightText) {
                     extractSentencesFromPage(currLeftText, currRightText)
                 }
@@ -3594,13 +3741,16 @@ fun EpubReaderScreen(
                     }
                 }
 
-                LaunchedEffect(isTtsPlaying, ttsSentenceIndex, subPageIndex, currentChapterIndex, ttsSpeed, isTtsReady) {
+                LaunchedEffect(isTtsPlaying, ttsSentenceIndex, subPageIndex, currentChapterIndex, ttsSpeed, selectedVoiceName, isTtsReady) {
                     val eng = ttsEngine ?: return@LaunchedEffect
                     if (!isTtsReady) return@LaunchedEffect
                     if (isTtsPlaying && pageSentences.isNotEmpty()) {
                         val safeIdx = ttsSentenceIndex.coerceIn(0, pageSentences.lastIndex)
                         if (safeIdx != ttsSentenceIndex) ttsSentenceIndex = safeIdx
                         val sentenceToSpeak = pageSentences[safeIdx]
+                        if (selectedVoiceName.isNotBlank()) {
+                            availableTtsVoices.firstOrNull { it.name == selectedVoiceName }?.let { eng.voice = it }
+                        }
                         eng.setSpeechRate(ttsSpeed.coerceIn(0.75f, 2.0f))
                         val params = Bundle().apply {
                             putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "fablewood_tts_$safeIdx")
@@ -4060,7 +4210,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Extra-Dim Dark Room Overlay when brightness is dragged below 25%
                 if (readerBrightness < 0.25f) {
                     val dimAlpha = ((0.25f - readerBrightness) / 0.20f * 0.62f).coerceIn(0f, 0.65f)
                     Box(
@@ -4071,7 +4220,6 @@ fun EpubReaderScreen(
                     )
                 }
 
-                // Floating Brightness HUD Pill
                 if (isDraggingBrightness) {
                     Box(
                         modifier = Modifier
@@ -4105,7 +4253,7 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Module F: [PRO] Compact Hybrid TTS Read-Aloud Mini-Player Bar
+                // [PRO] Hybrid TTS Read-Aloud Mini-Player Bar with Voice Selector
                 if (isTtsBarVisible && selectedPassageText == null) {
                     val currentSpokenLine = pageSentences.getOrNull(ttsSentenceIndex) ?: "Ready to read aloud"
                     Box(
@@ -4173,24 +4321,47 @@ fun EpubReaderScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    // Speed Stepper Chip (0.75x - 2.0x)
-                                    AssistChip(
-                                        onClick = {
-                                            val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
-                                            val nextIdx = (speeds.indexOfFirst { abs(it - ttsSpeed) < 0.05f } + 1) % speeds.size
-                                            ttsSpeed = speeds[nextIdx]
-                                            prefs.edit().putFloat("ebook_tts_speed", ttsSpeed).apply()
-                                        },
-                                        label = {
-                                            Text(
-                                                text = String.format(Locale.US, "%.2gx", ttsSpeed),
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
-                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        AssistChip(
+                                            onClick = {
+                                                val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
+                                                val nextIdx = (speeds.indexOfFirst { abs(it - ttsSpeed) < 0.05f } + 1) % speeds.size
+                                                ttsSpeed = speeds[nextIdx]
+                                                prefs.edit().putFloat("ebook_tts_speed", ttsSpeed).apply()
+                                            },
+                                            label = {
+                                                Text(
+                                                    text = String.format(Locale.US, "%.2gx", ttsSpeed),
+                                                    fontSize = 11.5.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        )
 
-                                    // Transport Controls (Prev Sentence, Play/Pause, Next Sentence)
+                                        // [PRO] Narrator Voice Selector Button
+                                        AssistChip(
+                                            onClick = {
+                                                ProFeatureManager.runIfPro(ProFeature.TTS_READ_ALOUD) {
+                                                    showVoicePickerDialog = true
+                                                }
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.RecordVoiceOver,
+                                                    contentDescription = "Choose Voice",
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            },
+                                            label = {
+                                                Text(
+                                                    text = "Voice",
+                                                    fontSize = 11.5.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        )
+                                    }
+
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         IconButton(
                                             onClick = {
@@ -4206,7 +4377,7 @@ fun EpubReaderScreen(
 
                                         FilledIconButton(
                                             onClick = { isTtsPlaying = !isTtsPlaying },
-                                            modifier = Modifier.size(42.dp)
+                                            modifier = Modifier.size(40.dp)
                                         ) {
                                             Icon(
                                                 imageVector = if (isTtsPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
@@ -4227,7 +4398,6 @@ fun EpubReaderScreen(
                                         }
                                     }
 
-                                    // TTS Sleep Timer Chip (Off / 15m / 30m / 45m)
                                     AssistChip(
                                         onClick = {
                                             ttsSleepMinutesRemaining = when (ttsSleepMinutesRemaining) {
@@ -4239,15 +4409,15 @@ fun EpubReaderScreen(
                                         },
                                         leadingIcon = {
                                             Icon(
-                                                Icons.Default.Bedtime,
+                                                Icons.Default.Alarm,
                                                 contentDescription = null,
-                                                modifier = Modifier.size(15.dp)
+                                                modifier = Modifier.size(14.dp)
                                             )
                                         },
                                         label = {
                                             Text(
                                                 text = if (ttsSleepMinutesRemaining > 0) "${ttsSleepMinutesRemaining}m" else "Sleep",
-                                                fontSize = 11.5.sp
+                                                fontSize = 11.sp
                                             )
                                         }
                                     )
@@ -4257,14 +4427,14 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Module D: Sleek In-Book Floating Selection Pill
+                // Sleek In-Book Floating Selection Pill with Sentence-by-Sentence Picker!
                 val activePassage = selectedPassageText
                 if (activePassage != null) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .padding(horizontal = 14.dp)
-                            .padding(bottom = bottomBarHeightDp + 12.dp)
+                            .padding(bottom = bottomBarHeightDp + 10.dp)
                     ) {
                         Surface(
                             color = MaterialTheme.colorScheme.surface,
@@ -4282,20 +4452,111 @@ fun EpubReaderScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "“${activePassage.take(90)}${if (activePassage.length > 90) "…" else ""}”",
+                                        text = if (passageSentences.size > 1) {
+                                            "Tap sentences below to select exact quote (${selectedSentenceIndices.size}/${passageSentences.size})"
+                                        } else {
+                                            "Selected Quote"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (passageSentences.size > 1) {
+                                            TextButton(
+                                                onClick = {
+                                                    selectedSentenceIndices = if (selectedSentenceIndices.size == passageSentences.size) {
+                                                        setOf(0)
+                                                    } else {
+                                                        passageSentences.indices.toSet()
+                                                    }
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                                modifier = Modifier.height(26.dp)
+                                            ) {
+                                                Text(
+                                                    text = if (selectedSentenceIndices.size == passageSentences.size) "1st Only" else "Select All",
+                                                    fontSize = 11.sp
+                                                )
+                                            }
+                                        }
+                                        IconButton(
+                                            onClick = { selectedPassageText = null },
+                                            modifier = Modifier.size(26.dp)
+                                        ) {
+                                            Icon(Icons.Default.Close, contentDescription = "Dismiss", modifier = Modifier.size(16.dp))
+                                        }
+                                    }
+                                }
+
+                                Spacer(Modifier.height(6.dp))
+
+                                // Interactive Sentence-by-Sentence Selector List
+                                if (passageSentences.size > 1) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 150.dp)
+                                            .verticalScroll(rememberScrollState()),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        passageSentences.forEachIndexed { idx, sentence ->
+                                            val isSelectedSent = idx in selectedSentenceIndices
+                                            Surface(
+                                                color = if (isSelectedSent) {
+                                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                                                } else {
+                                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                                },
+                                                shape = RoundedCornerShape(10.dp),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .border(
+                                                        width = 1.dp,
+                                                        color = if (isSelectedSent) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                                        shape = RoundedCornerShape(10.dp)
+                                                    )
+                                                    .clickable {
+                                                        val mutable = selectedSentenceIndices.toMutableSet()
+                                                        if (mutable.contains(idx)) {
+                                                            if (mutable.size > 1) mutable.remove(idx)
+                                                        } else {
+                                                            mutable.add(idx)
+                                                        }
+                                                        selectedSentenceIndices = mutable.sorted().toSet()
+                                                    }
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (isSelectedSent) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                                                        contentDescription = null,
+                                                        tint = if (isSelectedSent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Spacer(Modifier.width(8.dp))
+                                                    Text(
+                                                        text = sentence,
+                                                        fontSize = 12.5.sp,
+                                                        color = MaterialTheme.colorScheme.onSurface,
+                                                        maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Text(
+                                        text = "“$effectiveSelectedQuoteText”",
                                         style = MaterialTheme.typography.bodySmall,
                                         fontStyle = FontStyle.Italic,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
+                                        maxLines = 3,
+                                        overflow = TextOverflow.Ellipsis
                                     )
-                                    IconButton(
-                                        onClick = { selectedPassageText = null },
-                                        modifier = Modifier.size(26.dp)
-                                    ) {
-                                        Icon(Icons.Default.Close, contentDescription = "Dismiss", modifier = Modifier.size(16.dp))
-                                    }
                                 }
 
                                 Spacer(Modifier.height(10.dp))
@@ -4316,7 +4577,7 @@ fun EpubReaderScreen(
                                                     .border(1.5.dp, Color.White.copy(alpha = 0.7f), CircleShape)
                                                     .clickable {
                                                         pendingHighlightColorHex = hex
-                                                        saveHighlightForPassage(activePassage, hex)
+                                                        saveHighlightForPassage(effectiveSelectedQuoteText, hex)
                                                         Toast.makeText(context, "Highlighted ($label)", Toast.LENGTH_SHORT).show()
                                                         selectedPassageText = null
                                                     }
@@ -4339,7 +4600,7 @@ fun EpubReaderScreen(
                                             onClick = {
                                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                                                 clipboard?.setPrimaryClip(
-                                                    ClipData.newPlainText("Book Quote", "“$activePassage” — ${ebook.title}, ${ebook.author}")
+                                                    ClipData.newPlainText("Book Quote", "“$effectiveSelectedQuoteText” — ${ebook.title}, ${ebook.author}")
                                                 )
                                                 Toast.makeText(context, "Quote copied to clipboard", Toast.LENGTH_SHORT).show()
                                                 selectedPassageText = null
@@ -4351,7 +4612,7 @@ fun EpubReaderScreen(
 
                                         Button(
                                             onClick = {
-                                                val passageToShare = activePassage
+                                                val passageToShare = effectiveSelectedQuoteText
                                                 selectedPassageText = null
                                                 ProFeatureManager.runIfPro(ProFeature.QUOTE_CARDS) {
                                                     saveHighlightForPassage(passageToShare, pendingHighlightColorHex)
@@ -4372,7 +4633,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Floating 8-Second "Return to Page X" Pill
                 val activeReturnBm = returnBookmark
                 if (activeReturnBm != null && selectedPassageText == null && !isTtsBarVisible) {
                     Box(
@@ -4426,7 +4686,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Dedicated Safe Bottom Status Footer
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -4478,8 +4737,76 @@ fun EpubReaderScreen(
         }
     }
 
+    // [PRO] Read-Aloud Narrator Voice Selector Dialog
+    if (showVoicePickerDialog) {
+        AlertDialog(
+            onDismissRequest = { showVoicePickerDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.RecordVoiceOver, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Select Read-Aloud Voice", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                if (availableTtsVoices.isEmpty()) {
+                    Text(
+                        text = "Using system default voice. Install additional voices in Android Settings > Accessibility > Text-to-speech output.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 380.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        availableTtsVoices.forEachIndexed { idx, voiceObj ->
+                            val isSelectedVoice = voiceObj.name == selectedVoiceName ||
+                                (selectedVoiceName.isBlank() && idx == 0)
+                            val country = voiceObj.locale.displayCountry.ifBlank { voiceObj.locale.displayLanguage }
+                            val qualityTag = if (voiceObj.isNetworkConnectionRequired) "HD Network" else "Local"
+                            val friendlyLabel = "Narrator ${idx + 1} ($country • $qualityTag)"
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        selectedVoiceName = voiceObj.name
+                                        ttsEngine?.voice = voiceObj
+                                        prefs.edit().putString("ebook_tts_voice_name", voiceObj.name).apply()
+                                        showVoicePickerDialog = false
+                                    }
+                                    .padding(vertical = 8.dp, horizontal = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(selected = isSelectedVoice, onClick = null)
+                                Spacer(Modifier.width(10.dp))
+                                Column {
+                                    Text(friendlyLabel, fontWeight = if (isSelectedVoice) FontWeight.Bold else FontWeight.Normal)
+                                    Text(
+                                        text = voiceObj.name,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showVoicePickerDialog = false }) {
+                    Text("Done", fontWeight = FontWeight.Bold)
+                }
+            }
+        )
+    }
+
     if (showAddNoteDialogForPassage && selectedPassageText != null) {
-        val passage = selectedPassageText!!
+        val passage = effectiveSelectedQuoteText
         AlertDialog(
             onDismissRequest = { showAddNoteDialogForPassage = false },
             title = { Text("Add Note to Highlight", fontWeight = FontWeight.Bold) },
@@ -5234,8 +5561,13 @@ fun BookCardWrapper(
         }
     }
 
+    val seriesName = remember(book.series, book.title) { deriveSeriesName(book.series, book.title) }
     val displayProgress = if (isSelected && liveProgress != null && liveProgress > 0f) liveProgress else savedProgress
-    val displaySubtitle = if (isSelected && !liveSubtitle.isNullOrEmpty()) liveSubtitle else savedSubtitle
+    val displaySubtitle = when {
+        viewModel.smartShelfFilter == "SERIES" && seriesName.isNotBlank() -> "Series: $seriesName"
+        isSelected && !liveSubtitle.isNullOrEmpty() -> liveSubtitle
+        else -> savedSubtitle
+    }
 
     if (viewMode == "GRID") {
         GridBookCard(
@@ -5299,7 +5631,7 @@ fun GridBookCard(
             Text(
                 text = subtitleText,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (progress == 1f || isSelected || subtitleText.startsWith("Series:")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -5350,7 +5682,7 @@ fun ListBookCard(
                     Text(
                         text = subtitleText,
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (progress == 1f || isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (progress == 1f || isSelected || subtitleText.startsWith("Series:")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -5505,27 +5837,35 @@ fun NowPlayingScreen(
                             Icon(Icons.Default.SkipPrevious, contentDescription = "Prev Chapter", modifier = Modifier.size(32.dp))
                         }
 
-                        IconButton(onClick = onQuickRewind) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Replay, contentDescription = "Rewind", modifier = Modifier.size(38.dp))
-                                Text(text = "$skipIntervalSeconds", fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 2.dp))
-                            }
+                        // Symmetrical 15-Second Rewind Icon
+                        IconButton(onClick = onQuickRewind, modifier = Modifier.size(48.dp)) {
+                            SymmetricalSkipIcon(
+                                seconds = skipIntervalSeconds,
+                                isForward = false,
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                iconSize = 38.dp,
+                                fontSize = 10.sp
+                            )
                         }
 
-                        IconButton(onClick = onPlayPause, modifier = Modifier.size(60.dp)) {
+                        IconButton(onClick = onPlayPause, modifier = Modifier.size(64.dp)) {
                             Icon(
                                 imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                                 contentDescription = "Play/Pause",
                                 tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(52.dp)
+                                modifier = Modifier.size(54.dp)
                             )
                         }
 
-                        IconButton(onClick = onQuickForward) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.RotateRight, contentDescription = "Forward", modifier = Modifier.size(38.dp))
-                                Text(text = "$skipIntervalSeconds", fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 2.dp))
-                            }
+                        // Symmetrical 15-Second Fast-Forward Icon
+                        IconButton(onClick = onQuickForward, modifier = Modifier.size(48.dp)) {
+                            SymmetricalSkipIcon(
+                                seconds = skipIntervalSeconds,
+                                isForward = true,
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                iconSize = 38.dp,
+                                fontSize = 10.sp
+                            )
                         }
 
                         IconButton(onClick = onSkipNextChapter) {
@@ -5562,10 +5902,11 @@ fun NowPlayingScreen(
                             )
                         }
 
+                        // Alarm Clock Icon for Sleep Timer
                         IconButton(onClick = onOpenSleepMenu) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(
-                                    imageVector = Icons.Default.Bedtime,
+                                    imageVector = Icons.Default.Alarm,
                                     contentDescription = "Sleep Timer",
                                     tint = if (sleepTimerActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -5612,13 +5953,14 @@ fun NowPlayingScreen(
                         }
                     }
 
+                    // Enlarged Cover Art in Spread Mode (280.dp)
                     TactileBookCover(
                         coverArt = coverArt,
                         fallbackIcon = Icons.Default.Headphones,
                         progress = percentRead / 100f,
-                        cornerRadius = 20.dp,
-                        shadowElevation = 14.dp,
-                        modifier = Modifier.size(240.dp)
+                        cornerRadius = 22.dp,
+                        shadowElevation = 16.dp,
+                        modifier = Modifier.size(280.dp)
                     )
 
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -5723,13 +6065,14 @@ fun NowPlayingScreen(
                     )
                 }
 
+                // Enlarged Audiobook Cover Art (300.dp full screen / 250.dp embedded pane) to fill empty space!
                 TactileBookCover(
                     coverArt = coverArt,
                     fallbackIcon = Icons.Default.Headphones,
                     progress = percentRead / 100f,
-                    cornerRadius = 20.dp,
-                    shadowElevation = 14.dp,
-                    modifier = Modifier.size(if (isEmbeddedPane) 185.dp else 220.dp)
+                    cornerRadius = 22.dp,
+                    shadowElevation = 16.dp,
+                    modifier = Modifier.size(if (isEmbeddedPane) 250.dp else 300.dp)
                 )
 
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
