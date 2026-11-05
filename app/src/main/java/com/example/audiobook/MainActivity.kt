@@ -24,7 +24,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -463,7 +462,6 @@ fun FablewoodAudiobookApp(
     var liveCoverSearchQuery by remember { mutableStateOf("") }
     var showAllFilesPermissionPrompt by remember { mutableStateOf(false) }
 
-    // Module E: Unified Discover Screen & Apple Books-Style Book Detail Sheet State
     var showDiscoveryDialog by remember { mutableStateOf(false) }
     var discoverySearchInput by remember { mutableStateOf("") }
     var selectedDiscoveryBookForDetail by remember { mutableStateOf<DiscoveryBook?>(null) }
@@ -504,9 +502,10 @@ fun FablewoodAudiobookApp(
 
     fun openDiscoveryWithQuery(initialQuery: String = "") {
         val clean = initialQuery.trim()
-        discoverySearchInput = if (clean.equals("FREE_CLASSICS", ignoreCase = true)) "" else clean
+        val defaultFormat = if (viewModel.shelfMode == "EBOOK") "EBOOK" else "AUDIOBOOK"
+        discoverySearchInput = clean
         showDiscoveryDialog = true
-        viewModel.searchDiscoveryCatalog(clean.ifBlank { "FREE_CLASSICS" })
+        viewModel.searchDiscoveryCatalog(clean, defaultFormat)
     }
 
     fun openStoreSelectorForBook(title: String, author: String) {
@@ -953,7 +952,7 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // Streamlined, Daily-Use Side Navigation Drawer
+    // Streamlined Side Navigation Drawer with "Discover New Content"
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -982,12 +981,12 @@ fun FablewoodAudiobookApp(
 
                 NavigationDrawerItem(
                     icon = { Icon(Icons.Default.Explore, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                    label = { Text("Discover & Free Classics", fontWeight = FontWeight.SemiBold) },
+                    label = { Text("Discover New Content", fontWeight = FontWeight.SemiBold) },
                     selected = false,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
                     onClick = {
                         coroutineScope.launch { drawerState.close() }
-                        openDiscoveryWithQuery("FREE_CLASSICS")
+                        openDiscoveryWithQuery("")
                     }
                 )
                 NavigationDrawerItem(
@@ -1146,10 +1145,10 @@ fun FablewoodAudiobookApp(
                                     IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
                                         Icon(Icons.Default.Menu, contentDescription = "Menu")
                                     }
-                                    IconButton(onClick = { openDiscoveryWithQuery("FREE_CLASSICS") }) {
+                                    IconButton(onClick = { openDiscoveryWithQuery("") }) {
                                         Icon(
                                             Icons.Default.Explore,
-                                            contentDescription = "Discover & Free Classics",
+                                            contentDescription = "Discover New Content",
                                             tint = MaterialTheme.colorScheme.primary
                                         )
                                     }
@@ -1448,7 +1447,7 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // Module E: Frictionless "Discover" ModalBottomSheet (Instant Free Classics + Affiliate Catalog)
+    // Updated Discover New Content ModalBottomSheet (Clean Audiobooks vs eBooks Pills + Search Bar)
     if (showDiscoveryDialog) {
         ModalBottomSheet(
             onDismissRequest = { showDiscoveryDialog = false },
@@ -1471,7 +1470,7 @@ fun FablewoodAudiobookApp(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Explore, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(8.dp))
-                        Text("Discover Books & Classics", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text("Discover New Content", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     }
                     TextButton(onClick = { showDiscoveryDialog = false }) {
                         Text("Done", fontWeight = FontWeight.Bold)
@@ -1481,66 +1480,65 @@ fun FablewoodAudiobookApp(
                 OutlinedTextField(
                     value = discoverySearchInput,
                     onValueChange = { discoverySearchInput = it },
-                    placeholder = { Text("Search classics, authors, or bestsellers...") },
+                    placeholder = { Text("Search book title or author...") },
                     singleLine = true,
                     shape = RoundedCornerShape(14.dp),
                     trailingIcon = {
-                        IconButton(onClick = { viewModel.searchDiscoveryCatalog(discoverySearchInput) }) {
+                        IconButton(
+                            onClick = {
+                                viewModel.searchDiscoveryCatalog(discoverySearchInput, viewModel.discoveryFormatFilter)
+                            }
+                        ) {
                             Icon(Icons.Default.Search, contentDescription = "Search", tint = MaterialTheme.colorScheme.primary)
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                // Curated 1-Tap Category Chips
+                // Clean 2-Button Toggle: Audiobooks | eBooks
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    val isFreeClassicsActive = viewModel.discoveryQuery.equals("FREE_CLASSICS", ignoreCase = true)
+                    val isAudioFilter = viewModel.discoveryFormatFilter == "AUDIOBOOK"
                     FilterChip(
-                        selected = isFreeClassicsActive,
+                        selected = isAudioFilter,
                         onClick = {
-                            discoverySearchInput = ""
-                            viewModel.searchDiscoveryCatalog("FREE_CLASSICS")
+                            viewModel.searchDiscoveryCatalog(discoverySearchInput, "AUDIOBOOK")
                         },
                         leadingIcon = {
-                            Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.Headphones, contentDescription = null, modifier = Modifier.size(16.dp))
                         },
-                        label = { Text("Free Classics (1-Tap EPUB)", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
-                    )
-
-                    val activeAuthor = activeBook?.author?.takeIf { !it.equals("Unknown Author", true) }
-                        ?: activeEbook?.author?.takeIf { !it.equals("Unknown Author", true) }
-                    if (activeAuthor != null) {
-                        FilterChip(
-                            selected = viewModel.discoveryQuery.equals(activeAuthor, ignoreCase = true),
-                            onClick = {
-                                discoverySearchInput = activeAuthor
-                                viewModel.searchDiscoveryCatalog(activeAuthor)
-                            },
-                            label = { Text(activeAuthor, fontSize = 12.sp, maxLines = 1) }
-                        )
-                    }
-
-                    FilterChip(
-                        selected = viewModel.discoveryQuery.contains("Sci-Fi", ignoreCase = true),
-                        onClick = {
-                            discoverySearchInput = "Sci-Fi & Fantasy"
-                            viewModel.searchDiscoveryCatalog("Sci-Fi & Fantasy")
+                        label = {
+                            Text(
+                                text = "Audiobooks",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center
+                            )
                         },
-                        label = { Text("Sci-Fi & Fantasy", fontSize = 12.sp) }
+                        modifier = Modifier.weight(1f)
                     )
 
                     FilterChip(
-                        selected = viewModel.discoveryQuery.contains("Mystery", ignoreCase = true),
+                        selected = !isAudioFilter,
                         onClick = {
-                            discoverySearchInput = "Mystery & Thriller"
-                            viewModel.searchDiscoveryCatalog("Mystery & Thriller")
+                            viewModel.searchDiscoveryCatalog(discoverySearchInput, "EBOOK")
                         },
-                        label = { Text("Mystery & Thriller", fontSize = 12.sp) }
+                        leadingIcon = {
+                            Icon(Icons.Default.MenuBook, contentDescription = null, modifier = Modifier.size(16.dp))
+                        },
+                        label = {
+                            Text(
+                                text = "eBooks",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center
+                            )
+                        },
+                        modifier = Modifier.weight(1f)
                     )
                 }
 
@@ -1555,7 +1553,7 @@ fun FablewoodAudiobookApp(
                             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                             Spacer(Modifier.height(10.dp))
                             Text(
-                                "Loading Free Classics & Store Catalog...",
+                                text = if (viewModel.discoveryFormatFilter == "AUDIOBOOK") "Searching Audiobooks..." else "Searching eBooks...",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1567,7 +1565,7 @@ fun FablewoodAudiobookApp(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "Tap 'Free Classics' above to browse public-domain EPUBs ready for instant 1-tap download, or search any author or title.",
+                            text = "Type a book title or author above and tap Search.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
@@ -1583,6 +1581,7 @@ fun FablewoodAudiobookApp(
                         for (item in viewModel.discoveryBooks) {
                             val isFreeEpub = item.epubDownloadUrl.isNotBlank()
                             val isDownloadingThis = viewModel.downloadingBookId == item.id
+                            val isAudioResult = item.formatLabel.contains("Audio", ignoreCase = true) && !isFreeEpub
 
                             Card(
                                 modifier = Modifier
@@ -1593,14 +1592,19 @@ fun FablewoodAudiobookApp(
                             ) {
                                 Column(modifier = Modifier.padding(14.dp)) {
                                     Row(verticalAlignment = Alignment.Top) {
+                                        // Audiobooks stay square (80x80), eBooks use rectangular book ratio (74x110)
                                         TactileBookCover(
                                             coverArt = item.coverBitmap?.asImageBitmap(),
-                                            fallbackIcon = Icons.Default.MenuBook,
+                                            fallbackIcon = if (isAudioResult) Icons.Default.Headphones else Icons.Default.MenuBook,
                                             progress = 0f,
                                             badgeText = item.formatLabel,
                                             cornerRadius = 10.dp,
                                             shadowElevation = 6.dp,
-                                            modifier = Modifier.size(80.dp)
+                                            modifier = if (isAudioResult) {
+                                                Modifier.size(82.dp)
+                                            } else {
+                                                Modifier.width(74.dp).height(110.dp)
+                                            }
                                         )
 
                                         Spacer(Modifier.width(14.dp))
@@ -1678,7 +1682,7 @@ fun FablewoodAudiobookApp(
                                         } else {
                                             OutlinedButton(
                                                 onClick = {
-                                                    val libbyLink = AffiliateConfig.buildPartnerLinksForBook(item.title, item.author).first()
+                                                    val libbyLink = buildFixedPartnerLinksForBook(item.title, item.author).first()
                                                     openExternalUrl(libbyLink.url)
                                                 },
                                                 modifier = Modifier.weight(1f)
@@ -1707,18 +1711,19 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // Module E: Apple Books-Style Book Detail ModalBottomSheet
+    // Apple Books-Style Book Detail ModalBottomSheet (with Fixed Libby & B&N Search Links)
     if (selectedDiscoveryBookForDetail != null) {
         val book = selectedDiscoveryBookForDetail!!
         val isFreeEpub = book.epubDownloadUrl.isNotBlank()
         val isDownloadingThis = viewModel.downloadingBookId == book.id
+        val isAudioDetail = book.formatLabel.contains("Audio", ignoreCase = true) && !isFreeEpub
         val partnerLinks = remember(book.title, book.author) {
-            AffiliateConfig.buildPartnerLinksForBook(book.title, book.author)
+            buildFixedPartnerLinksForBook(book.title, book.author)
         }
-        val amazonLink = partnerLinks.firstOrNull { it.storeName.contains("Amazon", true) }
-        val bnLink = partnerLinks.firstOrNull { it.storeName.contains("Barnes", true) }
-        val libroLink = partnerLinks.firstOrNull { it.storeName.contains("Libro", true) }
         val libbyLink = partnerLinks.firstOrNull { it.storeName.contains("Libby", true) }
+        val bnLink = partnerLinks.firstOrNull { it.storeName.contains("Barnes", true) }
+        val amazonLink = partnerLinks.firstOrNull { it.storeName.contains("Amazon", true) }
+        val libroLink = partnerLinks.firstOrNull { it.storeName.contains("Libro", true) }
 
         ModalBottomSheet(
             onDismissRequest = { selectedDiscoveryBookForDetail = null },
@@ -1735,12 +1740,16 @@ fun FablewoodAudiobookApp(
             ) {
                 TactileBookCover(
                     coverArt = book.coverBitmap?.asImageBitmap(),
-                    fallbackIcon = Icons.Default.MenuBook,
+                    fallbackIcon = if (isAudioDetail) Icons.Default.Headphones else Icons.Default.MenuBook,
                     progress = 0f,
                     badgeText = book.formatLabel,
                     cornerRadius = 16.dp,
                     shadowElevation = 14.dp,
-                    modifier = Modifier.size(165.dp)
+                    modifier = if (isAudioDetail) {
+                        Modifier.size(165.dp)
+                    } else {
+                        Modifier.width(142.dp).height(212.dp)
+                    }
                 )
 
                 Spacer(Modifier.height(16.dp))
@@ -1770,7 +1779,6 @@ fun FablewoodAudiobookApp(
 
                 Spacer(Modifier.height(18.dp))
 
-                // Primary Action Buttons
                 if (isFreeEpub) {
                     Button(
                         onClick = {
@@ -1902,7 +1910,7 @@ fun FablewoodAudiobookApp(
     // Multi-Retailer Affiliate & Library Store Selector Sheet
     if (showStoreLinksDialog && storeLinksBookTitle.isNotEmpty()) {
         val partnerLinks = remember(storeLinksBookTitle, storeLinksBookAuthor) {
-            AffiliateConfig.buildPartnerLinksForBook(storeLinksBookTitle, storeLinksBookAuthor)
+            buildFixedPartnerLinksForBook(storeLinksBookTitle, storeLinksBookAuthor)
         }
         AlertDialog(
             onDismissRequest = { showStoreLinksDialog = false },

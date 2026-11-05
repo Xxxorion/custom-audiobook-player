@@ -8,28 +8,31 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.text.HtmlCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.util.Locale
 
 enum class ProFeature(val title: String, val description: String) {
     DUAL_PAGE_FOLDABLE("Foldable Dual-Page Spread", "Read across a 2-column open-book layout on foldables and tablets."),
     CUSTOM_THEMES("Custom Theme Builder", "Design your own custom background and ink hex color palettes."),
     QUOTE_CARDS("Shareable Quote Cards", "Turn favorite passages into high-res, stylized social quote cards."),
     QUOTES_HUB("Global Quotes & Notes Hub", "Search and filter every highlight and note across your entire library."),
-    TTS_READ_ALOUD("AI Read-Aloud (TTS)", "Listen to any eBook with live sentence highlighting and background playback."),
+    TTS_READ_ALOUD("AI Read-Aloud & Voices (TTS)", "Listen to any eBook with custom voices, live sentence highlighting, and background playback."),
     READING_STATS("Reading Streaks & Insights", "Track daily reading minutes, pages turned, and long-term streaks.")
 }
 
-/**
- * Centralized Paywall-Ready State Manager.
- * Currently unlocked (`true`) so you can test the full Pro experience.
- * Flip `MutableStateFlow(false)` when ready to gate Pro features behind billing.
- */
 object ProFeatureManager {
     private val _isProUser = MutableStateFlow(true)
     val isProUser: StateFlow<Boolean> = _isProUser.asStateFlow()
@@ -117,17 +120,131 @@ val DESIGNER_READER_PRESETS = listOf(
     )
 )
 
+/**
+ * Fixed Partner & Library URL Builder:
+ * - Barnes & Noble uses https://www.barnesandnoble.com/search?q=title+author
+ * - Libby uses %20 path encoding inside /search/all/search/query-.../page-1 so Libby executes the search immediately.
+ */
+fun buildFixedPartnerLinksForBook(title: String, author: String): List<StoreLinkOption> {
+    val cleanSearch = cleanAudiobookSearchQuery(title, author)
+    val plusEncoded = try {
+        URLEncoder.encode(cleanSearch, "UTF-8")
+    } catch (_: Throwable) {
+        cleanSearch.trim().replace(Regex("\\s+"), "+")
+    }
+    val percentSpaceEncoded = plusEncoded.replace("+", "%20")
+
+    // 1. Libby / OverDrive Local Library Deep-Link (uses %20 path encoding so Libby finds the query)
+    val libbyUrl = "https://libbyapp.com/search/all/search/query-$percentSpaceEncoded/page-1"
+
+    // 2. Libro.fm (DRM-Free M4B Audiobooks)
+    val libroBase = "https://libro.fm/search?q=$plusEncoded"
+    val libroUrl = if (AffiliateConfig.LIBRO_FM_AFFILIATE_ID.isNotBlank()) {
+        "$libroBase&aff=${AffiliateConfig.LIBRO_FM_AFFILIATE_ID}"
+    } else libroBase
+
+    // 3. Amazon & Audible
+    val amazonBase = "https://www.amazon.com/s?k=$plusEncoded&i=audible"
+    val amazonUrl = if (AffiliateConfig.AMAZON_ASSOCIATE_TAG.isNotBlank()) {
+        "$amazonBase&tag=${AffiliateConfig.AMAZON_ASSOCIATE_TAG}"
+    } else amazonBase
+
+    // 4. Barnes & Noble (Updated to /search?q= format!)
+    val bnBase = "https://www.barnesandnoble.com/search?q=$plusEncoded"
+    val bnUrl = if (AffiliateConfig.BARNES_AND_NOBLE_AFFILIATE_ID.isNotBlank()) {
+        "$bnBase&aff=${AffiliateConfig.BARNES_AND_NOBLE_AFFILIATE_ID}"
+    } else bnBase
+
+    // 5. Bookshop.org
+    val bookshopBase = "https://bookshop.org/beta-search?keywords=$plusEncoded"
+    val bookshopUrl = if (AffiliateConfig.BOOKSHOP_ORG_AFFILIATE_ID.isNotBlank()) {
+        "$bookshopBase&a_aid=${AffiliateConfig.BOOKSHOP_ORG_AFFILIATE_ID}"
+    } else bookshopBase
+
+    // 6. Rakuten Kobo
+    val koboBase = "https://www.kobo.com/us/en/search?query=$plusEncoded"
+    val koboUrl = if (AffiliateConfig.KOBO_AFFILIATE_ID.isNotBlank()) {
+        "$koboBase&aff=${AffiliateConfig.KOBO_AFFILIATE_ID}"
+    } else koboBase
+
+    // 7. Audiobooks.com
+    val abComBase = "https://www.audiobooks.com/search/book/$percentSpaceEncoded"
+    val abComUrl = if (AffiliateConfig.AUDIOBOOKS_COM_AFFILIATE_ID.isNotBlank()) {
+        "$abComBase?aff=${AffiliateConfig.AUDIOBOOKS_COM_AFFILIATE_ID}"
+    } else abComBase
+
+    // 8. Standard Ebooks & LibriVox
+    val standardEbooksUrl = "https://standardebooks.org/ebooks?query=$plusEncoded"
+    val librivoxUrl = "https://librivox.org/search?q=$plusEncoded&search_form=advanced"
+
+    return listOf(
+        StoreLinkOption(
+            storeName = "Libby / Local Library",
+            subtitle = "Borrow for free with your local library card",
+            badgeText = "FREE LIBRARY",
+            url = libbyUrl,
+            isLibraryOrFree = true
+        ),
+        StoreLinkOption(
+            storeName = "Barnes & Noble",
+            subtitle = "NOOK eBooks, B&N Audiobooks & Hardcovers",
+            badgeText = "B&N / NOOK",
+            url = bnUrl
+        ),
+        StoreLinkOption(
+            storeName = "Amazon & Audible",
+            subtitle = "Audiobooks, Kindle eBooks & Print editions",
+            badgeText = "AUDIBLE / KINDLE",
+            url = amazonUrl
+        ),
+        StoreLinkOption(
+            storeName = "Libro.fm",
+            subtitle = "Buy DRM-free .m4b audiobooks & import into Fablewood",
+            badgeText = "DRM-FREE M4B",
+            url = libroUrl
+        ),
+        StoreLinkOption(
+            storeName = "Bookshop.org",
+            subtitle = "Supports local independent bookstores",
+            badgeText = "INDIE BOOKS",
+            url = bookshopUrl
+        ),
+        StoreLinkOption(
+            storeName = "Rakuten Kobo",
+            subtitle = "Global eBook & Audiobook store",
+            badgeText = "KOBO",
+            url = koboUrl
+        ),
+        StoreLinkOption(
+            storeName = "Audiobooks.com",
+            subtitle = "Instant audiobook streaming & downloads",
+            badgeText = "AUDIO",
+            url = abComUrl
+        ),
+        StoreLinkOption(
+            storeName = "Standard Ebooks (Free Download)",
+            subtitle = "Download free public-domain .epub & .azw3 classics",
+            badgeText = "FREE EPUB",
+            url = standardEbooksUrl,
+            isLibraryOrFree = true
+        ),
+        StoreLinkOption(
+            storeName = "LibriVox (Free Audiobooks)",
+            subtitle = "Download free public-domain .m4b / .mp3 audiobooks",
+            badgeText = "FREE AUDIO",
+            url = librivoxUrl,
+            isLibraryOrFree = true
+        )
+    )
+}
+
 class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var books by mutableStateOf<List<Audiobook>>(repository.loadBooksCache())
     var currentBookId by mutableStateOf("")
 
-    // Top-Center Shelf Toggle: "AUDIO" or "EBOOK"
     var shelfMode by mutableStateOf(repository.getPreferences().getString("shelf_mode", "AUDIO") ?: "AUDIO")
-
-    // Module B: Smart Shelf Filter ("ALL", "READING", "UNREAD", "FINISHED", "SERIES")
     var smartShelfFilter by mutableStateOf(repository.getPreferences().getString("smart_shelf_filter", "ALL") ?: "ALL")
 
-    // eBook Shelf & Reader State
     var ebooks by mutableStateOf<List<Ebook>>(repository.loadEbooksCache())
     var currentEbookId by mutableStateOf(repository.getLastEbookId() ?: "")
     var currentEbookChapters by mutableStateOf<List<EbookChapter>>(emptyList())
@@ -135,7 +252,6 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var isLoadingEbook by mutableStateOf(false)
     var isEbookReaderFullScreen by mutableStateOf(false)
 
-    // Module A: Advanced Typography, Presets & Custom Theme State
     var ebookFontSizeSp by mutableFloatStateOf(repository.getPreferences().getFloat("ebook_font_sp", 18f))
     var ebookReaderTheme by mutableStateOf(repository.getPreferences().getString("ebook_reader_theme", "SEPIA") ?: "SEPIA")
     var ebookPresetId by mutableStateOf(repository.getPreferences().getString("ebook_preset_id", "EDITORIAL") ?: "EDITORIAL")
@@ -148,7 +264,8 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var ebookCustomBgHex by mutableStateOf(repository.getPreferences().getString("ebook_custom_bg_hex", "#121E18") ?: "#121E18")
     var ebookCustomTextHex by mutableStateOf(repository.getPreferences().getString("ebook_custom_text_hex", "#E6EFEA") ?: "#E6EFEA")
 
-    // Module E: Book Discovery, Free Classics Feed & 1-Tap EPUB Downloader State
+    // Discover Tab State: Format toggle ("AUDIOBOOK" or "EBOOK") + Search Query
+    var discoveryFormatFilter by mutableStateOf("AUDIOBOOK")
     var discoveryQuery by mutableStateOf("")
     var discoveryBooks by mutableStateOf<List<DiscoveryBook>>(emptyList())
     var isSearchingDiscovery by mutableStateOf(false)
@@ -326,18 +443,42 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
         }
     }
 
-    fun searchDiscoveryCatalog(query: String) {
-        val effectiveQuery = query.trim().ifBlank { "FREE_CLASSICS" }
-        discoveryQuery = effectiveQuery
+    // Searches specifically for Audiobooks or eBooks depending on the selected Discover pill
+    fun searchDiscoveryCatalog(query: String, formatFilter: String = discoveryFormatFilter) {
+        discoveryFormatFilter = formatFilter
+        val effectiveQuery = query.trim().ifBlank {
+            val activeAuthor = if (formatFilter == "AUDIOBOOK") {
+                books.find { it.id == currentBookId }?.author
+            } else {
+                ebooks.find { it.id == currentEbookId }?.author
+            }
+            if (!activeAuthor.isNullOrBlank() && !activeAuthor.equals("Unknown Author", ignoreCase = true)) {
+                activeAuthor
+            } else {
+                "bestseller fiction"
+            }
+        }
+        discoveryQuery = query.trim()
         discoveryJob?.cancel()
         isSearchingDiscovery = true
         discoveryJob = viewModelScope.launch {
-            discoveryBooks = repository.searchDiscoveryBooksOnline(effectiveQuery)
+            val rawResults = repository.searchDiscoveryBooksOnline(
+                if (formatFilter == "EBOOK" && query.isBlank()) "FREE_CLASSICS" else effectiveQuery
+            )
+            discoveryBooks = if (formatFilter == "AUDIOBOOK") {
+                val audioOnly = rawResults.filter { it.formatLabel.contains("Audio", ignoreCase = true) }
+                audioOnly.ifEmpty { rawResults }
+            } else {
+                val ebookOnly = rawResults.filter {
+                    it.formatLabel.contains("EPUB", ignoreCase = true) ||
+                        it.formatLabel.contains("eBook", ignoreCase = true)
+                }
+                ebookOnly.ifEmpty { rawResults }
+            }
             isSearchingDiscovery = false
         }
     }
 
-    // Module E: 1-Tap Free Public Domain EPUB Download & Auto-Open
     fun downloadAndOpenFreeEpub(book: DiscoveryBook, openFullScreen: Boolean, onResult: (Ebook?) -> Unit = {}) {
         if (downloadingBookId != null) return
         downloadingBookId = book.id
