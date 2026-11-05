@@ -12,15 +12,12 @@ android {
         minSdk = 24
         targetSdk = 34
 
-        // Automatic versioning based on GitHub Actions run number
+        // Automatic versioning based on GitHub Actions run number (e.g., 1.0.15, 1.0.16)
         val runNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
         versionCode = 100 + runNumber
         versionName = "1.0.$runNumber"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables {
-            useSupportLibrary = true
-        }
     }
 
     buildTypes {
@@ -50,7 +47,17 @@ android {
     }
 
     composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.8"
+        kotlinCompilerExtensionVersion = when (org.jetbrains.kotlin.config.KotlinCompilerVersion.VERSION) {
+            "1.9.0" -> "1.5.1"
+            "1.9.10" -> "1.5.3"
+            "1.9.20" -> "1.5.4"
+            "1.9.21" -> "1.5.7"
+            "1.9.22" -> "1.5.8"
+            "1.9.23" -> "1.5.11"
+            "1.9.24" -> "1.5.14"
+            "1.9.25" -> "1.5.15"
+            else -> "1.5.8"
+        }
     }
 
     lint {
