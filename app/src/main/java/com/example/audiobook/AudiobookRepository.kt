@@ -36,6 +36,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
+import java.io.BufferedOutputStream
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -57,7 +58,10 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.zip.Inflater
+import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
+import kotlin.math.max
 
 data class AudioTrack(
     val name: String,
@@ -111,13 +115,12 @@ data class CoverSearchCandidate(
     val fullResUrl: String
 )
 
-// Module E: Upgraded DiscoveryBook Model with Direct Free EPUB Download Support
 data class DiscoveryBook(
     val id: String,
     val title: String,
     val author: String,
     val description: String,
-    val formatLabel: String, // "FREE EPUB", "Audiobook", or "eBook & Audio"
+    val formatLabel: String,
     val coverBitmap: Bitmap?,
     val directStoreUrl: String = "",
     val epubDownloadUrl: String = "",
@@ -143,46 +146,47 @@ object AffiliateConfig {
 
     fun buildPartnerLinksForBook(title: String, author: String): List<StoreLinkOption> {
         val cleanSearch = cleanAudiobookSearchQuery(title, author)
-        val encodedQuery = try {
+        val plusEncoded = try {
             URLEncoder.encode(cleanSearch, "UTF-8")
         } catch (_: Throwable) {
-            cleanSearch.replace(' ', '+')
+            cleanSearch.trim().replace(Regex("\\s+"), "+")
         }
+        val percentSpaceEncoded = plusEncoded.replace("+", "%20")
 
-        val libbyUrl = "https://libbyapp.com/search/query-$encodedQuery/page-1"
+        val libbyUrl = "https://libbyapp.com/search/all/search/query-$percentSpaceEncoded/page-1"
 
-        val libroBase = "https://libro.fm/search?q=$encodedQuery"
+        val libroBase = "https://libro.fm/search?q=$plusEncoded"
         val libroUrl = if (LIBRO_FM_AFFILIATE_ID.isNotBlank()) {
             "$libroBase&aff=$LIBRO_FM_AFFILIATE_ID"
         } else libroBase
 
-        val amazonBase = "https://www.amazon.com/s?k=$encodedQuery&i=audible"
+        val amazonBase = "https://www.amazon.com/s?k=$plusEncoded&i=audible"
         val amazonUrl = if (AMAZON_ASSOCIATE_TAG.isNotBlank()) {
             "$amazonBase&tag=$AMAZON_ASSOCIATE_TAG"
         } else amazonBase
 
-        val bnBase = "https://www.barnesandnoble.com/s/$encodedQuery"
+        val bnBase = "https://www.barnesandnoble.com/search?q=$plusEncoded"
         val bnUrl = if (BARNES_AND_NOBLE_AFFILIATE_ID.isNotBlank()) {
-            "$bnBase?aff=$BARNES_AND_NOBLE_AFFILIATE_ID"
+            "$bnBase&aff=$BARNES_AND_NOBLE_AFFILIATE_ID"
         } else bnBase
 
-        val bookshopBase = "https://bookshop.org/beta-search?keywords=$encodedQuery"
+        val bookshopBase = "https://bookshop.org/beta-search?keywords=$plusEncoded"
         val bookshopUrl = if (BOOKSHOP_ORG_AFFILIATE_ID.isNotBlank()) {
             "$bookshopBase&a_aid=$BOOKSHOP_ORG_AFFILIATE_ID"
         } else bookshopBase
 
-        val koboBase = "https://www.kobo.com/us/en/search?query=$encodedQuery"
+        val koboBase = "https://www.kobo.com/us/en/search?query=$plusEncoded"
         val koboUrl = if (KOBO_AFFILIATE_ID.isNotBlank()) {
             "$koboBase&aff=$KOBO_AFFILIATE_ID"
         } else koboBase
 
-        val abComBase = "https://www.audiobooks.com/search/book/$encodedQuery"
+        val abComBase = "https://www.audiobooks.com/search/book/$percentSpaceEncoded"
         val abComUrl = if (AUDIOBOOKS_COM_AFFILIATE_ID.isNotBlank()) {
             "$abComBase?aff=$AUDIOBOOKS_COM_AFFILIATE_ID"
         } else abComBase
 
-        val standardEbooksUrl = "https://standardebooks.org/ebooks?query=$encodedQuery"
-        val librivoxUrl = "https://librivox.org/search?q=$encodedQuery&search_form=advanced"
+        val standardEbooksUrl = "https://standardebooks.org/ebooks?query=$plusEncoded"
+        val librivoxUrl = "https://librivox.org/search?q=$plusEncoded&search_form=advanced"
 
         return listOf(
             StoreLinkOption(
@@ -193,10 +197,10 @@ object AffiliateConfig {
                 isLibraryOrFree = true
             ),
             StoreLinkOption(
-                storeName = "Libro.fm",
-                subtitle = "Buy DRM-free .m4b audiobooks & import into Fablewood",
-                badgeText = "DRM-FREE M4B",
-                url = libroUrl
+                storeName = "Barnes & Noble",
+                subtitle = "NOOK eBooks, B&N Audiobooks & Hardcovers",
+                badgeText = "B&N / NOOK",
+                url = bnUrl
             ),
             StoreLinkOption(
                 storeName = "Amazon & Audible",
@@ -205,10 +209,10 @@ object AffiliateConfig {
                 url = amazonUrl
             ),
             StoreLinkOption(
-                storeName = "Barnes & Noble",
-                subtitle = "NOOK eBooks, B&N Audiobooks & Hardcovers",
-                badgeText = "B&N / NOOK",
-                url = bnUrl
+                storeName = "Libro.fm",
+                subtitle = "Buy DRM-free .m4b audiobooks & import into Fablewood",
+                badgeText = "DRM-FREE M4B",
+                url = libroUrl
             ),
             StoreLinkOption(
                 storeName = "Bookshop.org",
@@ -246,26 +250,33 @@ object AffiliateConfig {
     }
 }
 
-val ALL_SUPPORTED_EBOOK_EXTENSIONS = setOf(
-    "epub", "pdf", "cbz", "cbr", "cb7", "cbt", "cba", "cbc",
-    "mobi", "azw", "azw3", "kfx", "prc", "azw4", "tpz", "topaz",
-    "txt", "md", "rtf", "doc", "docx", "html", "htm", "htmlz",
-    "fb2", "fbz", "djvu", "ibooks", "lit", "pdb", "lrf", "lrs",
-    "lrx", "rb", "tcr", "chm"
+// Fix 7: Separate formats Fablewood can actually decode from unsupported proprietary formats
+val ACTUALLY_READABLE_EBOOK_EXTENSIONS = setOf(
+    "epub", "pdf", "cbz", "cbt", "cbc",
+    "mobi", "azw", "azw3", "prc", "azw4", "pdb",
+    "txt", "md", "rtf", "docx", "html", "htm", "htmlz",
+    "fb2", "fbz", "ibooks", "lrs", "tcr"
 )
 
+val UNSUPPORTED_EBOOK_EXTENSIONS = setOf(
+    "kfx", "djvu", "cbr", "cb7", "cba",
+    "doc", "lit", "lrf", "lrx", "rb", "chm", "tpz", "topaz"
+)
+
+val ALL_SUPPORTED_EBOOK_EXTENSIONS = ACTUALLY_READABLE_EBOOK_EXTENSIONS + UNSUPPORTED_EBOOK_EXTENSIONS
+
 val DEDICATED_EBOOK_EXTENSIONS = setOf(
-    "epub", "mobi", "azw", "azw3", "kfx", "prc", "azw4", "tpz", "topaz",
-    "fb2", "fbz", "ibooks", "lit", "pdb", "lrf", "lrs", "lrx", "rb", "tcr", "htmlz",
-    "cbz", "cbr", "cb7", "cbt", "cba", "cbc", "djvu"
+    "epub", "mobi", "azw", "azw3", "prc", "azw4",
+    "fb2", "fbz", "ibooks", "pdb", "lrs", "tcr", "htmlz",
+    "cbz", "cbt", "cbc"
 )
 
 val DOCUMENT_EBOOK_EXTENSIONS = setOf(
-    "pdf", "txt", "rtf", "doc", "docx", "html", "htm", "md", "chm"
+    "pdf", "txt", "rtf", "docx", "html", "htm", "md"
 )
 
 val VISUAL_PAGE_EBOOK_FORMATS = setOf(
-    "PDF", "AZW4", "CBZ", "CBT", "CBC", "CBR", "CB7", "CBA", "DJVU"
+    "PDF", "AZW4", "CBZ", "CBT", "CBC"
 )
 
 private val JUNK_DOCUMENT_FILENAME_REGEX = Regex(
@@ -283,6 +294,13 @@ fun detectEbookFormatFromFileName(fileName: String): String? {
     if (lower.endsWith(".fb2.zip")) return "FB2.ZIP"
     val ext = lower.substringAfterLast('.', "")
     return if (ext in ALL_SUPPORTED_EBOOK_EXTENSIONS) ext.uppercase(Locale.ROOT) else null
+}
+
+fun isActuallyReadableEbookFileName(fileName: String): Boolean {
+    val lower = fileName.lowercase(Locale.ROOT).trim()
+    if (lower.endsWith(".fb2.zip")) return true
+    val ext = lower.substringAfterLast('.', "")
+    return ext in ACTUALLY_READABLE_EBOOK_EXTENSIONS
 }
 
 fun parseCleanTitleAndAuthorFromFilename(rawFileName: String): Pair<String, String> {
@@ -519,12 +537,13 @@ class AudiobookRepository(context: Context) {
         const val MIN_AUDIOBOOK_DURATION_MS = 5 * 60 * 1000L
         const val MIN_PDF_BOOK_PAGES_AUTO_SCAN = 25
         const val MIN_TEXT_BOOK_BYTES_AUTO_SCAN = 100 * 1024L
+        const val MAX_SAFE_BYTE_READ = 12 * 1024 * 1024 // Fix 8: Capped at 12 MB well under heap limit
 
         private val SUPPORTED_EXTENSIONS = setOf(
             "mp3", "m4a", "m4b", "m4p", "mp4", "aac", "ogg", "opus", "flac", "wav"
         )
         private val KINDLE_EXTENSIONS = setOf("azw3", "azw", "mobi", "prc", "kf8", "pdb")
-        private val COMIC_EXTENSIONS = setOf("cbz", "cbr", "cb7", "cbt", "cba", "cbc")
+        private val COMIC_EXTENSIONS = setOf("cbz", "cbt", "cbc")
         private val CONTAINER_EXTENSIONS = setOf("m4a", "m4b", "m4p", "mp4")
         private val AUTO_SCAN_ROOT_FOLDERS = setOf(
             "download", "downloads", "audiobooks", "audiobook", "books", "book", "audible", "ebooks", "ebook", "kindle", "comics"
@@ -562,6 +581,35 @@ class AudiobookRepository(context: Context) {
                 writeStoreSync(migrated)
                 migrated
             }
+
+            // Fix 13: Migrate old ebook_highlights_v1 SharedPreferences key into library.json once
+            if (prefs.contains("ebook_highlights_v1")) {
+                try {
+                    val rawHl = prefs.getString("ebook_highlights_v1", "[]") ?: "[]"
+                    val migratedArr = JSONArray(rawHl)
+                    val existingArr = loaded.optJSONArray("highlights") ?: JSONArray()
+                    if (existingArr.length() == 0 && migratedArr.length() > 0) {
+                        loaded.put("highlights", migratedArr)
+                    } else if (migratedArr.length() > 0) {
+                        val existingIds = mutableSetOf<String>()
+                        for (i in 0 until existingArr.length()) {
+                            existingIds.add(existingArr.optJSONObject(i)?.optString("id", "") ?: "")
+                        }
+                        for (i in 0 until migratedArr.length()) {
+                            val item = migratedArr.optJSONObject(i) ?: continue
+                            if (existingIds.add(item.optString("id", ""))) {
+                                existingArr.put(item)
+                            }
+                        }
+                        loaded.put("highlights", existingArr)
+                    }
+                    prefs.edit().remove("ebook_highlights_v1").apply()
+                    writeStoreSync(loaded)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Highlight migration from SharedPreferences encountered non-fatal issue", t)
+                }
+            }
+
             memoryStore = loaded
             return loaded
         }
@@ -618,6 +666,8 @@ class AudiobookRepository(context: Context) {
             root.put("progress", progressObj)
             root.put("ebookProgress", JSONObject())
             root.put("metaCache", JSONObject())
+            root.put("chaptersCache", JSONObject())
+            root.put("highlights", JSONArray())
         } catch (t: Throwable) {
             Log.w(TAG, "Preference migration encountered non-fatal error", t)
         }
@@ -673,6 +723,174 @@ class AudiobookRepository(context: Context) {
 
     fun loadPlaybackPitch(): Float = prefs.getFloat("playback_pitch", 1.0f).coerceIn(0.75f, 1.25f)
     fun savePlaybackPitch(pitch: Float) = prefs.edit().putFloat("playback_pitch", pitch.coerceIn(0.75f, 1.25f)).apply()
+
+    // Fix 13: Highlights stored inside library.json
+    fun loadHighlightsJsonArray(): JSONArray = synchronized(stateLock) {
+        val store = ensureStoreLoaded()
+        val arr = store.optJSONArray("highlights") ?: JSONArray()
+        JSONArray(arr.toString())
+    }
+
+    fun saveHighlightsJsonArray(arr: JSONArray) {
+        synchronized(stateLock) {
+            val store = ensureStoreLoaded()
+            store.put("highlights", arr)
+        }
+        scheduleStoreFlush(immediate = true)
+    }
+
+    // Fix 12: Export & Import full Library Backup (.zip containing library.json, highlights, readingStats & covers/)
+    private fun syncReadingStatsIntoStoreLocked(store: JSONObject) {
+        val statsObj = JSONObject().apply {
+            put("stats_last_read_day", prefs.getString("stats_last_read_day", "") ?: "")
+            put("stats_current_streak_days", prefs.getInt("stats_current_streak_days", 0))
+            put("stats_best_streak_days", prefs.getInt("stats_best_streak_days", 0))
+            put("stats_today_minutes", prefs.getInt("stats_today_minutes", 0))
+            put("stats_today_pages", prefs.getInt("stats_today_pages", 0))
+            put("stats_total_pages", prefs.getInt("stats_total_pages", 0))
+            put("stats_total_ebook_minutes", prefs.getInt("stats_total_ebook_minutes", 0))
+            put("total_listen_ms", prefs.getLong("total_listen_ms", 0L))
+        }
+        store.put("readingStats", statsObj)
+    }
+
+    private fun restoreReadingStatsFromStoreLocked(store: JSONObject) {
+        val statsObj = store.optJSONObject("readingStats") ?: return
+        val editor = prefs.edit()
+        val lastDay = statsObj.optString("stats_last_read_day", "")
+        if (lastDay.isNotEmpty()) editor.putString("stats_last_read_day", lastDay)
+        editor.putInt("stats_current_streak_days", max(prefs.getInt("stats_current_streak_days", 0), statsObj.optInt("stats_current_streak_days", 0)))
+        editor.putInt("stats_best_streak_days", max(prefs.getInt("stats_best_streak_days", 0), statsObj.optInt("stats_best_streak_days", 0)))
+        editor.putInt("stats_today_minutes", max(prefs.getInt("stats_today_minutes", 0), statsObj.optInt("stats_today_minutes", 0)))
+        editor.putInt("stats_today_pages", max(prefs.getInt("stats_today_pages", 0), statsObj.optInt("stats_today_pages", 0)))
+        editor.putInt("stats_total_pages", max(prefs.getInt("stats_total_pages", 0), statsObj.optInt("stats_total_pages", 0)))
+        editor.putInt("stats_total_ebook_minutes", max(prefs.getInt("stats_total_ebook_minutes", 0), statsObj.optInt("stats_total_ebook_minutes", 0)))
+        val restoredListenMs = max(prefs.getLong("total_listen_ms", 0L), statsObj.optLong("total_listen_ms", 0L))
+        editor.putLong("total_listen_ms", restoredListenMs)
+        editor.apply()
+        AudiobookPlaybackService.syncInitialTotalListenMs(restoredListenMs)
+    }
+
+    suspend fun exportLibraryBackupToUri(destUri: Uri): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val jsonBytes = synchronized(stateLock) {
+                val store = ensureStoreLoaded()
+                syncReadingStatsIntoStoreLocked(store)
+                writeStoreSync(store)
+                store.toString(2).toByteArray(Charsets.UTF_8)
+            }
+            appContext.contentResolver.openOutputStream(destUri)?.use { rawOut ->
+                ZipOutputStream(BufferedOutputStream(rawOut)).use { zos ->
+                    zos.putNextEntry(ZipEntry("library.json"))
+                    zos.write(jsonBytes)
+                    zos.closeEntry()
+
+                    val coversDir = File(appContext.filesDir, "covers")
+                    if (coversDir.exists() && coversDir.isDirectory) {
+                        val files = coversDir.listFiles() ?: emptyArray()
+                        val buf = ByteArray(16384)
+                        for (f in files) {
+                            if (f.isFile && f.canRead()) {
+                                zos.putNextEntry(ZipEntry("covers/${f.name}"))
+                                FileInputStream(f).use { fis ->
+                                    while (true) {
+                                        val r = fis.read(buf)
+                                        if (r <= 0) break
+                                        zos.write(buf, 0, r)
+                                    }
+                                }
+                                zos.closeEntry()
+                            }
+                        }
+                    }
+                }
+            } ?: return@withContext false
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed exporting library backup zip", t)
+            false
+        }
+    }
+
+    suspend fun importLibraryBackupFromUri(sourceUri: Uri): Boolean = withContext(Dispatchers.IO) {
+        val stagingDir = File(appContext.cacheDir, "backup_restore_staging_${System.currentTimeMillis()}")
+        try {
+            stagingDir.mkdirs()
+            val stagedCoversDir = File(stagingDir, "covers").apply { mkdirs() }
+            var stagedLibraryJson: String? = null
+
+            openUriInputStream(sourceUri)?.use { rawIn ->
+                ZipInputStream(rawIn).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        if (!entry.isDirectory) {
+                            val cleanName = entry.name.replace('\\', '/').trimStart('/')
+                            if (cleanName == "library.json") {
+                                val bytes = readZipEntryBounded(zis, MAX_SAFE_BYTE_READ)
+                                if (bytes != null) {
+                                    stagedLibraryJson = String(bytes, Charsets.UTF_8)
+                                }
+                            } else if (cleanName.startsWith("covers/") && cleanName.endsWith(".png")) {
+                                val coverName = cleanName.substringAfterLast('/')
+                                if (coverName.isNotBlank() && !coverName.contains("..")) {
+                                    val bytes = readZipEntryBounded(zis, 4 * 1024 * 1024)
+                                    if (bytes != null) {
+                                        FileOutputStream(File(stagedCoversDir, coverName)).use { fos ->
+                                            fos.write(bytes)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+            } ?: return@withContext false
+
+            val validJsonText = stagedLibraryJson ?: return@withContext false
+            val parsedStore = JSONObject(validJsonText)
+            val isValidBackup = parsedStore.has("books") ||
+                parsedStore.has("ebooks") ||
+                parsedStore.has("progress") ||
+                parsedStore.has("highlights")
+            if (!isValidBackup) return@withContext false
+
+            // Validation succeeded — apply atomically without wiping first
+            synchronized(stateLock) {
+                memoryStore = parsedStore
+                writeStoreSync(parsedStore)
+                restoreReadingStatsFromStoreLocked(parsedStore)
+                val ebProg = parsedStore.optJSONObject("ebookProgress")
+                if (ebProg != null) {
+                    val keys = ebProg.keys()
+                    val editor = prefs.edit()
+                    while (keys.hasNext()) {
+                        val ebId = keys.next()
+                        val charOff = ebProg.optJSONObject(ebId)?.optInt("charOffset", 0) ?: 0
+                        if (charOff > 0) {
+                            editor.putInt("ebook_char_offset_$ebId", charOff)
+                        }
+                    }
+                    editor.apply()
+                }
+            }
+
+            val destCoversDir = File(appContext.filesDir, "covers").apply { mkdirs() }
+            stagedCoversDir.listFiles()?.forEach { f ->
+                if (f.isFile) {
+                    f.copyTo(File(destCoversDir, f.name), overwrite = true)
+                }
+            }
+            CoverMemoryCache.cache.evictAll()
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "Library backup import failed; existing library preserved", t)
+            false
+        } finally {
+            try { stagingDir.deleteRecursively() } catch (_: Throwable) {}
+        }
+    }
 
     fun loadHiddenBookIds(): Set<String> = synchronized(stateLock) {
         val set = mutableSetOf<String>()
@@ -848,20 +1066,53 @@ class AudiobookRepository(context: Context) {
         scheduleStoreFlush(immediate = false)
     }
 
-    fun saveEbookProgress(ebookId: String, chapterIndex: Int, totalChapters: Int) {
+    // Fix 3: Persist both chapterIndex and charOffset inside library.json (and sync with SharedPreferences)
+    fun saveEbookProgress(
+        ebookId: String,
+        chapterIndex: Int,
+        totalChapters: Int,
+        charOffset: Int = getEbookCharOffset(ebookId)
+    ) {
         if (ebookId.isEmpty()) return
         val now = System.currentTimeMillis()
-        prefs.edit().putString("last_ebook_id", ebookId).apply()
+        val safeCharOffset = charOffset.coerceAtLeast(0)
+        prefs.edit()
+            .putString("last_ebook_id", ebookId)
+            .putInt("ebook_char_offset_$ebookId", safeCharOffset)
+            .apply()
         synchronized(stateLock) {
             val store = ensureStoreLoaded()
             val ebProg = store.optJSONObject("ebookProgress") ?: JSONObject().also { store.put("ebookProgress", it) }
             val entry = ebProg.optJSONObject(ebookId) ?: JSONObject()
             entry.put("chapterIndex", chapterIndex.coerceAtLeast(0))
             entry.put("totalChapters", totalChapters.coerceAtLeast(1))
+            entry.put("charOffset", safeCharOffset)
             entry.put("lastReadMs", now)
             ebProg.put(ebookId, entry)
         }
         scheduleStoreFlush(immediate = false)
+    }
+
+    fun saveEbookCharOffset(ebookId: String, charOffset: Int) {
+        if (ebookId.isEmpty()) return
+        val safeOffset = charOffset.coerceAtLeast(0)
+        prefs.edit().putInt("ebook_char_offset_$ebookId", safeOffset).apply()
+        synchronized(stateLock) {
+            val store = ensureStoreLoaded()
+            val ebProg = store.optJSONObject("ebookProgress") ?: JSONObject().also { store.put("ebookProgress", it) }
+            val entry = ebProg.optJSONObject(ebookId) ?: JSONObject()
+            entry.put("charOffset", safeOffset)
+            ebProg.put(ebookId, entry)
+        }
+        scheduleStoreFlush(immediate = false)
+    }
+
+    fun getEbookCharOffset(ebookId: String): Int = synchronized(stateLock) {
+        if (ebookId.isEmpty()) return@synchronized 0
+        val fromPrefs = prefs.getInt("ebook_char_offset_$ebookId", -1)
+        if (fromPrefs >= 0) return@synchronized fromPrefs
+        val store = ensureStoreLoaded()
+        store.optJSONObject("ebookProgress")?.optJSONObject(ebookId)?.optInt("charOffset", 0) ?: 0
     }
 
     fun getEbookChapterIndex(ebookId: String): Int = synchronized(stateLock) {
@@ -897,6 +1148,7 @@ class AudiobookRepository(context: Context) {
         store.optJSONObject("progress")?.optJSONObject(bookId)?.optLong("lastPlayedMs", 0L) ?: 0L
     }
 
+    // Fix 1: Never overwrite total_listen_ms with an older, smaller value
     fun saveBookProgress(
         bookId: String,
         trackIndex: Int,
@@ -906,10 +1158,13 @@ class AudiobookRepository(context: Context) {
     ) {
         if (bookId.isEmpty()) return
         val now = System.currentTimeMillis()
+        val storedListen = prefs.getLong("total_listen_ms", 0L)
+        val monotonicListenMs = max(storedListen, totalListenMs)
         prefs.edit()
             .putString("last_book_id", bookId)
-            .putLong("total_listen_ms", totalListenMs)
+            .putLong("total_listen_ms", monotonicListenMs)
             .apply()
+        AudiobookPlaybackService.syncInitialTotalListenMs(monotonicListenMs)
 
         synchronized(stateLock) {
             val store = ensureStoreLoaded()
@@ -1150,7 +1405,22 @@ class AudiobookRepository(context: Context) {
         }
     }
 
-    private fun readUriBytesBounded(uri: Uri, maxBytes: Int = 48 * 1024 * 1024): ByteArray? {
+    private fun getUriFileSize(uri: Uri): Long {
+        return try {
+            openUriParcelFileDescriptor(uri)?.use { it.statSize } ?: -1L
+        } catch (_: Throwable) {
+            -1L
+        }
+    }
+
+    // Fix 8: Bounded byte read capped well under the process heap limit with gentle failure
+    private fun readUriBytesBounded(uri: Uri, maxBytes: Int = MAX_SAFE_BYTE_READ): ByteArray? {
+        val safeCap = maxBytes.coerceIn(64 * 1024, MAX_SAFE_BYTE_READ)
+        val knownSize = getUriFileSize(uri)
+        if (knownSize > safeCap) {
+            Log.w(TAG, "Skipping full-file byte read for $uri ($knownSize bytes > $safeCap cap)")
+            return null
+        }
         return try {
             openUriInputStream(uri)?.use { stream ->
                 val out = ByteArrayOutputStream()
@@ -1160,11 +1430,14 @@ class AudiobookRepository(context: Context) {
                     val r = stream.read(buf)
                     if (r <= 0) break
                     total += r
-                    if (total > maxBytes) break
+                    if (total > safeCap) return null
                     out.write(buf, 0, r)
                 }
                 out.toByteArray()
             }
+        } catch (oom: OutOfMemoryError) {
+            Log.e(TAG, "OOM prevented while reading $uri", oom)
+            null
         } catch (t: Throwable) {
             Log.w(TAG, "readUriBytesBounded failed for $uri", t)
             null
@@ -1181,12 +1454,14 @@ class AudiobookRepository(context: Context) {
         }
     }
 
+    // Fix 7: Never auto-scan unsupported formats
     private fun qualifiesForAutoEbookScan(
         uri: Uri,
         fileName: String,
         fileSizeBytes: Long,
         folderSegments: List<String>
     ): Boolean {
+        if (!isActuallyReadableEbookFileName(fileName)) return false
         val format = detectEbookFormatFromFileName(fileName) ?: return false
         val ext = format.lowercase(Locale.ROOT)
 
@@ -1235,7 +1510,6 @@ class AudiobookRepository(context: Context) {
             }
         }
 
-        // Also scan internal downloaded_ebooks folder
         val internalDownloadsDir = File(appContext.filesDir, "downloaded_ebooks")
         if (internalDownloadsDir.exists() && internalDownloadsDir.isDirectory) {
             scanDirectoryRecursiveForEbooks(internalDownloadsDir, listOf("Books"), 0, discovered, hiddenIds)
@@ -1298,7 +1572,7 @@ class AudiobookRepository(context: Context) {
                     val id = cursor.getLong(idCol)
                     val displayName = cursor.getString(nameCol) ?: continue
                     val sizeBytes = cursor.getLong(sizeCol)
-                    if (detectEbookFormatFromFileName(displayName) == null) continue
+                    if (!isActuallyReadableEbookFileName(displayName)) continue
 
                     val relPath = if (relCol != -1) {
                         cursor.getString(relCol) ?: ""
@@ -1365,7 +1639,7 @@ class AudiobookRepository(context: Context) {
                 if (f.name.lowercase(Locale.ROOT) in IGNORED_FOLDER_NAMES) continue
                 scanDirectoryRecursiveForEbooks(f, segments + f.name, depth + 1, discovered, hiddenIds)
             } else if (f.isFile && f.canRead()) {
-                if (detectEbookFormatFromFileName(f.name) != null) {
+                if (isActuallyReadableEbookFileName(f.name)) {
                     val fileUri = Uri.fromFile(f)
                     if (fileUri.toString() in hiddenIds) continue
                     if (!qualifiesForAutoEbookScan(fileUri, f.name, f.length(), segments)) {
@@ -1451,7 +1725,7 @@ class AudiobookRepository(context: Context) {
         for (child in children) {
             if (child.isDirectory) {
                 traverseFolderForEbooks(treeUri, child.docId, ebookList)
-            } else if (detectEbookFormatFromFileName(child.name) != null) {
+            } else if (isActuallyReadableEbookFileName(child.name)) {
                 if (child.extension == "pdf" && (isLikelyNonBookDocumentName(child.name) || getPdfPageCountFast(child.uri) < 15)) {
                     continue
                 }
@@ -1481,9 +1755,14 @@ class AudiobookRepository(context: Context) {
         merged
     }
 
+    // Fix 8: Only attempt PDF text reflow on compact PDFs (<= 8 MB); larger PDFs stream directly via PdfRenderer
     private fun extractReflowableTextFromPdf(uri: Uri, bookTitle: String): List<EbookChapter> {
         try {
-            val rawBytes = readUriBytesBounded(uri, 28 * 1024 * 1024) ?: return emptyList()
+            val sizeBytes = getUriFileSize(uri)
+            if (sizeBytes < 0L || sizeBytes > 8 * 1024 * 1024L) {
+                return emptyList()
+            }
+            val rawBytes = readUriBytesBounded(uri, 8 * 1024 * 1024) ?: return emptyList()
             val rawIso = String(rawBytes, Charsets.ISO_8859_1)
 
             val streamRegex = Regex("<<(.*?)>>\\s*stream\\r?\\n", setOf(RegexOption.DOT_MATCHES_ALL))
@@ -1501,7 +1780,7 @@ class AudiobookRepository(context: Context) {
                     dataEnd--
                 }
                 val streamLen = dataEnd - dataStart
-                if (streamLen !in 1..(2 * 1024 * 1024)) continue
+                if (streamLen !in 1..(1024 * 1024)) continue
 
                 val isFlate = dict.contains("/FlateDecode", ignoreCase = true)
                 val isImage = dict.contains("/Subtype\\s*/Image".toRegex(RegexOption.IGNORE_CASE)) ||
@@ -1555,7 +1834,7 @@ class AudiobookRepository(context: Context) {
                 val out = ByteArrayOutputStream(length * 2)
                 val buf = ByteArray(8192)
                 var total = 0
-                while (!inflater.finished() && total < 4 * 1024 * 1024) {
+                while (!inflater.finished() && total < 2 * 1024 * 1024) {
                     val count = inflater.inflate(buf)
                     if (count > 0) {
                         out.write(buf, 0, count)
@@ -1852,7 +2131,7 @@ class AudiobookRepository(context: Context) {
                     var entry = zis.nextEntry
                     while (entry != null) {
                         if (!entry.isDirectory && entry.name.replace('\\', '/').trimStart('/').equals("word/document.xml", ignoreCase = true)) {
-                            docXmlBytes = readZipEntryBounded(zis, 16 * 1024 * 1024)
+                            docXmlBytes = readZipEntryBounded(zis, MAX_SAFE_BYTE_READ)
                             break
                         }
                         zis.closeEntry()
@@ -1936,7 +2215,7 @@ class AudiobookRepository(context: Context) {
         return names.sortedWith { a, b -> compareNatural(a, b) }
     }
 
-    private fun readZipEntryByName(uri: Uri, targetName: String, maxBytes: Int = 16 * 1024 * 1024): ByteArray? {
+    private fun readZipEntryByName(uri: Uri, targetName: String, maxBytes: Int = 8 * 1024 * 1024): ByteArray? {
         try {
             openUriInputStream(uri)?.use { raw ->
                 ZipInputStream(raw).use { zis ->
@@ -1977,7 +2256,7 @@ class AudiobookRepository(context: Context) {
         return names.sortedWith { a, b -> compareNatural(a, b) }
     }
 
-    private fun readTarEntryByName(uri: Uri, targetName: String, maxBytes: Int = 16 * 1024 * 1024): ByteArray? {
+    private fun readTarEntryByName(uri: Uri, targetName: String, maxBytes: Int = 8 * 1024 * 1024): ByteArray? {
         try {
             openUriInputStream(uri)?.use { stream ->
                 val header = ByteArray(512)
@@ -2063,7 +2342,7 @@ class AudiobookRepository(context: Context) {
         val cachedPdf = File(appContext.cacheDir, "azw4_${sha256Hex(ebookId)}.pdf")
         if (cachedPdf.exists() && cachedPdf.length() > 128L) return cachedPdf
 
-        val rawBytes = readUriBytesBounded(uri, 64 * 1024 * 1024) ?: return null
+        val rawBytes = readUriBytesBounded(uri, MAX_SAFE_BYTE_READ) ?: return null
         var pdfStart = -1
         for (i in 0..(rawBytes.size - 5)) {
             if (rawBytes[i] == 0x25.toByte() &&
@@ -2132,7 +2411,7 @@ class AudiobookRepository(context: Context) {
     ): Bitmap? = withContext(Dispatchers.IO) {
         val fmt = ebook.format.uppercase(Locale.ROOT)
         try {
-            if (fmt in setOf("CBZ", "CBC", "CBR", "CBT")) {
+            if (fmt in setOf("CBZ", "CBC", "CBT")) {
                 val isTar = fmt == "CBT"
                 val names = if (isTar) listTarImageEntryNames(ebook.uri) else listZipImageEntryNames(ebook.uri)
                 if (names.isEmpty()) return@withContext null
@@ -2178,7 +2457,7 @@ class AudiobookRepository(context: Context) {
     }
 
     private fun parseTcrChapters(uri: Uri, bookTitle: String): List<EbookChapter> {
-        val bytes = readUriBytesBounded(uri, 16 * 1024 * 1024) ?: return emptyList()
+        val bytes = readUriBytesBounded(uri, MAX_SAFE_BYTE_READ) ?: return emptyList()
         if (bytes.size < 12) return emptyList()
         val magic = String(bytes, 0, 9, Charsets.ISO_8859_1)
         if (magic != "!!8-Bit!!") return emptyList()
@@ -2201,93 +2480,6 @@ class AudiobookRepository(context: Context) {
             pos++
         }
         return splitLongBodyIntoChapters(bookTitle, sb.toString().replace("\r\n", "\n").trim(), 0)
-    }
-
-    private fun extractReadableTextFromBinary(uri: Uri, format: String, bookTitle: String): List<EbookChapter> {
-        val bytes = readUriBytesBounded(uri, 24 * 1024 * 1024) ?: return emptyList()
-        if (bytes.isEmpty()) return emptyList()
-
-        if (bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
-            return emptyList()
-        }
-
-        val rawIso = String(bytes, Charsets.ISO_8859_1)
-        val htmlMatch = Regex("<html\\b[^>]*>.*?</html>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-            .findAll(rawIso)
-            .map { it.value }
-            .toList()
-        if (htmlMatch.isNotEmpty()) {
-            val chapters = mutableListOf<EbookChapter>()
-            var num = 1
-            for (h in htmlMatch) {
-                val (t, b) = parseEpubHtmlToReadableText(h, num)
-                if (b.length >= 60) {
-                    chapters.addAll(splitLongBodyIntoChapters(t, b, chapters.size))
-                    num++
-                }
-            }
-            if (chapters.isNotEmpty()) return chapters
-        }
-
-        val extractedRuns = mutableListOf<String>()
-        val asciiRun = StringBuilder()
-        for (b in bytes) {
-            val c = b.toInt() and 0xFF
-            if (c == 0x0A || c == 0x0D || c == 0x09 || c in 0x20..0x7E) {
-                asciiRun.append(c.toChar())
-            } else {
-                if (asciiRun.length >= 120) {
-                    extractedRuns.add(asciiRun.toString().trim())
-                }
-                asciiRun.clear()
-            }
-        }
-        if (asciiRun.length >= 120) extractedRuns.add(asciiRun.toString().trim())
-
-        val utf16Run = StringBuilder()
-        var j = 0
-        while (j + 1 < bytes.size) {
-            val lo = bytes[j].toInt() and 0xFF
-            val hi = bytes[j + 1].toInt() and 0xFF
-            if (hi == 0 && (lo == 0x0A || lo == 0x0D || lo == 0x09 || lo in 0x20..0x7E)) {
-                utf16Run.append(lo.toChar())
-            } else {
-                if (utf16Run.length >= 120) {
-                    extractedRuns.add(utf16Run.toString().trim())
-                }
-                utf16Run.clear()
-            }
-            j += 2
-        }
-        if (utf16Run.length >= 120) extractedRuns.add(utf16Run.toString().trim())
-
-        val filteredRuns = extractedRuns.filter { run ->
-            val letterCount = run.count { it.isLetter() }
-            val spaceCount = run.count { it == ' ' }
-            letterCount > run.length / 2 && spaceCount >= 8 &&
-                !run.contains("Root Entry", ignoreCase = true) &&
-                !run.contains("Microsoft Word", ignoreCase = true)
-        }
-
-        val combined = filteredRuns.joinToString("\n\n")
-            .replace("\r\n", "\n")
-            .replace('\r', '\n')
-            .replace(Regex("\\n{3,}"), "\n\n")
-            .trim()
-
-        if (combined.length >= 200) {
-            return splitLongBodyIntoChapters(bookTitle, combined, 0)
-        }
-
-        val explanation = when (format) {
-            "KFX", "LRX", "TPZ", "TOPAZ" ->
-                "This .$format file uses proprietary DRM or glyph encryption. Remove DRM or convert to .epub / .azw3 / .pdf in Calibre to read all chapters."
-            "CBR", "CB7", "CBA", "DJVU" ->
-                "This .$format archive uses proprietary RAR/7z/DjVu compression. Convert or repackage as .cbz, .pdf, or .epub for native page rendering."
-            else ->
-                "Could not extract readable text streams from this .$format file."
-        }
-        return listOf(EbookChapter(index = 0, title = bookTitle, bodyText = explanation))
     }
 
     private data class MobiHeaderSection(
@@ -2523,7 +2715,7 @@ class AudiobookRepository(context: Context) {
         var resolvedAuthor = fallbackAuthor
 
         try {
-            val fileBytes = readUriBytesBounded(uri, 32 * 1024 * 1024) ?: return Pair(resolvedTitle, resolvedAuthor)
+            val fileBytes = readUriBytesBounded(uri, MAX_SAFE_BYTE_READ) ?: return Pair(resolvedTitle, resolvedAuthor)
             if (fileBytes.size >= 4 && fileBytes[0] == 0x50.toByte() && fileBytes[1] == 0x4B.toByte()) {
                 return extractEpubMetadataAndCover(uri, ebookId, fallbackTitle, fallbackAuthor)
             }
@@ -2576,7 +2768,7 @@ class AudiobookRepository(context: Context) {
     }
 
     private fun parseKindleChapters(uri: Uri, bookTitle: String): List<EbookChapter> {
-        val fileBytes = readUriBytesBounded(uri, 48 * 1024 * 1024) ?: return emptyList()
+        val fileBytes = readUriBytesBounded(uri, MAX_SAFE_BYTE_READ) ?: return emptyList()
         if (fileBytes.size >= 4 && fileBytes[0] == 0x50.toByte() && fileBytes[1] == 0x4B.toByte()) {
             return emptyList()
         }
@@ -2651,7 +2843,7 @@ class AudiobookRepository(context: Context) {
                         var entry = zis.nextEntry
                         while (entry != null) {
                             if (!entry.isDirectory && entry.name.lowercase(Locale.ROOT).endsWith(".fb2")) {
-                                val bytes = readZipEntryBounded(zis, 24 * 1024 * 1024)
+                                val bytes = readZipEntryBounded(zis, MAX_SAFE_BYTE_READ)
                                 if (bytes != null) return String(bytes, Charsets.UTF_8)
                             }
                             zis.closeEntry()
@@ -2661,12 +2853,12 @@ class AudiobookRepository(context: Context) {
                 }
                 null
             } else {
-                val bytes = readUriBytesBounded(uri, 24 * 1024 * 1024) ?: return null
+                val bytes = readUriBytesBounded(uri, MAX_SAFE_BYTE_READ) ?: return null
                 if (bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
                     ZipInputStream(ByteArrayInputStream(bytes)).use { zis ->
                         val entry = zis.nextEntry
                         if (entry != null) {
-                            val unzipped = readZipEntryBounded(zis, 24 * 1024 * 1024)
+                            val unzipped = readZipEntryBounded(zis, MAX_SAFE_BYTE_READ)
                             if (unzipped != null) return String(unzipped, Charsets.UTF_8)
                         }
                     }
@@ -2757,7 +2949,7 @@ class AudiobookRepository(context: Context) {
     }
 
     private fun parsePlainTextOrHtmlChapters(uri: Uri, format: String, bookTitle: String): List<EbookChapter> {
-        val bytes = readUriBytesBounded(uri, 24 * 1024 * 1024) ?: return emptyList()
+        val bytes = readUriBytesBounded(uri, MAX_SAFE_BYTE_READ) ?: return emptyList()
         val rawStr = String(bytes, Charsets.UTF_8)
 
         if (format in setOf("HTML", "HTM", "LRS") || rawStr.contains("<body", ignoreCase = true) || rawStr.contains("<bbeb", ignoreCase = true)) {
@@ -2863,7 +3055,7 @@ class AudiobookRepository(context: Context) {
                                 lower.endsWith(".png") ||
                                 lower.endsWith(".webp")
                             ) {
-                                val bytes = readZipEntryBounded(zis, 6 * 1024 * 1024)
+                                val bytes = readZipEntryBounded(zis, 4 * 1024 * 1024)
                                 if (bytes != null) {
                                     entries[name] = bytes
                                 }
@@ -3050,6 +3242,7 @@ class AudiobookRepository(context: Context) {
     }
 
     private fun readZipEntryBounded(zis: ZipInputStream, maxBytes: Int): ByteArray? {
+        val safeCap = maxBytes.coerceIn(32 * 1024, MAX_SAFE_BYTE_READ)
         return try {
             val out = ByteArrayOutputStream()
             val buf = ByteArray(8192)
@@ -3058,10 +3251,12 @@ class AudiobookRepository(context: Context) {
                 val r = zis.read(buf)
                 if (r <= 0) break
                 total += r
-                if (total > maxBytes) return null
+                if (total > safeCap) return null
                 out.write(buf, 0, r)
             }
             out.toByteArray()
+        } catch (_: OutOfMemoryError) {
+            null
         } catch (_: Throwable) {
             null
         }
@@ -3122,6 +3317,17 @@ class AudiobookRepository(context: Context) {
     suspend fun loadEpubChapters(ebook: Ebook): List<EbookChapter> = withContext(Dispatchers.IO) {
         val fmt = ebook.format.uppercase(Locale.ROOT)
         val extLower = fmt.lowercase(Locale.ROOT)
+
+        // Fix 7: If user manually imports an unsupported format, show one honest message immediately
+        if (extLower in UNSUPPORTED_EBOOK_EXTENSIONS) {
+            return@withContext listOf(
+                EbookChapter(
+                    index = 0,
+                    title = ebook.title,
+                    bodyText = "This file needs to be converted to EPUB, PDF, CBZ, or AZW3 to be read in Fablewood."
+                )
+            )
+        }
 
         if (fmt == "PDF" || fmt == "AZW4") {
             val preferOriginalPdfPages = prefs.getBoolean("pdf_original_page_mode", false)
@@ -3236,7 +3442,7 @@ class AudiobookRepository(context: Context) {
                                 lower.endsWith(".ncx") ||
                                 lower.endsWith(".txt")
                             ) {
-                                val bytes = readZipEntryBounded(zis, 8 * 1024 * 1024)
+                                val bytes = readZipEntryBounded(zis, 6 * 1024 * 1024)
                                 if (bytes != null && bytes.isNotEmpty()) {
                                     zipMap[cleanName] = bytes
                                 }
@@ -3293,15 +3499,11 @@ class AudiobookRepository(context: Context) {
         }
 
         if (chapters.isEmpty()) {
-            chapters.addAll(extractReadableTextFromBinary(ebook.uri, fmt, ebook.title))
-        }
-
-        if (chapters.isEmpty()) {
             chapters.add(
                 EbookChapter(
                     index = 0,
                     title = ebook.title,
-                    bodyText = "Unable to read this file. It may be encrypted with DRM or require 'All Files Access' permission."
+                    bodyText = "This file needs to be converted to EPUB, PDF, CBZ, or AZW3 to be read in Fablewood."
                 )
             )
         } else {
@@ -3832,7 +4034,103 @@ class AudiobookRepository(context: Context) {
             trimmed.startsWith("Part", ignoreCase = true)
     }
 
+    // Fix 9: Compute a cache stamp from track count + first track size and lastModified
+    private fun computeBookSourceStamp(book: Audiobook): String {
+        val firstUri = book.tracks.firstOrNull()?.uri ?: return "empty"
+        var size = -1L
+        var lastMod = -1L
+        try {
+            if (firstUri.scheme == "file") {
+                val f = File(firstUri.path ?: "")
+                size = f.length()
+                lastMod = f.lastModified()
+            } else {
+                appContext.contentResolver.query(firstUri, null, null, null, null)?.use { c ->
+                    if (c.moveToFirst()) {
+                        val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                        if (sizeIdx != -1 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+                        val docModIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                        val mediaModIdx = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                        if (docModIdx != -1 && !c.isNull(docModIdx)) {
+                            lastMod = c.getLong(docModIdx)
+                        } else if (mediaModIdx != -1 && !c.isNull(mediaModIdx)) {
+                            lastMod = c.getLong(mediaModIdx)
+                        }
+                    }
+                }
+                if (size <= 0L) {
+                    size = getUriFileSize(firstUri)
+                }
+            }
+        } catch (_: Throwable) {}
+        return "${book.tracks.size}:$size:$lastMod"
+    }
+
+    private fun loadCachedChapters(bookId: String, expectedStamp: String): List<Chapter>? = synchronized(stateLock) {
+        try {
+            val store = ensureStoreLoaded()
+            val cacheObj = store.optJSONObject("chaptersCache") ?: return null
+            val entry = cacheObj.optJSONObject(bookId) ?: return null
+            if (entry.optString("stamp", "") != expectedStamp) return null
+            val arr = entry.optJSONArray("items") ?: return null
+            if (arr.length() == 0) return null
+            val list = ArrayList<Chapter>(arr.length())
+            for (i in 0 until arr.length()) {
+                val ch = arr.getJSONObject(i)
+                list.add(
+                    Chapter(
+                        title = ch.optString("title", "Chapter ${i + 1}"),
+                        startMs = ch.optLong("startMs", 0L),
+                        durationMs = ch.optLong("durationMs", 0L),
+                        trackIndex = ch.optInt("trackIndex", 0)
+                    )
+                )
+            }
+            list
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun saveCachedChapters(bookId: String, stamp: String, chapters: List<Chapter>) {
+        if (bookId.isEmpty() || chapters.isEmpty()) return
+        synchronized(stateLock) {
+            try {
+                val store = ensureStoreLoaded()
+                val cacheObj = store.optJSONObject("chaptersCache") ?: JSONObject().also { store.put("chaptersCache", it) }
+                val arr = JSONArray()
+                for (ch in chapters) {
+                    arr.put(
+                        JSONObject().apply {
+                            put("title", ch.title)
+                            put("startMs", ch.startMs)
+                            put("durationMs", ch.durationMs)
+                            put("trackIndex", ch.trackIndex)
+                        }
+                    )
+                }
+                cacheObj.put(
+                    bookId,
+                    JSONObject().apply {
+                        put("stamp", stamp)
+                        put("items", arr)
+                    }
+                )
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed caching chapters for $bookId", t)
+            }
+        }
+        scheduleStoreFlush(immediate = false)
+    }
+
+    // Fix 9: Return cached M4B/Audiobook chapters from disk when stamp matches
     suspend fun getBookChapters(book: Audiobook): List<Chapter> = withContext(Dispatchers.IO) {
+        val stamp = computeBookSourceStamp(book)
+        val cachedChapters = loadCachedChapters(book.id, stamp)
+        if (!cachedChapters.isNullOrEmpty()) {
+            return@withContext cachedChapters
+        }
+
         if (book.tracks.any { it.isM4b }) {
             val embeddedChapters = mutableListOf<Chapter>()
             for ((index, track) in book.tracks.withIndex()) {
@@ -3857,7 +4155,9 @@ class AudiobookRepository(context: Context) {
                 }
             }
             if (embeddedChapters.isNotEmpty()) {
-                return@withContext normalizeChapterTitles(embeddedChapters, book.title)
+                val normalized = normalizeChapterTitles(embeddedChapters, book.title)
+                saveCachedChapters(book.id, stamp, normalized)
+                return@withContext normalized
             }
         }
 
@@ -3890,7 +4190,9 @@ class AudiobookRepository(context: Context) {
             saveBookDurations(book.id, updatedDurations)
         }
 
-        normalizeChapterTitles(chapters, book.title)
+        val normalized = normalizeChapterTitles(chapters, book.title)
+        saveCachedChapters(book.id, stamp, normalized)
+        normalized
     }
 
     private fun extractM4bChapters(uri: Uri, trackIndex: Int = 0): List<Chapter> {
@@ -4323,7 +4625,6 @@ class AudiobookRepository(context: Context) {
         null
     }
 
-    // Module E: Live Book Discovery Engine (Gutendex Free Classics + Apple Audiobooks + Google Books)
     suspend fun searchDiscoveryBooksOnline(rawQuery: String): List<DiscoveryBook> = withContext(Dispatchers.IO) {
         val trimmed = rawQuery.trim()
         val isFreeClassicsFeed = trimmed.equals("FREE_CLASSICS", ignoreCase = true) ||
@@ -4333,7 +4634,6 @@ class AudiobookRepository(context: Context) {
         val resultsList = mutableListOf<DiscoveryBook>()
         val seenKeys = mutableSetOf<String>()
 
-        // 1. Gutendex Public Domain Classics Catalog (1-Tap Free Downloadable EPUBs!)
         try {
             val gutendexUrlStr = if (isFreeClassicsFeed) {
                 "https://gutendex.com/books/?sort=popular"
@@ -4356,7 +4656,6 @@ class AudiobookRepository(context: Context) {
                         val rawAuthor = if (authorsArr != null && authorsArr.length() > 0) {
                             authorsArr.getJSONObject(0).optString("name", "Classic Author")
                         } else "Classic Author"
-                        // Convert "Austen, Jane" -> "Jane Austen"
                         val formattedAuthor = if (rawAuthor.contains(",")) {
                             val parts = rawAuthor.split(",").map { it.trim() }
                             if (parts.size >= 2) "${parts[1]} ${parts[0]}" else rawAuthor
@@ -4418,7 +4717,6 @@ class AudiobookRepository(context: Context) {
             return@withContext resultsList
         }
 
-        // 2. Apple Books Audiobook Catalog
         try {
             val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
             val itunesUrl = URL("https://itunes.apple.com/search?term=$encoded&media=audiobook&entity=audiobook&limit=6")
@@ -4462,7 +4760,6 @@ class AudiobookRepository(context: Context) {
             Log.w(TAG, "Discovery audiobook search failed for '$cleanQuery'", t)
         }
 
-        // 3. Google Books Catalog
         if (resultsList.size < 12) {
             try {
                 val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
@@ -4517,7 +4814,6 @@ class AudiobookRepository(context: Context) {
         resultsList
     }
 
-    // Module E: 1-Tap Public Domain EPUB Downloader & Instant Shelf Importer
     suspend fun downloadPublicDomainEpub(book: DiscoveryBook): Ebook? = withContext(Dispatchers.IO) {
         val rawUrl = book.epubDownloadUrl.trim()
         if (rawUrl.isEmpty()) return@withContext null
@@ -4530,7 +4826,6 @@ class AudiobookRepository(context: Context) {
             val safeAuthor = book.author.replace(Regex("[^a-zA-Z0-9 _-]"), "").trim().take(32).ifBlank { "Author" }
             val destFile = File(destDir, "$safeTitle - $safeAuthor.epub")
 
-            // Follow up to 5 HTTP/HTTPS redirects (Project Gutenberg redirects to mirror cache)
             var currentUrl = rawUrl
             var redirectCount = 0
             var downloaded = false
@@ -4575,7 +4870,6 @@ class AudiobookRepository(context: Context) {
             val fileUri = Uri.fromFile(destFile)
             val uriStr = fileUri.toString()
 
-            // Save cover art from DiscoveryBook if present
             if (book.coverBitmap != null) {
                 saveBitmapToCache(uriStr, book.coverBitmap)
                 CoverMemoryCache.cache.put(uriStr, book.coverBitmap)
@@ -4589,7 +4883,6 @@ class AudiobookRepository(context: Context) {
                 format = "EPUB"
             )
 
-            // Extract metadata/cover fallback if needed and register in ebooks cache
             extractEpubMetadataAndCover(fileUri, uriStr, book.title, book.author)
             val existing = loadEbooksCache().filterNot { it.id == uriStr }
             val updated = listOf(newEbook) + existing
@@ -4901,7 +5194,25 @@ class AudiobookRepository(context: Context) {
     }
 
     private fun decodeSampledBitmapFromStreamWithExif(stream: InputStream, reqWidth: Int, reqHeight: Int): Bitmap? {
-        val bytes = stream.readBytes()
+        val bytes = try {
+            val out = ByteArrayOutputStream()
+            val buf = ByteArray(8192)
+            var total = 0
+            while (true) {
+                val r = stream.read(buf)
+                if (r <= 0) break
+                total += r
+                if (total > 8 * 1024 * 1024) return null
+                out.write(buf, 0, r)
+            }
+            out.toByteArray()
+        } catch (_: OutOfMemoryError) {
+            return null
+        } catch (_: Throwable) {
+            return null
+        }
+        if (bytes.isEmpty()) return null
+
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
         options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)

@@ -1,6 +1,7 @@
 package com.example.audiobook
 
 import android.Manifest
+import android.app.Activity
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -13,6 +14,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import android.util.Log
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -62,6 +64,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.URLEncoder
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import kotlin.math.round
 
@@ -273,6 +277,13 @@ class PlayerBinder(
         )
     }
 
+    fun sendCustomBundleCommand(action: String, extras: Bundle) {
+        (player as? MediaController)?.sendCustomCommand(
+            SessionCommand(action, Bundle.EMPTY),
+            extras
+        )
+    }
+
     fun playBook(book: Audiobook, trackIndex: Int, positionMs: Long, autoPlay: Boolean) {
         viewModel.repository.touchBookLastPlayed(book.id)
         player.playWhenReady = autoPlay
@@ -300,6 +311,7 @@ class PlayerBinder(
                     .setArtist(book.author)
                     .setAlbumTitle(book.series)
                     .setDisplayTitle(track.name)
+                    .setExtras(Bundle().apply { putString("book_id", book.id) })
                     .setArtworkData(artworkBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
                     .build()
                 val updatedItem = MediaItem.Builder()
@@ -489,6 +501,51 @@ fun FablewoodAudiobookApp(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         Log.i(TAG, "POST_NOTIFICATIONS permission result: $granted")
+    }
+
+    // Fix 12: Export & Import Library Backup (.zip) Launchers
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { destUri ->
+        if (destUri != null) {
+            coroutineScope.launch {
+                val ok = viewModel.repository.exportLibraryBackupToUri(destUri)
+                if (ok) {
+                    Toast.makeText(context, "Library backup saved!", Toast.LENGTH_SHORT).show()
+                    try {
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "application/zip"
+                            putExtra(Intent.EXTRA_STREAM, destUri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        context.startActivity(Intent.createChooser(shareIntent, "Share Library Backup"))
+                    } catch (_: Throwable) {}
+                } else {
+                    Toast.makeText(context, "Could not export backup zip.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    val importBackupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { srcUri ->
+        if (srcUri != null) {
+            coroutineScope.launch {
+                val ok = viewModel.repository.importLibraryBackupFromUri(srcUri)
+                if (ok) {
+                    viewModel.books = viewModel.repository.loadBooksCache()
+                    viewModel.ebooks = viewModel.repository.loadEbooksCache()
+                    viewModel.completedBooksCount = viewModel.repository.loadCompletedBookIds().size
+                    viewModel.totalListenMs = viewModel.repository.getPreferences().getLong("total_listen_ms", 0L)
+                    viewModel.coverRevision++
+                    viewModel.progressRevision++
+                    Toast.makeText(context, "Library backup restored!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Backup import failed; current library kept.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     fun openExternalUrl(url: String) {
@@ -751,6 +808,13 @@ fun FablewoodAudiobookApp(
         binder.sendCustomCommand(AudiobookPlaybackService.ACTION_SET_VOLUME_BOOST, viewModel.volumeBoostEnabled)
     }
 
+    LaunchedEffect(viewModel.skipIntervalSeconds) {
+        binder.sendCustomBundleCommand(
+            AudiobookPlaybackService.ACTION_SET_SKIP_INTERVAL,
+            Bundle().apply { putInt(AudiobookPlaybackService.KEY_SKIP_SECONDS, viewModel.skipIntervalSeconds) }
+        )
+    }
+
     LaunchedEffect(viewModel.currentCoverArt, activeBook?.id) {
         val book = activeBook ?: return@LaunchedEffect
         val bmp = viewModel.currentCoverArt ?: return@LaunchedEffect
@@ -826,66 +890,20 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    LaunchedEffect(viewModel.sleepTimerActive, viewModel.sleepEndAtChapter, viewModel.isPlaying, viewModel.sleepTimerVersion) {
-        if (viewModel.sleepTimerActive && viewModel.isPlaying && !viewModel.sleepEndAtChapter) {
-            while (viewModel.sleepTimerActive && !viewModel.sleepEndAtChapter && viewModel.sleepTimeRemaining > 0L) {
-                delay(1000L)
-                val next = (viewModel.sleepTimeRemaining - 1000L).coerceAtLeast(0L)
-                viewModel.sleepTimeRemaining = next
-                if (next <= 0L) {
-                    player.pause()
-                    viewModel.cancelSleepTimer()
-                    break
-                }
-            }
-        }
-    }
-
+    // Fix 1: Activity only mirrors player position for the UI; AudiobookPlaybackService is the source of truth
     LaunchedEffect(viewModel.isPlaying) {
-        var ticksSinceSave = 0
         while (viewModel.isPlaying) {
             viewModel.currentTrackIndex = player.currentMediaItemIndex
             viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
             if (player.duration > 0L) {
                 viewModel.duration = player.duration.coerceAtLeast(0L)
             }
-
-            if (viewModel.sleepTimerActive && viewModel.sleepEndAtChapter) {
-                val currChap = getCurrentChapter(viewModel.chaptersList, viewModel.currentPosition, viewModel.currentTrackIndex)
-                val chapEndMs = if (currChap != null && currChap.durationMs > 0L) {
-                    currChap.startMs + currChap.durationMs
-                } else {
-                    viewModel.duration
-                }
-                if (chapEndMs > 0L && viewModel.currentPosition >= chapEndMs - 1500L) {
-                    player.pause()
-                    viewModel.cancelSleepTimer()
-                }
+            val latestCompletedCount = viewModel.repository.loadCompletedBookIds().size
+            if (latestCompletedCount != viewModel.completedBooksCount) {
+                viewModel.completedBooksCount = latestCompletedCount
+                viewModel.progressRevision++
             }
-
-            delay(1000L)
-            viewModel.totalListenMs += 1000L
-            ticksSinceSave++
-
-            activeBook?.let { b ->
-                if (ticksSinceSave >= 10) {
-                    ticksSinceSave = 0
-                    viewModel.repository.saveBookProgress(
-                        b.id,
-                        viewModel.currentTrackIndex,
-                        viewModel.currentPosition,
-                        viewModel.totalListenMs,
-                        immediate = false
-                    )
-                }
-                val isLastTrack = !player.hasNextMediaItem()
-                if (isLastTrack && viewModel.duration > 0L && viewModel.currentPosition >= viewModel.duration - 2000L) {
-                    if (viewModel.repository.markBookCompleted(b.id)) {
-                        viewModel.completedBooksCount = viewModel.repository.loadCompletedBookIds().size
-                        viewModel.progressRevision++
-                    }
-                }
-            }
+            delay(500L)
         }
     }
 
@@ -893,13 +911,10 @@ fun FablewoodAudiobookApp(
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 viewModel.isPlaying = playing
-                if (!playing) {
-                    viewModel.repository.markPauseTime()
-                    if (player.mediaItemCount > 0) {
-                        activeBook?.let { b ->
-                            viewModel.saveProgressNow(b.id, player.currentMediaItemIndex, player.currentPosition)
-                        }
-                    }
+                if (!playing && player.mediaItemCount > 0) {
+                    viewModel.currentTrackIndex = player.currentMediaItemIndex
+                    viewModel.currentPosition = player.currentPosition.coerceAtLeast(0L)
+                    viewModel.progressRevision++
                 }
             }
 
@@ -952,7 +967,6 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // Streamlined Side Navigation Drawer with "Discover New Content"
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -1029,6 +1043,24 @@ fun FablewoodAudiobookApp(
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val isFoldableUnfolded = maxWidth >= 600.dp
+
+            // Fix 4: Keep Screen Awake flag applied ONLY while eBook Reader or Car Mode is open
+            val isEbookReaderVisible = (viewModel.isEbookReaderFullScreen && activeEbook != null) ||
+                (isFoldableUnfolded && !viewModel.isPlayerFullScreen && !viewModel.isCarModeActive && viewModel.shelfMode == "EBOOK" && activeEbook != null)
+            val shouldKeepScreenOn = viewModel.keepScreenAwake &&
+                ((viewModel.isCarModeActive && activeBook != null) || isEbookReaderVisible)
+
+            DisposableEffect(shouldKeepScreenOn, context) {
+                val window = (context as? Activity)?.window
+                if (shouldKeepScreenOn) {
+                    window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+                onDispose {
+                    window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
 
             @Composable
             fun RenderNowPlaying(isEmbedded: Boolean) {
@@ -1447,7 +1479,6 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // Updated Discover New Content ModalBottomSheet (Clean Audiobooks vs eBooks Pills + Search Bar)
     if (showDiscoveryDialog) {
         ModalBottomSheet(
             onDismissRequest = { showDiscoveryDialog = false },
@@ -1495,7 +1526,6 @@ fun FablewoodAudiobookApp(
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                // Clean 2-Button Toggle: Audiobooks | eBooks
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -1592,7 +1622,6 @@ fun FablewoodAudiobookApp(
                             ) {
                                 Column(modifier = Modifier.padding(14.dp)) {
                                     Row(verticalAlignment = Alignment.Top) {
-                                        // Audiobooks stay square (80x80), eBooks use rectangular book ratio (74x110)
                                         TactileBookCover(
                                             coverArt = item.coverBitmap?.asImageBitmap(),
                                             fallbackIcon = if (isAudioResult) Icons.Default.Headphones else Icons.Default.MenuBook,
@@ -1682,7 +1711,7 @@ fun FablewoodAudiobookApp(
                                         } else {
                                             OutlinedButton(
                                                 onClick = {
-                                                    val libbyLink = buildFixedPartnerLinksForBook(item.title, item.author).first()
+                                                    val libbyLink = AffiliateConfig.buildPartnerLinksForBook(item.title, item.author).first()
                                                     openExternalUrl(libbyLink.url)
                                                 },
                                                 modifier = Modifier.weight(1f)
@@ -1711,14 +1740,13 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // Apple Books-Style Book Detail ModalBottomSheet (with Fixed Libby & B&N Search Links)
     if (selectedDiscoveryBookForDetail != null) {
         val book = selectedDiscoveryBookForDetail!!
         val isFreeEpub = book.epubDownloadUrl.isNotBlank()
         val isDownloadingThis = viewModel.downloadingBookId == book.id
         val isAudioDetail = book.formatLabel.contains("Audio", ignoreCase = true) && !isFreeEpub
         val partnerLinks = remember(book.title, book.author) {
-            buildFixedPartnerLinksForBook(book.title, book.author)
+            AffiliateConfig.buildPartnerLinksForBook(book.title, book.author)
         }
         val libbyLink = partnerLinks.firstOrNull { it.storeName.contains("Libby", true) }
         val bnLink = partnerLinks.firstOrNull { it.storeName.contains("Barnes", true) }
@@ -1907,10 +1935,9 @@ fun FablewoodAudiobookApp(
         }
     }
 
-    // Multi-Retailer Affiliate & Library Store Selector Sheet
     if (showStoreLinksDialog && storeLinksBookTitle.isNotEmpty()) {
         val partnerLinks = remember(storeLinksBookTitle, storeLinksBookAuthor) {
-            buildFixedPartnerLinksForBook(storeLinksBookTitle, storeLinksBookAuthor)
+            AffiliateConfig.buildPartnerLinksForBook(storeLinksBookTitle, storeLinksBookAuthor)
         }
         AlertDialog(
             onDismissRequest = { showStoreLinksDialog = false },
@@ -2344,7 +2371,7 @@ fun FablewoodAudiobookApp(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(stringResource(R.string.volume_boost_title), fontWeight = FontWeight.Bold)
                             Text(
-                                stringResource(R.string.volume_boost_desc),
+                                text = "Amplify quiet recordings (+9 dB)",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -2445,6 +2472,26 @@ fun FablewoodAudiobookApp(
                         )
                     }
 
+                    // Fix 4: Keep Screen Awake Setting (Default ON)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Keep Screen Awake", fontWeight = FontWeight.Bold)
+                            Text(
+                                "Keep screen on while reading eBooks or in Car Mode",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = viewModel.keepScreenAwake,
+                            onCheckedChange = { viewModel.setKeepScreenAwakeEnabled(it) }
+                        )
+                    }
+
                     HorizontalDivider()
 
                     Column {
@@ -2529,6 +2576,40 @@ fun FablewoodAudiobookApp(
                             if (viewModel.isBatchFetchingCovers) "Finding Missing Covers..."
                             else "Auto-Find Missing Covers"
                         )
+                    }
+
+                    HorizontalDivider()
+
+                    // Fix 12: Export & Import Library Backup (.zip)
+                    Text(
+                        text = "Backup & Restore",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsDialog = false
+                            val stamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+                            exportBackupLauncher.launch("Fablewood_Backup_$stamp.zip")
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Backup, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Export Library Backup (.zip)")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsDialog = false
+                            importBackupLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Import Library Backup (.zip)")
                     }
                 }
             },
@@ -2706,6 +2787,10 @@ fun FablewoodAudiobookApp(
                         TextButton(
                             onClick = {
                                 viewModel.startTimedSleep(mins)
+                                binder.sendCustomBundleCommand(
+                                    AudiobookPlaybackService.ACTION_START_TIMED_SLEEP,
+                                    Bundle().apply { putInt(AudiobookPlaybackService.KEY_SLEEP_MINUTES, mins) }
+                                )
                                 showSleepMenu = false
                             },
                             modifier = Modifier.fillMaxWidth()
@@ -2714,6 +2799,7 @@ fun FablewoodAudiobookApp(
                     TextButton(
                         onClick = {
                             viewModel.startEndOfChapterSleep()
+                            binder.sendCustomBundleCommand(AudiobookPlaybackService.ACTION_START_EOC_SLEEP, Bundle.EMPTY)
                             showSleepMenu = false
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -2722,6 +2808,7 @@ fun FablewoodAudiobookApp(
                         TextButton(
                             onClick = {
                                 viewModel.cancelSleepTimer()
+                                binder.sendCustomBundleCommand(AudiobookPlaybackService.ACTION_CANCEL_SLEEP, Bundle.EMPTY)
                                 showSleepMenu = false
                             },
                             modifier = Modifier.fillMaxWidth()

@@ -8,21 +8,14 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.core.text.HtmlCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLEncoder
-import java.util.Locale
+import kotlin.math.max
 
 enum class ProFeature(val title: String, val description: String) {
     DUAL_PAGE_FOLDABLE("Foldable Dual-Page Spread", "Read across a 2-column open-book layout on foldables and tablets."),
@@ -33,6 +26,10 @@ enum class ProFeature(val title: String, val description: String) {
     READING_STATS("Reading Streaks & Insights", "Track daily reading minutes, pages turned, and long-term streaks.")
 }
 
+/**
+ * Fix 10: Honest local feature manager — all features run directly for the local user
+ * without fake paywalls or PRO badges.
+ */
 object ProFeatureManager {
     private val _isProUser = MutableStateFlow(true)
     val isProUser: StateFlow<Boolean> = _isProUser.asStateFlow()
@@ -40,19 +37,14 @@ object ProFeatureManager {
     var activePaywallPromptFeature by mutableStateOf<ProFeature?>(null)
 
     fun setProStatus(unlocked: Boolean) {
-        _isProUser.value = unlocked
+        _isProUser.value = true
+        activePaywallPromptFeature = null
     }
 
-    fun isUnlocked(feature: ProFeature): Boolean {
-        return _isProUser.value
-    }
+    fun isUnlocked(feature: ProFeature): Boolean = true
 
     fun runIfPro(feature: ProFeature, action: () -> Unit) {
-        if (isUnlocked(feature)) {
-            action()
-        } else {
-            activePaywallPromptFeature = feature
-        }
+        action()
     }
 }
 
@@ -120,122 +112,9 @@ val DESIGNER_READER_PRESETS = listOf(
     )
 )
 
-/**
- * Fixed Partner & Library URL Builder:
- * - Barnes & Noble uses https://www.barnesandnoble.com/search?q=title+author
- * - Libby uses %20 path encoding inside /search/all/search/query-.../page-1 so Libby executes the search immediately.
- */
+// Fix 11: Delegates directly to the single canonical AffiliateConfig builder in AudiobookRepository
 fun buildFixedPartnerLinksForBook(title: String, author: String): List<StoreLinkOption> {
-    val cleanSearch = cleanAudiobookSearchQuery(title, author)
-    val plusEncoded = try {
-        URLEncoder.encode(cleanSearch, "UTF-8")
-    } catch (_: Throwable) {
-        cleanSearch.trim().replace(Regex("\\s+"), "+")
-    }
-    val percentSpaceEncoded = plusEncoded.replace("+", "%20")
-
-    // 1. Libby / OverDrive Local Library Deep-Link (uses %20 path encoding so Libby finds the query)
-    val libbyUrl = "https://libbyapp.com/search/all/search/query-$percentSpaceEncoded/page-1"
-
-    // 2. Libro.fm (DRM-Free M4B Audiobooks)
-    val libroBase = "https://libro.fm/search?q=$plusEncoded"
-    val libroUrl = if (AffiliateConfig.LIBRO_FM_AFFILIATE_ID.isNotBlank()) {
-        "$libroBase&aff=${AffiliateConfig.LIBRO_FM_AFFILIATE_ID}"
-    } else libroBase
-
-    // 3. Amazon & Audible
-    val amazonBase = "https://www.amazon.com/s?k=$plusEncoded&i=audible"
-    val amazonUrl = if (AffiliateConfig.AMAZON_ASSOCIATE_TAG.isNotBlank()) {
-        "$amazonBase&tag=${AffiliateConfig.AMAZON_ASSOCIATE_TAG}"
-    } else amazonBase
-
-    // 4. Barnes & Noble (Updated to /search?q= format!)
-    val bnBase = "https://www.barnesandnoble.com/search?q=$plusEncoded"
-    val bnUrl = if (AffiliateConfig.BARNES_AND_NOBLE_AFFILIATE_ID.isNotBlank()) {
-        "$bnBase&aff=${AffiliateConfig.BARNES_AND_NOBLE_AFFILIATE_ID}"
-    } else bnBase
-
-    // 5. Bookshop.org
-    val bookshopBase = "https://bookshop.org/beta-search?keywords=$plusEncoded"
-    val bookshopUrl = if (AffiliateConfig.BOOKSHOP_ORG_AFFILIATE_ID.isNotBlank()) {
-        "$bookshopBase&a_aid=${AffiliateConfig.BOOKSHOP_ORG_AFFILIATE_ID}"
-    } else bookshopBase
-
-    // 6. Rakuten Kobo
-    val koboBase = "https://www.kobo.com/us/en/search?query=$plusEncoded"
-    val koboUrl = if (AffiliateConfig.KOBO_AFFILIATE_ID.isNotBlank()) {
-        "$koboBase&aff=${AffiliateConfig.KOBO_AFFILIATE_ID}"
-    } else koboBase
-
-    // 7. Audiobooks.com
-    val abComBase = "https://www.audiobooks.com/search/book/$percentSpaceEncoded"
-    val abComUrl = if (AffiliateConfig.AUDIOBOOKS_COM_AFFILIATE_ID.isNotBlank()) {
-        "$abComBase?aff=${AffiliateConfig.AUDIOBOOKS_COM_AFFILIATE_ID}"
-    } else abComBase
-
-    // 8. Standard Ebooks & LibriVox
-    val standardEbooksUrl = "https://standardebooks.org/ebooks?query=$plusEncoded"
-    val librivoxUrl = "https://librivox.org/search?q=$plusEncoded&search_form=advanced"
-
-    return listOf(
-        StoreLinkOption(
-            storeName = "Libby / Local Library",
-            subtitle = "Borrow for free with your local library card",
-            badgeText = "FREE LIBRARY",
-            url = libbyUrl,
-            isLibraryOrFree = true
-        ),
-        StoreLinkOption(
-            storeName = "Barnes & Noble",
-            subtitle = "NOOK eBooks, B&N Audiobooks & Hardcovers",
-            badgeText = "B&N / NOOK",
-            url = bnUrl
-        ),
-        StoreLinkOption(
-            storeName = "Amazon & Audible",
-            subtitle = "Audiobooks, Kindle eBooks & Print editions",
-            badgeText = "AUDIBLE / KINDLE",
-            url = amazonUrl
-        ),
-        StoreLinkOption(
-            storeName = "Libro.fm",
-            subtitle = "Buy DRM-free .m4b audiobooks & import into Fablewood",
-            badgeText = "DRM-FREE M4B",
-            url = libroUrl
-        ),
-        StoreLinkOption(
-            storeName = "Bookshop.org",
-            subtitle = "Supports local independent bookstores",
-            badgeText = "INDIE BOOKS",
-            url = bookshopUrl
-        ),
-        StoreLinkOption(
-            storeName = "Rakuten Kobo",
-            subtitle = "Global eBook & Audiobook store",
-            badgeText = "KOBO",
-            url = koboUrl
-        ),
-        StoreLinkOption(
-            storeName = "Audiobooks.com",
-            subtitle = "Instant audiobook streaming & downloads",
-            badgeText = "AUDIO",
-            url = abComUrl
-        ),
-        StoreLinkOption(
-            storeName = "Standard Ebooks (Free Download)",
-            subtitle = "Download free public-domain .epub & .azw3 classics",
-            badgeText = "FREE EPUB",
-            url = standardEbooksUrl,
-            isLibraryOrFree = true
-        ),
-        StoreLinkOption(
-            storeName = "LibriVox (Free Audiobooks)",
-            subtitle = "Download free public-domain .m4b / .mp3 audiobooks",
-            badgeText = "FREE AUDIO",
-            url = librivoxUrl,
-            isLibraryOrFree = true
-        )
-    )
+    return AffiliateConfig.buildPartnerLinksForBook(title, author)
 }
 
 class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
@@ -249,8 +128,12 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var currentEbookId by mutableStateOf(repository.getLastEbookId() ?: "")
     var currentEbookChapters by mutableStateOf<List<EbookChapter>>(emptyList())
     var currentEbookChapterIndex by mutableIntStateOf(0)
+    var currentEbookCharOffset by mutableIntStateOf(0)
     var isLoadingEbook by mutableStateOf(false)
     var isEbookReaderFullScreen by mutableStateOf(false)
+
+    // Fix 4: Keep Screen Awake setting (default ON) for eBook Reader & Car Mode
+    var keepScreenAwake by mutableStateOf(repository.getPreferences().getBoolean("keep_screen_awake", true))
 
     var ebookFontSizeSp by mutableFloatStateOf(repository.getPreferences().getFloat("ebook_font_sp", 18f))
     var ebookReaderTheme by mutableStateOf(repository.getPreferences().getString("ebook_reader_theme", "SEPIA") ?: "SEPIA")
@@ -264,7 +147,6 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var ebookCustomBgHex by mutableStateOf(repository.getPreferences().getString("ebook_custom_bg_hex", "#121E18") ?: "#121E18")
     var ebookCustomTextHex by mutableStateOf(repository.getPreferences().getString("ebook_custom_text_hex", "#E6EFEA") ?: "#E6EFEA")
 
-    // Discover Tab State: Format toggle ("AUDIOBOOK" or "EBOOK") + Search Query
     var discoveryFormatFilter by mutableStateOf("AUDIOBOOK")
     var discoveryQuery by mutableStateOf("")
     var discoveryBooks by mutableStateOf<List<DiscoveryBook>>(emptyList())
@@ -299,9 +181,9 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     var silenceTrimEnabled by mutableStateOf(repository.getPreferences().getBoolean("silence_trim", false))
     var volumeBoostEnabled by mutableStateOf(repository.getPreferences().getBoolean("volume_boost", false))
 
-    var sleepTimerActive by mutableStateOf(false)
-    var sleepTimeRemaining by mutableLongStateOf(0L)
-    var sleepEndAtChapter by mutableStateOf(false)
+    var sleepTimerActive by mutableStateOf(AudiobookPlaybackService.sleepTimerActiveFlow.value)
+    var sleepTimeRemaining by mutableLongStateOf(AudiobookPlaybackService.sleepTimeRemainingMsFlow.value)
+    var sleepEndAtChapter by mutableStateOf(AudiobookPlaybackService.sleepEndAtChapterFlow.value)
     var sleepTimerVersion by mutableIntStateOf(0)
 
     var completedBooksCount by mutableIntStateOf(repository.loadCompletedBookIds().size)
@@ -321,6 +203,37 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     private var coverSearchJob: Job? = null
     private var ebookLoadJob: Job? = null
     private var discoveryJob: Job? = null
+
+    init {
+        AudiobookPlaybackService.syncInitialTotalListenMs(totalListenMs)
+        viewModelScope.launch {
+            AudiobookPlaybackService.sleepTimerActiveFlow.collect { active ->
+                sleepTimerActive = active
+            }
+        }
+        viewModelScope.launch {
+            AudiobookPlaybackService.sleepTimeRemainingMsFlow.collect { rem ->
+                sleepTimeRemaining = rem
+            }
+        }
+        viewModelScope.launch {
+            AudiobookPlaybackService.sleepEndAtChapterFlow.collect { eoc ->
+                sleepEndAtChapter = eoc
+            }
+        }
+        viewModelScope.launch {
+            AudiobookPlaybackService.totalListenMsFlow.collect { serviceListenMs ->
+                if (serviceListenMs > totalListenMs) {
+                    totalListenMs = serviceListenMs
+                }
+            }
+        }
+    }
+
+    fun setKeepScreenAwakeEnabled(enabled: Boolean) {
+        keepScreenAwake = enabled
+        repository.getPreferences().edit().putBoolean("keep_screen_awake", enabled).apply()
+    }
 
     fun updateSmartShelfFilter(filterKey: String) {
         smartShelfFilter = filterKey
@@ -429,21 +342,18 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     }
 
     fun updateCustomThemeHex(bgHex: String, textHex: String) {
-        ProFeatureManager.runIfPro(ProFeature.CUSTOM_THEMES) {
-            ebookCustomBgHex = bgHex
-            ebookCustomTextHex = textHex
-            ebookReaderTheme = "CUSTOM"
-            ebookPresetId = "CUSTOM"
-            repository.getPreferences().edit()
-                .putString("ebook_custom_bg_hex", bgHex)
-                .putString("ebook_custom_text_hex", textHex)
-                .putString("ebook_reader_theme", "CUSTOM")
-                .putString("ebook_preset_id", "CUSTOM")
-                .apply()
-        }
+        ebookCustomBgHex = bgHex
+        ebookCustomTextHex = textHex
+        ebookReaderTheme = "CUSTOM"
+        ebookPresetId = "CUSTOM"
+        repository.getPreferences().edit()
+            .putString("ebook_custom_bg_hex", bgHex)
+            .putString("ebook_custom_text_hex", textHex)
+            .putString("ebook_reader_theme", "CUSTOM")
+            .putString("ebook_preset_id", "CUSTOM")
+            .apply()
     }
 
-    // Searches specifically for Audiobooks or eBooks depending on the selected Discover pill
     fun searchDiscoveryCatalog(query: String, formatFilter: String = discoveryFormatFilter) {
         discoveryFormatFilter = formatFilter
         val effectiveQuery = query.trim().ifBlank {
@@ -516,20 +426,32 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
             val loadedChapters = repository.loadEpubChapters(ebook)
             currentEbookChapters = loadedChapters
             val savedIdx = repository.getEbookChapterIndex(ebook.id).coerceIn(0, (loadedChapters.size - 1).coerceAtLeast(0))
+            val savedCharOffset = repository.getPreferences().getInt("ebook_char_offset_${ebook.id}", 0).coerceAtLeast(0)
             currentEbookChapterIndex = savedIdx
+            currentEbookCharOffset = savedCharOffset
             repository.saveEbookProgress(ebook.id, savedIdx, loadedChapters.size)
             isLoadingEbook = false
             progressRevision++
         }
     }
 
-    fun goToEbookChapter(index: Int) {
+    fun goToEbookChapter(index: Int, charOffset: Int = 0) {
         if (currentEbookChapters.isEmpty()) return
         val clamped = index.coerceIn(0, currentEbookChapters.lastIndex)
         currentEbookChapterIndex = clamped
+        currentEbookCharOffset = charOffset.coerceAtLeast(0)
         if (currentEbookId.isNotEmpty()) {
+            repository.getPreferences().edit().putInt("ebook_char_offset_$currentEbookId", currentEbookCharOffset).apply()
             repository.saveEbookProgress(currentEbookId, clamped, currentEbookChapters.size)
             progressRevision++
+        }
+    }
+
+    fun saveEbookCharOffset(charOffset: Int) {
+        val safeOffset = charOffset.coerceAtLeast(0)
+        currentEbookCharOffset = safeOffset
+        if (currentEbookId.isNotEmpty()) {
+            repository.getPreferences().edit().putInt("ebook_char_offset_$currentEbookId", safeOffset).apply()
         }
     }
 
@@ -595,8 +517,10 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     }
 
     fun updateSkipInterval(seconds: Int) {
-        skipIntervalSeconds = seconds
-        repository.getPreferences().edit().putInt("skip_interval", seconds).apply()
+        val cleanSecs = seconds.coerceIn(5, 60)
+        skipIntervalSeconds = cleanSecs
+        repository.getPreferences().edit().putInt("skip_interval", cleanSecs).apply()
+        AudiobookPlaybackService.refreshSkipIntervalFromUi(cleanSecs)
     }
 
     fun setSilenceTrim(enabled: Boolean) {
@@ -610,23 +534,17 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
     }
 
     fun startTimedSleep(minutes: Int) {
-        sleepTimeRemaining = minutes * 60 * 1000L
-        sleepEndAtChapter = false
-        sleepTimerActive = true
+        AudiobookPlaybackService.startTimedSleepFromUi(minutes)
         sleepTimerVersion++
     }
 
     fun startEndOfChapterSleep() {
-        sleepEndAtChapter = true
-        sleepTimeRemaining = 0L
-        sleepTimerActive = true
+        AudiobookPlaybackService.startEndOfChapterSleepFromUi()
         sleepTimerVersion++
     }
 
     fun cancelSleepTimer() {
-        sleepTimerActive = false
-        sleepEndAtChapter = false
-        sleepTimeRemaining = 0L
+        AudiobookPlaybackService.cancelSleepTimerFromUi()
     }
 
     fun loadChapters(book: Audiobook) {
@@ -785,7 +703,11 @@ class LibraryViewModel(val repository: AudiobookRepository) : ViewModel() {
 
     fun saveProgressNow(bookId: String = currentBookId, trackIndex: Int = currentTrackIndex, positionMs: Long = currentPosition) {
         if (bookId.isEmpty()) return
-        repository.saveBookProgress(bookId, trackIndex, positionMs, totalListenMs, immediate = true)
+        val storedListenMs = repository.getPreferences().getLong("total_listen_ms", 0L)
+        val serviceListenMs = AudiobookPlaybackService.totalListenMsFlow.value
+        val safeListenMs = max(totalListenMs, max(storedListenMs, serviceListenMs))
+        totalListenMs = safeListenMs
+        repository.saveBookProgress(bookId, trackIndex, positionMs, safeListenMs, immediate = true)
         progressRevision++
     }
 }

@@ -125,7 +125,6 @@ fun formatTime(ms: Long): String {
     }
 }
 
-// Symmetrical Rewind / Fast-Forward Circular Arrow Icon with centered seconds label
 @Composable
 fun SymmetricalSkipIcon(
     seconds: Int,
@@ -145,7 +144,6 @@ fun SymmetricalSkipIcon(
             val topLeft = Offset(pad, pad)
             val arcSize = Size(arcDiameter, arcDiameter)
 
-            // Mirror-image circular arc with an open gap at the top for the arrowhead
             val startAngle = if (isForward) -65f else -115f
             val sweepAngle = if (isForward) 300f else -300f
 
@@ -159,7 +157,6 @@ fun SymmetricalSkipIcon(
                 style = Stroke(width = strokePx, cap = StrokeCap.Round)
             )
 
-            // Symmetrical arrowhead at the top of the circle pointing left (rewind) or right (forward)
             val cx = size.width / 2f
             val topY = pad
             val arrowW = 5.5.dp.toPx()
@@ -300,11 +297,7 @@ fun ReadingStreakStatsCard(
                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
                 shape = RoundedCornerShape(18.dp)
             )
-            .clickable {
-                ProFeatureManager.runIfPro(ProFeature.READING_STATS) {
-                    onClick()
-                }
-            }
+            .clickable { onClick() }
     ) {
         Row(
             modifier = Modifier
@@ -330,27 +323,12 @@ fun ReadingStreakStatsCard(
                 }
                 Spacer(Modifier.width(12.dp))
                 Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "$activeStreak Day Reading Streak",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Surface(
-                            color = MaterialTheme.colorScheme.primary,
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                text = "PRO",
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                            )
-                        }
-                    }
+                    Text(
+                        text = "$activeStreak Day Reading Streak",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                     Text(
                         text = "Today: ${snapshot.todayMinutes}m • ${snapshot.todayPages} pgs  |  Total: ${totalCombinedMinutes}m",
                         style = MaterialTheme.typography.bodySmall,
@@ -535,11 +513,11 @@ val QUOTE_CARD_TEMPLATES = listOf(
     )
 )
 
-private fun loadAllEbookHighlights(prefs: SharedPreferences): List<EbookHighlight> {
-    val raw = prefs.getString("ebook_highlights_v1", "[]") ?: "[]"
+// Fix 13: Read & write eBook highlights directly via library.json in AudiobookRepository
+private fun loadAllEbookHighlights(repository: AudiobookRepository): List<EbookHighlight> {
     val list = mutableListOf<EbookHighlight>()
     try {
-        val arr = JSONArray(raw)
+        val arr = repository.loadHighlightsJsonArray()
         for (i in 0 until arr.length()) {
             val obj = arr.getJSONObject(i)
             list.add(
@@ -561,7 +539,7 @@ private fun loadAllEbookHighlights(prefs: SharedPreferences): List<EbookHighligh
     return list
 }
 
-private fun saveAllEbookHighlights(prefs: SharedPreferences, list: List<EbookHighlight>) {
+private fun saveAllEbookHighlights(repository: AudiobookRepository, list: List<EbookHighlight>) {
     try {
         val arr = JSONArray()
         for (item in list) {
@@ -580,7 +558,7 @@ private fun saveAllEbookHighlights(prefs: SharedPreferences, list: List<EbookHig
                 }
             )
         }
-        prefs.edit().putString("ebook_highlights_v1", arr.toString()).apply()
+        repository.saveHighlightsJsonArray(arr)
     } catch (_: Throwable) {}
 }
 
@@ -784,7 +762,6 @@ private fun extractHeroTintFromBitmap(bitmap: Bitmap?): Color? {
     return Color(argb)
 }
 
-// Enhanced Series Detector: Checks explicit series metadata, "Book N" / "#N" markers, or colon/dash prefixes
 private fun deriveSeriesName(rawSeries: String, rawTitle: String): String {
     if (rawSeries.isNotBlank()) return rawSeries.trim()
     val cleanTitle = rawTitle.trim()
@@ -1011,7 +988,6 @@ fun CurrentlyReadingHeroCard(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Square cover for Audiobooks, Rectangular 2:3 cover for eBooks!
                 TactileBookCover(
                     coverArt = coverBitmap?.asImageBitmap(),
                     fallbackIcon = if (isAudio) Icons.Default.Headphones else Icons.Default.MenuBook,
@@ -1167,11 +1143,7 @@ fun SmartShelfFilterRow(
         }
         if (onOpenQuotesHub != null) {
             AssistChip(
-                onClick = {
-                    ProFeatureManager.runIfPro(ProFeature.QUOTES_HUB) {
-                        onOpenQuotesHub()
-                    }
-                },
+                onClick = { onOpenQuotesHub() },
                 leadingIcon = {
                     Icon(
                         Icons.Default.FormatQuote,
@@ -1197,13 +1169,13 @@ fun SmartShelfFilterRow(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GlobalQuotesHubSheet(
-    prefs: SharedPreferences,
+    repository: AudiobookRepository,
     filterEbookId: String? = null,
     onDismiss: () -> Unit,
     onJumpToHighlight: ((EbookHighlight) -> Unit)? = null,
     onOpenQuoteCardStudio: (EbookHighlight) -> Unit
 ) {
-    var allHighlights by remember { mutableStateOf(loadAllEbookHighlights(prefs)) }
+    var allHighlights by remember { mutableStateOf(loadAllEbookHighlights(repository)) }
     var searchQuery by remember { mutableStateOf("") }
     var selectedBookFilter by remember { mutableStateOf(filterEbookId ?: "ALL") }
 
@@ -1244,19 +1216,6 @@ fun GlobalQuotesHubSheet(
                     Icon(Icons.Default.FormatQuote, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(8.dp))
                     Text("Quotes & Notes Hub", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.width(8.dp))
-                    Surface(
-                        color = MaterialTheme.colorScheme.primary,
-                        shape = RoundedCornerShape(6.dp)
-                    ) {
-                        Text(
-                            text = "PRO",
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
                 }
                 TextButton(onClick = onDismiss) {
                     Text("Done", fontWeight = FontWeight.Bold)
@@ -1417,11 +1376,7 @@ fun GlobalQuotesHubSheet(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     TextButton(
-                                        onClick = {
-                                            ProFeatureManager.runIfPro(ProFeature.QUOTE_CARDS) {
-                                                onOpenQuoteCardStudio(item)
-                                            }
-                                        }
+                                        onClick = { onOpenQuoteCardStudio(item) }
                                     ) {
                                         Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(5.dp))
@@ -1432,7 +1387,7 @@ fun GlobalQuotesHubSheet(
                                         onClick = {
                                             val updated = allHighlights.filterNot { it.id == item.id }
                                             allHighlights = updated
-                                            saveAllEbookHighlights(prefs, updated)
+                                            saveAllEbookHighlights(repository, updated)
                                         }
                                     ) {
                                         Icon(
@@ -2670,7 +2625,6 @@ fun BookshelfContent(
         books.find { it.id == activeBookId } ?: books.firstOrNull()
     }
 
-    // True Series Filter: Only displays books that belong to a series or multi-book author group!
     val filteredBooks = remember(books, viewModel.smartShelfFilter, viewModel.progressRevision, viewModel.completedBooksCount) {
         when (viewModel.smartShelfFilter) {
             "READING" -> books.filter { viewModel.getAudiobookStatus(it) == "READING" }
@@ -2821,7 +2775,7 @@ fun BookshelfContent(
 
     if (showQuotesHub) {
         GlobalQuotesHubSheet(
-            prefs = viewModel.repository.getPreferences(),
+            repository = viewModel.repository,
             onDismiss = { showQuotesHub = false },
             onOpenQuoteCardStudio = { hl ->
                 showQuotesHub = false
@@ -2911,7 +2865,6 @@ fun EbookShelfContent(
     val heroProgress = if (heroTotalChaps > 0) ((heroCurrChap + 1).toFloat() / heroTotalChaps).coerceIn(0.02f, 1f) else 0f
     val heroSubtitle = if (heroTotalChaps > 0) "Chapter ${heroCurrChap + 1} of $heroTotalChaps" else "${heroEbook?.format ?: "EPUB"} eBook"
 
-    // True Series Filter: Only displays eBooks that belong to a series or multi-book author group!
     val filteredEbooks = remember(ebooks, viewModel.smartShelfFilter, viewModel.progressRevision) {
         when (viewModel.smartShelfFilter) {
             "READING" -> ebooks.filter { viewModel.getEbookStatus(it) == "READING" }
@@ -3056,13 +3009,13 @@ fun EbookShelfContent(
 
     if (showQuotesHub) {
         GlobalQuotesHubSheet(
-            prefs = viewModel.repository.getPreferences(),
+            repository = viewModel.repository,
             onDismiss = { showQuotesHub = false },
             onJumpToHighlight = { hl ->
                 showQuotesHub = false
                 val targetEb = ebooks.find { it.id == hl.ebookId }
                 if (targetEb != null) {
-                    viewModel.repository.saveEbookProgress(targetEb.id, hl.chapterIndex, 100)
+                    viewModel.repository.saveEbookProgress(targetEb.id, hl.chapterIndex, 100, 0)
                     onSelectEbook(targetEb)
                 }
             },
@@ -3084,7 +3037,6 @@ fun EbookShelfContent(
     }
 }
 
-// Rectangular 2:3 Book Cover Ratio on the eBook Shelf so full covers never get cropped into squares!
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun EbookCardWrapper(
@@ -3211,7 +3163,6 @@ fun EpubReaderScreen(
     val currentChapter = resolvedChapters.getOrNull(currentChapterIndex)
     val isVisualPageMode = (fmtUpper in VISUAL_PAGE_EBOOK_FORMATS) && (currentChapter?.bodyText.isNullOrBlank())
 
-    // Module A State
     var activePresetId by remember { mutableStateOf(prefs.getString("ebook_preset_id", "EDITORIAL") ?: "EDITORIAL") }
     var fontFamilyKey by remember { mutableStateOf(prefs.getString("ebook_font_family", "SERIF") ?: "SERIF") }
     var lineHeightMultiplier by remember { mutableFloatStateOf(prefs.getFloat("ebook_line_height_mult", 1.42f)) }
@@ -3224,7 +3175,6 @@ fun EpubReaderScreen(
     var showCustomizeLayoutDrawer by remember { mutableStateOf(false) }
     var showCustomThemeBuilder by remember { mutableStateOf(false) }
 
-    // Module C State
     var dualPageSpreadEnabled by remember { mutableStateOf(prefs.getBoolean("ebook_dual_page_spread", true)) }
     var edgeBrightnessEnabled by remember { mutableStateOf(prefs.getBoolean("ebook_edge_brightness", true)) }
     var readerBrightness by remember { mutableFloatStateOf(prefs.getFloat("ebook_brightness_level", 0.80f)) }
@@ -3232,8 +3182,7 @@ fun EpubReaderScreen(
     var activeFootnotePopup by remember { mutableStateOf<Pair<String, String>?>(null) }
     var returnBookmark by remember { mutableStateOf<ReaderReturnBookmark?>(null) }
 
-    // Module D State + Sentence-by-Sentence Quote Selection
-    var allHighlights by remember { mutableStateOf(loadAllEbookHighlights(prefs)) }
+    var allHighlights by remember { mutableStateOf(loadAllEbookHighlights(repository)) }
     val currentChapterHighlights = remember(allHighlights, ebook.id, currentChapterIndex) {
         allHighlights.filter { it.ebookId == ebook.id && it.chapterIndex == currentChapterIndex }
     }
@@ -3260,7 +3209,6 @@ fun EpubReaderScreen(
     var showQuotesHubSheet by remember { mutableStateOf(false) }
     var activeQuoteStudioPassage by remember { mutableStateOf<String?>(null) }
 
-    // Module F State: Hybrid TTS Read-Aloud Engine + Multiple Narrator Voices [PRO]
     var isTtsBarVisible by remember { mutableStateOf(false) }
     var isTtsPlaying by remember { mutableStateOf(false) }
     var ttsSentenceIndex by remember { mutableIntStateOf(0) }
@@ -3410,7 +3358,11 @@ fun EpubReaderScreen(
         mutableStateOf(prefs.getBoolean("pdf_original_page_mode", false))
     }
 
+    // Fix 3: Track both subPageIndex and character offset inside the chapter so resume & font changes preserve position
     var subPageIndex by remember(ebook.id, currentChapterIndex) { mutableIntStateOf(0) }
+    var activeCharOffset by remember(ebook.id, currentChapterIndex) {
+        mutableIntStateOf(repository.getEbookCharOffset(ebook.id))
+    }
     var startAtLastSubPage by remember { mutableStateOf(false) }
     var pendingReturnSubPage by remember { mutableIntStateOf(-1) }
 
@@ -3440,7 +3392,7 @@ fun EpubReaderScreen(
         )
         val updated = listOf(newEntry) + existingFiltered
         allHighlights = updated
-        saveAllEbookHighlights(prefs, updated)
+        saveAllEbookHighlights(repository, updated)
     }
 
     LaunchedEffect(currentChapterIndex, ebook.id, isVisualPageMode, readerTheme) {
@@ -3464,8 +3416,7 @@ fun EpubReaderScreen(
             .let { if (!isEmbeddedPane) it.windowInsetsPadding(WindowInsets.systemBars) else it }
     ) {
         val isWideScreen = maxWidth >= 580.dp
-        val isProUnlocked by ProFeatureManager.isProUser.collectAsState()
-        val useDualSpread = isWideScreen && dualPageSpreadEnabled && isProUnlocked && !isVisualPageMode
+        val useDualSpread = isWideScreen && dualPageSpreadEnabled && !isVisualPageMode
         val pageStep = if (useDualSpread) 2 else 1
 
         Column(modifier = Modifier.fillMaxSize()) {
@@ -3523,10 +3474,8 @@ fun EpubReaderScreen(
                         if (isWideScreen && !isVisualPageMode) {
                             IconButton(
                                 onClick = {
-                                    ProFeatureManager.runIfPro(ProFeature.DUAL_PAGE_FOLDABLE) {
-                                        dualPageSpreadEnabled = !dualPageSpreadEnabled
-                                        prefs.edit().putBoolean("ebook_dual_page_spread", dualPageSpreadEnabled).apply()
-                                    }
+                                    dualPageSpreadEnabled = !dualPageSpreadEnabled
+                                    prefs.edit().putBoolean("ebook_dual_page_spread", dualPageSpreadEnabled).apply()
                                 }
                             ) {
                                 Icon(
@@ -3539,12 +3488,10 @@ fun EpubReaderScreen(
                         if (!isVisualPageMode) {
                             IconButton(
                                 onClick = {
-                                    ProFeatureManager.runIfPro(ProFeature.TTS_READ_ALOUD) {
-                                        isTtsBarVisible = !isTtsBarVisible
-                                        if (!isTtsBarVisible) {
-                                            isTtsPlaying = false
-                                            ttsEngine?.stop()
-                                        }
+                                    isTtsBarVisible = !isTtsBarVisible
+                                    if (!isTtsBarVisible) {
+                                        isTtsPlaying = false
+                                        ttsEngine?.stop()
                                     }
                                 }
                             ) {
@@ -3556,11 +3503,7 @@ fun EpubReaderScreen(
                             }
                         }
                         IconButton(
-                            onClick = {
-                                ProFeatureManager.runIfPro(ProFeature.QUOTES_HUB) {
-                                    showQuotesHubSheet = true
-                                }
-                            }
+                            onClick = { showQuotesHubSheet = true }
                         ) {
                             Icon(Icons.Default.FormatQuote, contentDescription = "Quotes & Highlights Hub", tint = accentColor)
                         }
@@ -3626,14 +3569,38 @@ fun EpubReaderScreen(
                     )
                 }
 
-                LaunchedEffect(subPages.size, currentChapterIndex, useDualSpread) {
+                // Fix 3: Compute starting character offset of each subPage inside the chapter
+                val subPageCharOffsets = remember(subPages) {
+                    val offsets = IntArray(subPages.size)
+                    var running = 0
+                    for (i in subPages.indices) {
+                        offsets[i] = running
+                        running += subPages[i].length + 1
+                    }
+                    offsets.toList()
+                }
+
+                // Fix 3: Restore subPageIndex from saved character offset on open or font/layout reflow
+                LaunchedEffect(subPages, subPageCharOffsets, currentChapterIndex, useDualSpread) {
                     if (pendingReturnSubPage >= 0) {
-                        subPageIndex = pendingReturnSubPage.coerceIn(0, subPages.lastIndex.coerceAtLeast(0))
+                        val target = pendingReturnSubPage.coerceIn(0, subPages.lastIndex.coerceAtLeast(0))
+                        subPageIndex = if (useDualSpread) (target / 2) * 2 else target
                         pendingReturnSubPage = -1
+                        val charOff = subPageCharOffsets.getOrElse(subPageIndex) { 0 }
+                        activeCharOffset = charOff
+                        repository.saveEbookCharOffset(ebook.id, charOff)
                     } else if (startAtLastSubPage) {
                         val lastIdx = subPages.lastIndex.coerceAtLeast(0)
                         subPageIndex = if (useDualSpread) (lastIdx / 2) * 2 else lastIdx
                         startAtLastSubPage = false
+                        val charOff = subPageCharOffsets.getOrElse(subPageIndex) { 0 }
+                        activeCharOffset = charOff
+                        repository.saveEbookCharOffset(ebook.id, charOff)
+                    } else if (!isVisualPageMode && subPageCharOffsets.isNotEmpty()) {
+                        val savedOffset = activeCharOffset.coerceAtLeast(0)
+                        val matchedIdx = subPageCharOffsets.indexOfLast { it <= savedOffset }.coerceAtLeast(0)
+                        val alignedIdx = if (useDualSpread) (matchedIdx / 2) * 2 else matchedIdx
+                        subPageIndex = alignedIdx.coerceIn(0, subPages.lastIndex.coerceAtLeast(0))
                     } else if (subPageIndex > subPages.lastIndex) {
                         subPageIndex = subPages.lastIndex.coerceAtLeast(0)
                     }
@@ -3648,9 +3615,14 @@ fun EpubReaderScreen(
                     recordReadingActivity(prefs, pagesAdded = pageStep, minutesAdded = 0)
                     if (subPageIndex + pageStep < subPages.size) {
                         subPageIndex += pageStep
+                        val newOffset = subPageCharOffsets.getOrElse(subPageIndex) { 0 }
+                        activeCharOffset = newOffset
+                        repository.saveEbookProgress(ebook.id, currentChapterIndex, resolvedChapters.size.coerceAtLeast(1), newOffset)
                     } else if (currentChapterIndex + 1 < resolvedChapters.size) {
                         startAtLastSubPage = false
                         subPageIndex = 0
+                        activeCharOffset = 0
+                        repository.saveEbookCharOffset(ebook.id, 0)
                         onSelectChapter(currentChapterIndex + 1)
                     } else {
                         isTtsPlaying = false
@@ -3663,6 +3635,9 @@ fun EpubReaderScreen(
                     ttsSentenceIndex = 0
                     if (subPageIndex > 0) {
                         subPageIndex = (subPageIndex - pageStep).coerceAtLeast(0)
+                        val newOffset = subPageCharOffsets.getOrElse(subPageIndex) { 0 }
+                        activeCharOffset = newOffset
+                        repository.saveEbookProgress(ebook.id, currentChapterIndex, resolvedChapters.size.coerceAtLeast(1), newOffset)
                     } else if (currentChapterIndex > 0) {
                         startAtLastSubPage = true
                         onSelectChapter(currentChapterIndex - 1)
@@ -3714,6 +3689,8 @@ fun EpubReaderScreen(
                         startAtLastSubPage = false
                         pendingReturnSubPage = targetSubPage
                         subPageIndex = targetSubPage
+                        activeCharOffset = 0
+                        repository.saveEbookCharOffset(ebook.id, 0)
                         onSelectChapter(targetIdx)
                         curlAnim.snapTo(0f)
                     }
@@ -4253,7 +4230,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // [PRO] Hybrid TTS Read-Aloud Mini-Player Bar with Voice Selector
                 if (isTtsBarVisible && selectedPassageText == null) {
                     val currentSpokenLine = pageSentences.getOrNull(ttsSentenceIndex) ?: "Ready to read aloud"
                     Box(
@@ -4338,13 +4314,8 @@ fun EpubReaderScreen(
                                             }
                                         )
 
-                                        // [PRO] Narrator Voice Selector Button
                                         AssistChip(
-                                            onClick = {
-                                                ProFeatureManager.runIfPro(ProFeature.TTS_READ_ALOUD) {
-                                                    showVoicePickerDialog = true
-                                                }
-                                            },
+                                            onClick = { showVoicePickerDialog = true },
                                             leadingIcon = {
                                                 Icon(
                                                     Icons.Default.RecordVoiceOver,
@@ -4427,7 +4398,6 @@ fun EpubReaderScreen(
                     }
                 }
 
-                // Sleek In-Book Floating Selection Pill with Sentence-by-Sentence Picker!
                 val activePassage = selectedPassageText
                 if (activePassage != null) {
                     Box(
@@ -4491,7 +4461,6 @@ fun EpubReaderScreen(
 
                                 Spacer(Modifier.height(6.dp))
 
-                                // Interactive Sentence-by-Sentence Selector List
                                 if (passageSentences.size > 1) {
                                     Column(
                                         modifier = Modifier
@@ -4614,10 +4583,8 @@ fun EpubReaderScreen(
                                             onClick = {
                                                 val passageToShare = effectiveSelectedQuoteText
                                                 selectedPassageText = null
-                                                ProFeatureManager.runIfPro(ProFeature.QUOTE_CARDS) {
-                                                    saveHighlightForPassage(passageToShare, pendingHighlightColorHex)
-                                                    activeQuoteStudioPassage = passageToShare
-                                                }
+                                                saveHighlightForPassage(passageToShare, pendingHighlightColorHex)
+                                                activeQuoteStudioPassage = passageToShare
                                             },
                                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                                             modifier = Modifier.height(34.dp)
@@ -4737,7 +4704,6 @@ fun EpubReaderScreen(
         }
     }
 
-    // [PRO] Read-Aloud Narrator Voice Selector Dialog
     if (showVoicePickerDialog) {
         AlertDialog(
             onDismissRequest = { showVoicePickerDialog = false },
@@ -4848,13 +4814,15 @@ fun EpubReaderScreen(
 
     if (showQuotesHubSheet) {
         GlobalQuotesHubSheet(
-            prefs = prefs,
+            repository = repository,
             filterEbookId = ebook.id,
             onDismiss = { showQuotesHubSheet = false },
             onJumpToHighlight = { hl ->
                 showQuotesHubSheet = false
                 if (hl.ebookId == ebook.id && hl.chapterIndex in resolvedChapters.indices) {
                     subPageIndex = 0
+                    activeCharOffset = 0
+                    repository.saveEbookCharOffset(ebook.id, 0)
                     onSelectChapter(hl.chapterIndex)
                 }
             },
@@ -4926,6 +4894,8 @@ fun EpubReaderScreen(
                                         )
                                     }
                                     subPageIndex = 0
+                                    activeCharOffset = 0
+                                    repository.saveEbookCharOffset(ebook.id, 0)
                                     onSelectChapter(idx)
                                     showTocDialog = false
                                 }
@@ -5114,30 +5084,13 @@ fun EpubReaderScreen(
                 }
 
                 OutlinedButton(
-                    onClick = {
-                        ProFeatureManager.runIfPro(ProFeature.CUSTOM_THEMES) {
-                            showCustomThemeBuilder = !showCustomThemeBuilder
-                        }
-                    },
+                    onClick = { showCustomThemeBuilder = !showCustomThemeBuilder },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text(if (readerTheme == "CUSTOM") "Custom Hex Theme Active" else "Custom Theme Builder")
-                    Spacer(Modifier.width(8.dp))
-                    Surface(
-                        color = MaterialTheme.colorScheme.primary,
-                        shape = RoundedCornerShape(6.dp)
-                    ) {
-                        Text(
-                            text = "PRO",
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
                 }
 
                 if (showCustomThemeBuilder) {
@@ -5270,22 +5223,7 @@ fun EpubReaderScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text("2-Column Foldable Spread", fontWeight = FontWeight.SemiBold)
-                                            Spacer(Modifier.width(6.dp))
-                                            Surface(
-                                                color = MaterialTheme.colorScheme.primary,
-                                                shape = RoundedCornerShape(4.dp)
-                                            ) {
-                                                Text(
-                                                    text = "PRO",
-                                                    color = MaterialTheme.colorScheme.onPrimary,
-                                                    fontSize = 9.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                                                )
-                                            }
-                                        }
+                                        Text("2-Column Foldable Spread", fontWeight = FontWeight.SemiBold)
                                         Text(
                                             "Open-book 2-page spread when unfolded or in landscape",
                                             style = MaterialTheme.typography.bodySmall,
@@ -5295,10 +5233,8 @@ fun EpubReaderScreen(
                                     Switch(
                                         checked = dualPageSpreadEnabled,
                                         onCheckedChange = { enabled ->
-                                            ProFeatureManager.runIfPro(ProFeature.DUAL_PAGE_FOLDABLE) {
-                                                dualPageSpreadEnabled = enabled
-                                                prefs.edit().putBoolean("ebook_dual_page_spread", enabled).apply()
-                                            }
+                                            dualPageSpreadEnabled = enabled
+                                            prefs.edit().putBoolean("ebook_dual_page_spread", enabled).apply()
                                         }
                                     )
                                 }
@@ -5465,39 +5401,6 @@ fun EpubReaderScreen(
                 }
             }
         }
-    }
-
-    val lockedFeature = ProFeatureManager.activePaywallPromptFeature
-    if (lockedFeature != null) {
-        AlertDialog(
-            onDismissRequest = { ProFeatureManager.activePaywallPromptFeature = null },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.WorkspacePremium, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Fablewood Pro", fontWeight = FontWeight.Bold)
-                }
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(lockedFeature.title, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    Text(lockedFeature.description)
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    ProFeatureManager.setProStatus(true)
-                    ProFeatureManager.activePaywallPromptFeature = null
-                }) {
-                    Text("Unlock Pro")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { ProFeatureManager.activePaywallPromptFeature = null }) {
-                    Text("Not Now")
-                }
-            }
-        )
     }
 }
 
@@ -5837,7 +5740,6 @@ fun NowPlayingScreen(
                             Icon(Icons.Default.SkipPrevious, contentDescription = "Prev Chapter", modifier = Modifier.size(32.dp))
                         }
 
-                        // Symmetrical 15-Second Rewind Icon
                         IconButton(onClick = onQuickRewind, modifier = Modifier.size(48.dp)) {
                             SymmetricalSkipIcon(
                                 seconds = skipIntervalSeconds,
@@ -5857,7 +5759,6 @@ fun NowPlayingScreen(
                             )
                         }
 
-                        // Symmetrical 15-Second Fast-Forward Icon
                         IconButton(onClick = onQuickForward, modifier = Modifier.size(48.dp)) {
                             SymmetricalSkipIcon(
                                 seconds = skipIntervalSeconds,
@@ -5902,7 +5803,6 @@ fun NowPlayingScreen(
                             )
                         }
 
-                        // Alarm Clock Icon for Sleep Timer
                         IconButton(onClick = onOpenSleepMenu) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(
@@ -5953,7 +5853,6 @@ fun NowPlayingScreen(
                         }
                     }
 
-                    // Enlarged Cover Art in Spread Mode (280.dp)
                     TactileBookCover(
                         coverArt = coverArt,
                         fallbackIcon = Icons.Default.Headphones,
@@ -6065,7 +5964,6 @@ fun NowPlayingScreen(
                     )
                 }
 
-                // Enlarged Audiobook Cover Art (300.dp full screen / 250.dp embedded pane) to fill empty space!
                 TactileBookCover(
                     coverArt = coverArt,
                     fallbackIcon = Icons.Default.Headphones,
