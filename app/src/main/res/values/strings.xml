@@ -1,4 +1,6 @@
 <resources>
+    <color name="ic_launcher_background">#0C1A14</color>
+
     <string name="app_name">Fablewood</string>
     <string name="app_header_title">Fablewood Audiobooks</string>
     <string name="select_audiobook_folder">Select Audiobook Folder</string>
